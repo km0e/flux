@@ -1,0 +1,28 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+authors = ["Flux Contributors"]
+license = "MIT"
+repository = "https://github.com/example/flux"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+async-trait = "0.1"
+anyhow = "1"
+futures = "0.3"
+
+# Rig ecosystem
+rig-core = "0.39"
+schemars = "1.2"
+
+# MCP
+rmcp = { version = "1.7", features = ["client", "transport-child-process"] }

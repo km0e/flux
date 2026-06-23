@@ -1,0 +1,6 @@
+out/
+node_modules/
+*.vsix
+*.tsbuildinfo
+media/*.min.js
+media/marked.umd.js

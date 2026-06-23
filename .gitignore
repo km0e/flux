@@ -1,0 +1,27 @@
+# Rust
+/target
+**/*.rs.bk
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# Node / VSCode extension
+clients/vscode/node_modules
+clients/vscode/out
+clients/vscode/.vscode-test
+clients/vscode/*.tsbuildinfo
+*.vsix
+
+# Logs
+*.log
+docs/technology_evaluation_report.md
+
+# VSCode isolated extension testing
+.vscode-test/
+
+# Local server configuration
+flux.toml

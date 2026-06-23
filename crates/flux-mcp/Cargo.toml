@@ -1,0 +1,19 @@
+[package]
+name = "flux-mcp"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+rig-core = { workspace = true, features = ["rmcp"] }
+rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+tokio = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }

@@ -1,0 +1,27 @@
+[package]
+name = "flux-server"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "flux-server"
+path = "src/main.rs"
+
+[dependencies]
+flux-tools = { path = "../flux-tools" }
+flux-mcp = { path = "../flux-mcp" }
+rig-core = { workspace = true, features = ["rmcp"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+anyhow = { workspace = true }
+futures = { workspace = true }
+schemars = { workspace = true }
+toml = "0.8"
+clap = { version = "4", features = ["derive"] }
