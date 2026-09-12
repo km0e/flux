@@ -1,0 +1,66 @@
+// Agent skills management — installs into the GLOBAL skills dir
+// (`~/.flux/skills`, the only server-writable location; UI-added =
+// user-installed trusted content, the same tier as MCP servers). Skills
+// are pure filesystem content — the model's `skill_list` scans fresh per
+// call, so installs are IMMEDIATELY effective (no restart, nothing
+// persisted). Project skills live in the user's repository and are never
+// removed by the server. Every failure rides the inline `error` (D4').
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service SkillService {
+  // The installed skills, sorted by name — the global skills dir plus,
+  // when a chat id is given, that chat's workdir-local skills (read-only).
+  rpc ListSkills(ListSkillsRequest) returns (ListSkillsResponse);
+
+  // Install a skill: exactly one source — a local directory path OR a git
+  // URL (HTTP(S)/SSH) (the request's `source` oneof); `subpath` picks a
+  // directory inside a multi-skill repository. Name collisions fail
+  // without overwriting.
+  rpc AddSkill(AddSkillRequest) returns (AddSkillResponse);
+
+  // Remove a skill from the GLOBAL skills dir by name.
+  rpc RemoveSkill(RemoveSkillRequest) returns (RemoveSkillResponse);
+}
+
+message ListSkillsRequest {
+  // When present, the response also carries that chat's project skills.
+  optional string chat_id = 1;
+}
+
+message ListSkillsResponse {
+  repeated SkillSummary skills = 1;
+}
+
+message AddSkillRequest {
+  // Exactly one install source; `subpath` picks a directory inside a
+  // multi-skill repository (URL installs).
+  oneof source {
+    // A local directory path.
+    string path = 1;
+    // A git URL (HTTP(S)/SSH).
+    string url = 2;
+  }
+  optional string subpath = 3;
+}
+
+message AddSkillResponse {
+  // The installed name (present on success).
+  optional string name = 1;
+  // Missing source, invalid skill dir, git failure, name collision —
+  // all ride here, never a transport status (D4').
+  optional string error = 2;
+}
+
+message RemoveSkillRequest {
+  string name = 1;
+}
+
+message RemoveSkillResponse {
+  optional string name = 1;
+  // An unknown (or project-local) name rides here.
+  optional string error = 2;
+}

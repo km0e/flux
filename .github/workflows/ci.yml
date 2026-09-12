@@ -20,6 +20,11 @@ jobs:
         with:
           components: rustfmt, clippy
 
+      # flux-proto's build.rs compiles proto/ via prost-build, which shells
+      # out to the system protoc.
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
 
@@ -32,22 +37,54 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --tests -- -D warnings
 
-  vscode:
+      - name: Cache cargo-audit binary
+        id: cache-audit
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin/cargo-audit
+          key: cargo-audit-${{ runner.os }}
+
+      - name: Install cargo-audit
+        if: steps.cache-audit.outputs.cache-hit != 'true'
+        run: cargo install cargo-audit --locked
+
+      - name: Cargo audit
+        run: cargo audit
+
+  web:
     runs-on: ubuntu-latest
     steps:
+      # full history: buf breaking compares the contract against origin/main
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
-          cache-dependency-path: clients/vscode/package-lock.json
+          cache-dependency-path: clients/package-lock.json
 
-      - name: Install dependencies
-        working-directory: clients/vscode
+      - name: Install dependencies (npm workspaces)
+        working-directory: clients
         run: npm ci
 
-      - name: Compile extension
-        working-directory: clients/vscode
-        run: npm run compile
+      # The TS contracts are generated, never committed: lint + breaking +
+      # derive them here so every later step (tsc/test/build) sees fresh
+      # output and a stale checkout cannot ship a stale contract.
+      - name: Proto contract checks
+        working-directory: clients/web
+        run: npm run proto:check
+
+      - name: Typecheck
+        working-directory: clients/web
+        run: npx tsc --noEmit
+
+      - name: Run frontend tests
+        working-directory: clients/web
+        run: npm test
+
+      - name: Build the web UI
+        working-directory: clients/web
+        run: npm run build:fast

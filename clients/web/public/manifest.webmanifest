@@ -1,0 +1,19 @@
+{
+  "name": "Flux",
+  "short_name": "Flux",
+  "description": "A general-purpose coding agent — chat, files and terminals over WebSocket.",
+  "start_url": "/",
+  "scope": "/",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0c1013",
+  "theme_color": "#0c1013",
+  "icons": [
+    {
+      "src": "/assets/favicon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ]
+}

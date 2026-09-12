@@ -1,0 +1,1001 @@
+//! Control-plane integration tests: the provider pin lifecycle and the
+//! engine-rebuild flows (rebase / hot-swap / feature restart / parked
+//! sends), driven end-to-end through `ServerState`.
+
+use crate::manager::ServerState;
+use crate::ops::RebaseOutcome;
+use crate::ops::SwitchOutcome;
+use crate::test_util::{
+    DummyProvider, RecordingProvider, ScriptItem, ScriptedProvider, kinds, register, sess,
+    wait_for, wait_for_kind,
+};
+use flux_chat::ResolvedPin;
+use flux_core::{ChatStateKind, CoreError, Provider, Role, StreamChunk, ToolRegistry};
+use flux_proto::flux::v1::subscribe_response::Kind;
+use flux_store::Store;
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex as StdMutex};
+
+// ── provider pin + hot swap (instances, no registry) ────────────────────
+
+/// Sync condition helper: the chat has a live task whose round state is Idle.
+fn task_idle(state: &ServerState, cid: &str) -> bool {
+    state
+        .manager
+        .chats
+        .try_read()
+        .ok()
+        .and_then(|chats| {
+            chats.get(cid).map(|c| {
+                c.task
+                    .as_ref()
+                    .is_some_and(|t| t.handle.active_state() == ChatStateKind::Idle)
+            })
+        })
+        .unwrap_or(false)
+}
+
+async fn instance_state() -> (Arc<ServerState>, Arc<Store>) {
+    let store = Arc::new(Store::open_in_memory().await.unwrap());
+    let state = Arc::new(
+        ServerState::new(
+            Arc::from(""),
+            Arc::new(ToolRegistry::default()),
+            store.clone(),
+            HashMap::new(),
+            &|_, _| None,
+        )
+        .await
+        .unwrap(),
+    );
+    (state, store)
+}
+
+#[tokio::test]
+async fn provider_swap_applies_at_boundary_and_persists_pin() {
+    let begins = Arc::new(StdMutex::new(Vec::new()));
+    let pinned_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::once(vec![vec![
+        ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
+        ScriptItem::Chunk(Ok(StreamChunk::End {
+            finish_reason: None,
+        })),
+    ]]));
+    let swap_provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
+        opens: Arc::clone(&begins),
+    });
+    let (state, store) = instance_state().await;
+    register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: Arc::clone(&pinned_provider),
+                id: "pinned".into(),
+                model: "pinned-model".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+    assert_eq!(info.provider, "pinned");
+    assert_eq!(info.model, "pinned-model");
+
+    // Round 1 on the pinned provider.
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    wait_for(|| task_idle(&state, &cid)).await;
+
+    // Hot-swap to the recording provider with a model override (round over
+    // → applies now).
+    assert_eq!(
+        state
+            .switch_provider(
+                &sess(&state, "a").await,
+                &cid,
+                ResolvedPin {
+                    provider: swap_provider.clone(),
+                    id: "swap".into(),
+                    model: "custom".into(),
+                },
+            )
+            .await
+            .unwrap(),
+        SwitchOutcome::Ok
+    );
+    // The respawn began the swap provider over the live context (user
+    // "hi" + assistant "one"). The pin persists at REQUEST time (a truth
+    // source) — the begin is the respawn's landing proof, so wait for IT.
+    wait_for(|| begins.try_lock().map(|b| b.len() == 1).unwrap_or(false)).await;
+    {
+        let begins = begins.lock().unwrap();
+        assert_eq!(begins.len(), 1, "the swap provider began exactly once");
+        assert_eq!(begins[0].len(), 2);
+        assert_eq!(begins[0][0].role, Role::User);
+        assert_eq!(begins[0][1].role, Role::Assistant);
+    }
+    // The cache carries the swapped INSTANCE too: a respawn must land on
+    // the same provider the chat last ran on.
+    {
+        let chats = state.manager.chats.read().await;
+        let c = chats.get(&cid).unwrap();
+        assert!(c.provider.is_some(), "cache instance synced on swap");
+    }
+
+    // The pin persisted at request time (the truth source — durable even
+    // if the process died before the respawn).
+    assert_eq!(
+        store
+            .load_state(&cid)
+            .await
+            .unwrap()
+            .get("provider")
+            .map(String::as_str),
+        Some("swap")
+    );
+
+    // Round 2 streams through the swapped provider.
+    state
+        .send_message(&sess(&state, "a").await, &cid, "next".into())
+        .await
+        .unwrap();
+    // (the recording connection answers "on swap")
+
+    // Cache reflects the swap (ops syncs the cache labels AND instance at the request point).
+    let (cached_provider, cached_model) = {
+        let chats = state.manager.chats.read().await;
+        let c = chats.get(&cid).unwrap();
+        (c.provider_id.clone(), c.model.clone())
+    };
+    assert_eq!(cached_provider, "swap");
+    assert_eq!(cached_model, "custom");
+}
+
+#[tokio::test]
+async fn provider_swap_during_live_round_applies_at_wrap_up() {
+    let begins = Arc::new(StdMutex::new(Vec::new()));
+    let pinned_provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::once(vec![vec![
+        ScriptItem::Chunk(Ok(StreamChunk::Text("started".into()))),
+        ScriptItem::Chunk(Ok(StreamChunk::End {
+            finish_reason: None,
+        })),
+    ]]));
+    let swap_provider: Arc<dyn Provider> = Arc::new(RecordingProvider {
+        opens: Arc::clone(&begins),
+    });
+    let (state, store) = instance_state().await;
+    register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: Arc::clone(&pinned_provider),
+                id: "pinned".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id;
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    wait_for(|| task_idle(&state, &cid)).await;
+
+    // Swap while Idle: parks + applies before the next round. Round flow is
+    // never disturbed; the pin persists at the apply point.
+    assert_eq!(
+        state
+            .switch_provider(
+                &sess(&state, "a").await,
+                &cid,
+                ResolvedPin {
+                    provider: swap_provider,
+                    id: "swap".into(),
+                    model: String::new(),
+                },
+            )
+            .await
+            .unwrap(),
+        SwitchOutcome::Ok
+    );
+    wait_for(|| begins.try_lock().map(|b| !b.is_empty()).unwrap_or(false)).await;
+    assert_eq!(
+        store
+            .load_state(&cid)
+            .await
+            .unwrap()
+            .get("provider")
+            .map(String::as_str),
+        Some("swap")
+    );
+
+    // Lease gating: a non-holder cannot swap.
+    register(&state, "b").await;
+    assert_eq!(
+        state
+            .switch_provider(
+                &sess(&state, "b").await,
+                &cid,
+                ResolvedPin {
+                    provider: Arc::new(DummyProvider),
+                    id: "default".into(),
+                    model: String::new(),
+                },
+            )
+            .await
+            .unwrap(),
+        SwitchOutcome::Busy
+    );
+    // Unknown chat.
+    assert_eq!(
+        state
+            .switch_provider(
+                &sess(&state, "a").await,
+                "no-such",
+                ResolvedPin {
+                    provider: Arc::new(DummyProvider),
+                    id: "swap".into(),
+                    model: String::new(),
+                },
+            )
+            .await
+            .unwrap(),
+        SwitchOutcome::NotFound
+    );
+}
+
+// ── engine rebuild (the generic restart primitive) ──────────────────────
+
+fn staged_provider(scripts: Vec<crate::test_util::Script>) -> Arc<dyn Provider> {
+    Arc::new(ScriptedProvider::staged(scripts))
+}
+
+/// A full rebase cycle: the base persists at request time (durable truth),
+/// the notice announces it, the engine respawns ABOVE the base (the
+/// archived prefix never reaches the provider again), and a follow-up
+/// round runs on the rebuilt context.
+#[tokio::test]
+async fn rebase_persists_base_and_respawns_above_it() {
+    let begins = Arc::new(StdMutex::new(Vec::new()));
+    let (state, store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: staged_provider(vec![vec![vec![
+                    ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
+                    ScriptItem::Chunk(Ok(StreamChunk::End {
+                        finish_reason: None,
+                    })),
+                ]]]),
+                id: "pinned".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    // Round 1 on the staged provider (stage 0); the transcript persists
+    // before the wrap-up announces (ids 1, 2).
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|el| matches!(&el.kind, Some(Kind::StreamEnd(_))))
+    })
+    .await;
+
+    // Rebase to latest: the notice rides the request, the base persists.
+    assert_eq!(
+        state
+            .rebase_chat(&sess(&state, "a").await, &cid, None)
+            .await,
+        RebaseOutcome::Rebased(2)
+    );
+    let base: i64 = loop {
+        match store
+            .load_state(&cid)
+            .await
+            .unwrap()
+            .get(flux_chat::CONTEXT_BASE_KEY)
+            .and_then(|v| v.parse().ok())
+        {
+            Some(b) => break b,
+            None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+        }
+    };
+    assert_eq!(base, 2, "user + assistant archived (ids 1, 2)");
+
+    // The engine respawned (stage 1 is live now). Swap to a recording
+    // provider — its begin records the history the FRESH context loads:
+    // everything archived, the rebuilt context must be EMPTY.
+    state
+        .switch_provider(
+            &sess(&state, "a").await,
+            &cid,
+            ResolvedPin {
+                provider: Arc::new(RecordingProvider {
+                    opens: Arc::clone(&begins),
+                }),
+                id: "swap".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for(|| begins.try_lock().map(|b| !b.is_empty()).unwrap_or(false)).await;
+    let history = begins.lock().unwrap()[0].clone();
+    assert!(
+        history.is_empty(),
+        "the respawn must load only the context ABOVE the base, got {history:?}"
+    );
+
+    // A follow-up round runs on the rebuilt (empty) context.
+    state
+        .send_message(&sess(&state, "a").await, &cid, "next".into())
+        .await
+        .unwrap();
+    wait_for(|| begins.try_lock().map(|b| b.len() >= 2).unwrap_or(false)).await;
+    let pending = begins.lock().unwrap()[1].clone();
+    assert_eq!(
+        pending,
+        vec![flux_core::Message::user("next")],
+        "the live context carries only messages above the base"
+    );
+}
+
+/// A provider hot-swap rebuilds the engine IN PLACE: the swap re-begins
+/// the connection on the new provider over the live context (begin #2 on
+/// a live engine — no respawn, the task never dies), and the next round
+/// streams through the fresh connection.
+#[tokio::test]
+async fn provider_swap_rebegins_in_place_and_the_engine_stays_alive() {
+    let (state, _store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let old_provider = Arc::new(ScriptedProvider::staged(vec![vec![vec![
+        ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
+        ScriptItem::Chunk(Ok(StreamChunk::End {
+            finish_reason: None,
+        })),
+    ]]]));
+    let new_provider = Arc::new(ScriptedProvider::staged(vec![vec![vec![
+        ScriptItem::Chunk(Ok(StreamChunk::Text("two".into()))),
+        ScriptItem::Chunk(Ok(StreamChunk::End {
+            finish_reason: None,
+        })),
+    ]]]));
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: old_provider.clone(),
+                id: "old".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    // Round 1 runs on the OLD provider.
+    state
+        .send_message(&sess(&state, "a").await, &cid, "m1".into())
+        .await
+        .unwrap();
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|el| matches!(&el.kind, Some(Kind::TextDelta(t)) if t.delta == "one"))
+    })
+    .await;
+
+    // Hot-swap: the pin persists, the Rebuild carries the fresh instance,
+    // the gate fires at Idle, and the consumer re-begins IN PLACE.
+    state
+        .switch_provider(
+            &sess(&state, "a").await,
+            &cid,
+            ResolvedPin {
+                provider: new_provider.clone(),
+                id: "new".into(),
+                model: "m2".into(),
+            },
+        )
+        .await
+        .unwrap();
+    wait_for(|| new_provider.begin_count() == 1).await;
+
+    // The engine is ALIVE (no respawn) and the next round streams through
+    // the re-begun connection.
+    let chats = state.manager.chats.read().await;
+    let task = chats.get(&cid).unwrap().task.as_ref().unwrap();
+    assert!(!task.handle.is_done(), "the engine never dies for a swap");
+    drop(chats);
+    state
+        .send_message(&sess(&state, "a").await, &cid, "m2".into())
+        .await
+        .unwrap();
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|el| matches!(&el.kind, Some(Kind::TextDelta(t)) if t.delta == "two"))
+    })
+    .await;
+    let messages = store_messages(&state, &cid).await;
+    let user_texts: Vec<&str> = messages
+        .iter()
+        .filter(|m| m.role == Role::User)
+        .map(|m| m.content.as_str())
+        .collect();
+    assert_eq!(user_texts, vec!["m1", "m2"]);
+    assert_eq!(
+        old_provider.begin_count(),
+        1,
+        "the old engine was never respawned"
+    );
+}
+
+/// A round that produces NOTHING (the stream fails before any chunk)
+/// does not wedge the engine: the next send starts a fresh round (the
+/// kernel's turn queue runs turns in order regardless of how the previous
+/// one wrapped), and both user turns persist. Regression: under the old
+/// respawn+flush regime this shape hung the flush (and the session's
+/// frame pump with it) forever.
+#[tokio::test]
+async fn a_zero_commit_round_does_not_wedge_the_engine() {
+    let (state, _store) = instance_state().await;
+    let _recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                // Every round fails at the stream open: the user message
+                // commits (round start), then StreamEvent::Failed wraps the
+                // round with zero further commits.
+                provider: Arc::new(ScriptedProvider::replay(vec![vec![ScriptItem::Chunk(
+                    Err(CoreError::Provider("down".into())),
+                )]])),
+                id: "default".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    state
+        .send_message(&sess(&state, "a").await, &cid, "m1".into())
+        .await
+        .unwrap();
+    state
+        .send_message(&sess(&state, "a").await, &cid, "m2".into())
+        .await
+        .unwrap();
+
+    // Both turns persist — the second round started even though the first
+    // wrapped with nothing committed.
+    let started = std::time::Instant::now();
+    loop {
+        let texts: Vec<String> = store_messages(&state, &cid)
+            .await
+            .into_iter()
+            .filter(|m| m.role == Role::User)
+            .map(|m| m.content)
+            .collect();
+        if texts == vec!["m1".to_string(), "m2".to_string()] {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "turns never persisted: {texts:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+}
+
+async fn store_messages(state: &ServerState, cid: &str) -> Vec<flux_core::Message> {
+    state.store.load_messages(cid).await.unwrap()
+}
+
+/// R1 interrupt-send against a LIVE round: the fused pair (cancel + user
+/// turn) rides one FIFO, so the cancel wraps the hung round and the queued
+/// message starts the next round — stream_cancelled precedes the second
+/// stream_end, and both turns persist. The old two-request interject (a
+/// cancel RPC + a chat RPC whose order HTTP does not guarantee) is
+/// replaced by one ordered operation.
+#[tokio::test]
+async fn interrupt_send_cancels_the_live_round_and_runs_the_next() {
+    let (state, _store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                // ONE engine, TWO streams on its connection: stream 0 =
+                // round 1 (hangs — the cancel's victim), stream 1 = the
+                // interrupt-send's replacement round (the next open on the
+                // SAME engine; a second staged stage would only be
+                // consumed by a respawn).
+                provider: Arc::new(ScriptedProvider::once(vec![
+                    vec![
+                        ScriptItem::Chunk(Ok(StreamChunk::Text("started".into()))),
+                        ScriptItem::Hang,
+                    ],
+                    vec![
+                        ScriptItem::Chunk(Ok(StreamChunk::Text("replied".into()))),
+                        ScriptItem::Chunk(Ok(StreamChunk::End {
+                            finish_reason: None,
+                        })),
+                    ],
+                ])),
+                id: "pinned".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    // Round 1 goes live (its first delta reached the sink).
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    wait_for_kind(&recorded, "text_delta").await;
+
+    // ONE operation: cancel the live round + submit the message.
+    state
+        .send_message_interrupting(&sess(&state, "a").await, &cid, "next".into())
+        .await
+        .unwrap();
+
+    // Two stream ends: the cancelled round's wrap-up, then the replacement
+    // round's completion — with the cancellation notice between them.
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|el| matches!(&el.kind, Some(Kind::StreamEnd(_))))
+            .count()
+            >= 2
+    })
+    .await;
+    let kinds = kinds(&recorded.lock().unwrap());
+    let cancel_pos = kinds
+        .iter()
+        .position(|k| *k == "stream_cancelled")
+        .expect("the fused cancel must announce stream_cancelled");
+    let first_end_pos = kinds
+        .iter()
+        .position(|k| *k == "stream_end")
+        .expect("the cancelled round still wraps with stream_end");
+    assert!(
+        first_end_pos > cancel_pos,
+        "stream_cancelled must precede the wrap-up, got {kinds:?}"
+    );
+
+    // Both turns persisted: round 1's user message and the replacement
+    // round (its reply streamed from the connection's second stream).
+    let started = std::time::Instant::now();
+    loop {
+        let texts: Vec<String> = store_messages(&state, &cid)
+            .await
+            .into_iter()
+            .map(|m| (m.role, m.content))
+            .filter(|(r, _)| *r == Role::User)
+            .map(|(_, c)| c)
+            .collect();
+        if texts == vec!["hi".to_string(), "next".to_string()] {
+            break;
+        }
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "turns never persisted: {texts:?}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    assert!(
+        store_messages(&state, &cid)
+            .await
+            .iter()
+            .any(|m| m.role == Role::Assistant && m.content == "replied"),
+        "the replacement round ran to completion"
+    );
+}
+
+/// R1 interrupt-send against an IDLE engine: the cancel is absorbed (stale)
+/// and the message starts immediately — no stream_cancelled may reach the
+/// wire, and the round completes like a plain send.
+#[tokio::test]
+async fn interrupt_send_on_an_idle_engine_equals_a_plain_send() {
+    let (state, _store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: Arc::new(ScriptedProvider::once(vec![vec![
+                    ScriptItem::Chunk(Ok(StreamChunk::Text("replied".into()))),
+                    ScriptItem::Chunk(Ok(StreamChunk::End {
+                        finish_reason: None,
+                    })),
+                ]])),
+                id: "pinned".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    state
+        .send_message_interrupting(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    wait_for_kind(&recorded, "stream_end").await;
+
+    assert!(
+        !kinds(&recorded.lock().unwrap()).contains(&"stream_cancelled"),
+        "the stale cancel must be absorbed silently"
+    );
+    let msgs = store_messages(&state, &cid).await;
+    assert!(
+        msgs.iter()
+            .any(|m| m.role == Role::User && m.content == "hi")
+            && msgs
+                .iter()
+                .any(|m| m.role == Role::Assistant && m.content == "replied"),
+        "the round ran like a plain send"
+    );
+}
+
+/// The full feature cycle end-to-end through ServerState: feature_done
+/// ends the round, the consumer archives the context at the machine gate,
+/// rebuilds the engine IN PLACE, and injects the follow-up (the
+/// feature_done result) as the next feature's opening turn on the fresh
+/// connection.
+#[tokio::test]
+async fn feature_done_rebuilds_in_place_and_injects_the_follow_up() {
+    let (state, store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Feature,
+            ResolvedPin {
+                provider: staged_provider(vec![
+                    // Stage 0: the feature round ends with feature_done.
+                    vec![vec![
+                        ScriptItem::Chunk(Ok(StreamChunk::ToolCalls(vec![flux_core::ToolCall {
+                            id: "f1".into(),
+                            name: flux_core::FEATURE_DONE_TOOL.into(),
+                            arguments: r#"{"summary":"did the thing"}"#.into(),
+                        }]))),
+                        ScriptItem::Chunk(Ok(StreamChunk::End {
+                            finish_reason: None,
+                        })),
+                    ]],
+                    // Stage 1: the INJECTED round streams on the fresh engine.
+                    vec![vec![
+                        ScriptItem::Chunk(Ok(StreamChunk::Text("next feature".into()))),
+                        ScriptItem::Chunk(Ok(StreamChunk::End {
+                            finish_reason: None,
+                        })),
+                    ]],
+                ]),
+                id: "pinned".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    state
+        .send_message(&sess(&state, "a").await, &cid, "build it".into())
+        .await
+        .unwrap();
+
+    // Two stream ends: the feature round, then the INJECTED round.
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|el| matches!(&el.kind, Some(Kind::StreamEnd(_))))
+            .count()
+            >= 2
+    })
+    .await;
+    // The injected round streamed the second stage.
+    assert!(
+        recorded.lock().unwrap().iter().any(|el| {
+            matches!(&el.kind, Some(Kind::TextDelta(t)) if t.delta == "next feature")
+        }),
+        "the follow-up round streamed on the fresh engine"
+    );
+    // The context archived at the feature boundary (the feature round is
+    // ids 1–3); the injected round appended AFTER the base — live. The
+    // handoff cleared after the injection.
+    let state_map = store.load_state(&cid).await.unwrap();
+    let base: i64 = state_map
+        .get(flux_chat::CONTEXT_BASE_KEY)
+        .and_then(|v| v.parse().ok())
+        .expect("feature boundary archived the context");
+    assert_eq!(base, 3, "the feature round is fully archived");
+    assert!(
+        store.max_message_id(&cid).await.unwrap() > base,
+        "the injected round is live above the base"
+    );
+    // The injected turn persisted as the opening user message of the new
+    // feature (above the base).
+    let messages = store_messages(&state, &cid).await;
+    let injected = messages
+        .iter()
+        .filter(|m| m.role == flux_core::Role::User)
+        .any(|m| m.content.contains("did the thing"));
+    assert!(injected, "the feature_done result is the opening turn");
+}
+
+/// A rebase GCs the buffered outputs whose tool calls it archived: entries
+/// anchored below the new base die, entries above it survive — the model
+/// can only reference calls its live context still shows.
+#[tokio::test]
+async fn rebase_gcs_buf_entries_of_archived_calls() {
+    let (state, store) = instance_state().await;
+    let recorded = register(&state, "a").await;
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider: Arc::new(DummyProvider),
+                id: "default".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+
+    // Seed the transcript: user + tool result (call_old) — ids 1, 2 — and
+    // a buffered output for that call, plus one orphan (no call anywhere).
+    store
+        .append_messages(
+            &cid,
+            &[
+                flux_core::Message::user("hi"),
+                flux_core::Message::tool("call_old", "old result"),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .save_buf_entry(&cid, "call_old", "OLD OUTPUT")
+        .await
+        .unwrap();
+    store.save_buf_entry(&cid, "orphan", "junk").await.unwrap();
+
+    // Rebase to latest (base = 2): call_old is archived → its entry dies;
+    // the orphan dies with it. Nothing else exists yet.
+    assert_eq!(
+        state
+            .rebase_chat(&sess(&state, "a").await, &cid, None)
+            .await,
+        RebaseOutcome::Rebased(2)
+    );
+    // (the GC runs inside rebase_chat, before it returns — no wait needed)
+    assert!(
+        store
+            .load_buf_entry(&cid, "orphan")
+            .await
+            .unwrap()
+            .is_none(),
+        "the orphan has no live call either"
+    );
+
+    // A NEW call lands above the base (a fresh round): its entry survives
+    // a further rebase to the new latest.
+    store
+        .append_messages(
+            &cid,
+            &[
+                flux_core::Message::user("more"),
+                flux_core::Message::tool("call_live", "live result"),
+            ],
+        )
+        .await
+        .unwrap();
+    store
+        .save_buf_entry(&cid, "call_live", "LIVE OUTPUT")
+        .await
+        .unwrap();
+    // Rebase to above the OLD call only (base = 2): call_live (id 4) stays
+    // above the base — its entry must SURVIVE the GC. (A rebase-to-latest
+    // here would archive call_live itself and delete its entry — correct,
+    // but that path is already pinned above.)
+    assert_eq!(
+        state
+            .rebase_chat(&sess(&state, "a").await, &cid, Some(2))
+            .await,
+        RebaseOutcome::Rebased(2)
+    );
+    // The second rebase's notice announces the new base.
+    wait_for(|| {
+        recorded
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|el| matches!(&el.kind, Some(Kind::ContextRebased(_))))
+            .count()
+            >= 2
+    })
+    .await;
+    let base: i64 = store
+        .load_state(&cid)
+        .await
+        .unwrap()
+        .get(flux_chat::CONTEXT_BASE_KEY)
+        .and_then(|v| v.parse().ok())
+        .unwrap();
+    assert_eq!(base, 2, "the second rebase archived up to the old call");
+    assert_eq!(
+        store
+            .load_buf_entry(&cid, "call_live")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("LIVE OUTPUT"),
+        "the live call's entry survives the GC"
+    );
+}
+
+// ── send idempotency (client_msg_id dedup) ──────────────────────────────
+
+/// A resend carrying an already-accepted client_msg_id is absorbed as a
+/// Duplicate (no second turn enqueued); a fresh id or a different chat is
+/// unaffected. The window is per chat and survives engine rebuilds (it
+/// lives on the shell).
+#[tokio::test]
+async fn send_with_a_client_msg_id_dedups_resends() {
+    use crate::ops::SendOutcome;
+    let (state, _store) = instance_state().await;
+    register(&state, "a").await;
+    let provider: Arc<dyn Provider> = Arc::new(DummyProvider);
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider,
+                id: "pinned".into(),
+                model: "m".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.to_owned();
+
+    // First send with the key: accepted.
+    assert_eq!(
+        state
+            .send_message_idempotent(
+                &sess(&state, "a").await,
+                &cid,
+                "hi".into(),
+                false,
+                Some("key-1".into()),
+            )
+            .await
+            .unwrap(),
+        SendOutcome::Ok
+    );
+    // A resend with the SAME key: absorbed as a duplicate, never enqueued.
+    assert_eq!(
+        state
+            .send_message_idempotent(
+                &sess(&state, "a").await,
+                &cid,
+                "hi".into(),
+                false,
+                Some("key-1".into()),
+            )
+            .await
+            .unwrap(),
+        SendOutcome::Duplicate
+    );
+    // A fresh key is a new turn.
+    assert_eq!(
+        state
+            .send_message_idempotent(
+                &sess(&state, "a").await,
+                &cid,
+                "hi".into(),
+                false,
+                Some("key-2".into()),
+            )
+            .await
+            .unwrap(),
+        SendOutcome::Ok
+    );
+    // No key = no dedup (fire-once callers).
+    assert_eq!(
+        state
+            .send_message(&sess(&state, "a").await, &cid, "hi".into())
+            .await
+            .unwrap(),
+        SendOutcome::Ok
+    );
+
+    // The window is PER CHAT: the same key on another chat is a new turn.
+    let provider: Arc<dyn Provider> = Arc::new(DummyProvider);
+    let info2 = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c2",
+            "/tmp",
+            flux_core::ChatKind::Classic,
+            ResolvedPin {
+                provider,
+                id: "pinned".into(),
+                model: "m".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        state
+            .send_message_idempotent(
+                &sess(&state, "a").await,
+                &info2.chat_id,
+                "hi".into(),
+                false,
+                Some("key-1".into()),
+            )
+            .await
+            .unwrap(),
+        SendOutcome::Ok
+    );
+}

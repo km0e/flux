@@ -1,0 +1,52 @@
+// MCP launch-list management — the servers spawn as child processes at
+// SERVER START (no hot-apply): a successful add persists the row and takes
+// effect at the next restart; spawn failures keep the row for the next
+// start. Validation failures ride the inline `error` (D4').
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service McpService {
+  // The registered servers, sorted by id (env values redacted — keys only).
+  rpc ListServers(ListServersRequest) returns (ListServersResponse);
+
+  // Register an MCP server to spawn at server start. The list lives in
+  // the server database (the server has no config file).
+  rpc AddServer(AddServerRequest) returns (AddServerResponse);
+
+  // Remove a registered server (takes effect at the next restart).
+  rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
+}
+
+message ListServersRequest {}
+
+message ListServersResponse {
+  repeated McpServerSummary servers = 1;
+}
+
+message AddServerRequest {
+  string id = 1;
+  // Executable to run.
+  string command = 2;
+  // Each element is one argument.
+  repeated string args = 3;
+  // The environment block for the child process. The VALUES never leave
+  // the server after this call (summaries carry keys only).
+  map<string, string> env = 4;
+}
+
+message AddServerResponse {
+  string id = 1;
+  optional string error = 2;
+}
+
+message RemoveServerRequest {
+  string id = 1;
+}
+
+message RemoveServerResponse {
+  string id = 1;
+  optional string error = 2;
+}

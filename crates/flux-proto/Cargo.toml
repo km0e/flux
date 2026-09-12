@@ -1,0 +1,20 @@
+[package]
+name = "flux-proto"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+description = "Generated protobuf/tonic contracts for the flux wire protocol (P4 spike)"
+
+[dependencies]
+flux-core = { path = "../flux-core" }
+prost = "0.13"
+tonic = { version = "0.13", default-features = false, features = [
+    "codegen",
+    "prost",
+    "server",
+    "channel",
+] }
+
+[build-dependencies]
+tonic-build = "0.13"

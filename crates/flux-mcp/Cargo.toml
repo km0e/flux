@@ -6,14 +6,14 @@ authors.workspace = true
 license.workspace = true
 
 [dependencies]
-rig-core = { workspace = true, features = ["rmcp"] }
+flux-core = { path = "../flux-core" }
 rmcp = { workspace = true, features = ["client", "transport-child-process"] }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-anyhow = { workspace = true }
+async-trait = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true }

@@ -1,0 +1,17 @@
+[package]
+name = "flux-loop"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio-util = { workspace = true }
+flux-core = { path = "../flux-core" }
+tokio = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+async-trait = { workspace = true }

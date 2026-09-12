@@ -1,0 +1,20 @@
+[package]
+name = "flux-macros"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3", features = ["full", "extra-traits"] }
+quote = "1"
+proc-macro2 = "1"
+[dev-dependencies]
+flux-core = { path = "../flux-core" }
+tokio = { workspace = true, features = ["macros"] }
+serde_json = { workspace = true }
+serde = { workspace = true }
+async-trait = { workspace = true }

@@ -1,14 +1,16 @@
-# Build the Flux workspace (Rust release + VSCode extension).
+# Build the Flux workspace (Rust release + web UI).
 $ErrorActionPreference = "Stop"
 $repo = Split-Path -Parent $PSScriptRoot
 
 Write-Host "==> Building Rust workspace (release)..."
 cargo build --release --manifest-path "$repo\Cargo.toml"
 
-Write-Host "==> Installing/compiling VSCode extension..."
-Push-Location "$repo\clients\vscode"
+Write-Host "==> Building web UI (clients/web)..."
+Push-Location "$repo\clients"
 npm install
-npm run compile
+Pop-Location
+Push-Location "$repo\clients\web"
+npm run build
 Pop-Location
 
 Write-Host "==> Build complete."

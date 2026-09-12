@@ -1,0 +1,170 @@
+// Shared contract types for the flux.v1 wire surface.
+//
+// Every family file imports these; nothing here is family-specific. The
+// enums mirror the Rust contract layer (flux-core) one variant to one
+// value, UNSPECIFIED = 0 per buf's standard rules — never a meaningful
+// state.
+syntax = "proto3";
+
+package flux.v1;
+
+// How the context accumulates. UNSPECIFIED reads as classic (the server's
+// default for chats persisted before kind existed).
+enum ChatKind {
+  CHAT_KIND_UNSPECIFIED = 0;
+  // Full history accumulates for the model.
+  CHAT_KIND_CLASSIC = 1;
+  // feature-mode: `feature_done` fences a rebase-to-latest per feature.
+  CHAT_KIND_FEATURE = 2;
+}
+
+// The role of a chat message.
+enum Role {
+  ROLE_UNSPECIFIED = 0;
+  ROLE_SYSTEM = 1;
+  ROLE_USER = 2;
+  ROLE_ASSISTANT = 3;
+  ROLE_TOOL = 4;
+}
+
+// The authoritative round-state snapshot (delivered on subscription
+// replies and `chat_state` events).
+enum ChatStateKind {
+  CHAT_STATE_KIND_UNSPECIFIED = 0;
+  // No round in flight — the machine awaits a user message.
+  CHAT_STATE_KIND_IDLE = 1;
+  // A provider stream or tool batch is in flight.
+  CHAT_STATE_KIND_STREAMING = 2;
+}
+
+// The unified error-channel codes. Transport/infrastructure faults ride
+// gRPC status codes instead — these are the application-level codes the
+// UI renders (per D4').
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  // The provider endpoint failed (unreachable, bad key, non-2xx).
+  ERROR_CODE_PROVIDER_CONNECTION = 1;
+  // A tool execution failed.
+  ERROR_CODE_TOOL_EXECUTION = 2;
+  // Tool arguments failed to parse.
+  ERROR_CODE_INVALID_ARGUMENTS = 3;
+  // Another session holds the chat's lease — the operation is refused.
+  ERROR_CODE_CHAT_BUSY = 4;
+  // The chat id does not exist.
+  ERROR_CODE_CHAT_NOT_FOUND = 5;
+  // Default for a stream error without a specific mapping.
+  ERROR_CODE_STREAM_CRASHED = 6;
+  // A viewer dropped stream frames; reload history to resync.
+  ERROR_CODE_STREAM_GAP = 7;
+  // The request was malformed or out of order.
+  ERROR_CODE_INVALID_REQUEST = 8;
+  // Unexpected internal failure.
+  ERROR_CODE_INTERNAL = 9;
+}
+
+// One tool invocation recorded in a message's transcript.
+message ToolCall {
+  string id = 1;
+  string name = 2;
+  // Raw JSON arguments (the model's output, verbatim).
+  string arguments = 3;
+}
+
+// One transcript message. Round-trips the provider-facing shape exactly
+// (reasoning content must survive for tool-calling conversations).
+message Message {
+  Role role = 1;
+  string content = 2;
+  optional string reasoning_content = 3;
+  repeated ToolCall tool_calls = 4;
+  optional string tool_call_id = 5;
+  // The store row id — present on history snapshots so a client can name
+  // the message (e.g. as RebaseChatRequest.base_message_id or to
+  // correlate a context_rebased notice with a visible bubble). 0 on
+  // messages assembled outside persistence (provider input never carries
+  // it).
+  int64 id = 6;
+}
+
+// Summary of one conversation — the chats list / chat_created payload.
+message ChatInfo {
+  string chat_id = 1;
+  string name = 2;
+  // Store stamp format (`%Y-%m-%dT%H:%M:%SZ`, UTC).
+  string created_at = 3;
+  // Most recent message-append time — the sidebar's recency key.
+  string last_activity_at = 4;
+  // A session holds the chat's lease (marked "in use").
+  bool active = 5;
+  ChatKind kind = 6;
+  // The chat's working directory — its tools' sandbox boundary.
+  string workdir = 7;
+  // Pinned provider registry id.
+  string provider = 8;
+  // The resolved model string.
+  string model = 9;
+}
+
+// The model's question to the user (the `question` tool). Entirely
+// agent-produced; empty options = free-form input only.
+message QuestionPrompt {
+  string text = 1;
+  repeated string options = 2;
+}
+
+// One registered provider — a pure endpoint; NEVER the api_key, never a
+// model (the model is a per-chat pin).
+message ProviderSummary {
+  string id = 1;
+  // The effective base url (the management UI displays it).
+  string url = 2;
+}
+
+// One LOCAL saved model. The JSON fields are arbitrary JSON objects,
+// carried verbatim (string-encoded): the server parses them leniently and
+// preserves unknown keys — proto3 has no "open object" scalar that
+// round-trips byte-for-byte, and verbatim passthrough is the contract.
+message ModelSummary {
+  string provider = 1;
+  string model = 2;
+  // Editable request knobs (max_tokens/temperature/top_p; unknown keys
+  // preserved, ignored by the request builder).
+  string params_json = 3;
+  // The models.dev metadata snapshot — display-only, "{}" when unmatched.
+  string meta_json = 4;
+}
+
+// One probed upstream model. context_length is DEFENSIVELY parsed from
+// common non-standard extras (vLLM/Groq/OpenRouter); absent = the standard
+// payload carried none.
+message ModelCatalogEntry {
+  string id = 1;
+  optional uint64 context_length = 2;
+}
+
+// One registered MCP server — the launch triple EXCEPT the env values
+// (secrets parity with the provider api_key: only the KEYS leave).
+message McpServerSummary {
+  string id = 1;
+  string command = 2;
+  repeated string args = 3;
+  repeated string env_keys = 4;
+}
+
+// Where an installed skill lives.
+enum SkillSource {
+  SKILL_SOURCE_UNSPECIFIED = 0;
+  // User-installed into the global skills dir (removable).
+  SKILL_SOURCE_GLOBAL = 1;
+  // Lives in the chat workdir's repository (read-only here).
+  SKILL_SOURCE_PROJECT = 2;
+}
+
+// One installed skill in the UI's Skills dialog.
+message SkillSummary {
+  string name = 1;
+  string description = 2;
+  SkillSource source = 3;
+  // Whether the server can remove it (global entries only).
+  bool removable = 4;
+}

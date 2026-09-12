@@ -1,0 +1,12 @@
+# TS codegen from the proto/ single source. Generated files are NOT
+# committed — `clients/web` regenerates them at build/test time (the
+# prebuild/pretest npm hooks call gen:proto) and CI re-derives them, so a
+# stale checkout can never ship a stale contract.
+#
+# The Rust side stays on tonic-build (crates/flux-proto/build.rs, OUT_DIR)
+# — buf owns lint + TS; prost owns the Rust binding.
+version: v2
+plugins:
+  - local: protoc-gen-es
+    out: clients/web/src/gen
+    opt: target=ts

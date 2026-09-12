@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 41f83912515c0eb45990daa3a79a61e7f2a2f9ac30369f57e7981e1968f747d0 # shrinks to events = [UserMessage("hi")]
+cc c688b32b8c3a7adbf33eefc8ed9a96b7fa7ad17da20d4c7b088d3116d8f82089 # shrinks to events = [UserMessage("hi"), StreamChunk(ToolCall(ToolCall { id: "c1", name: "t", arguments: "{}" })), StreamChunk(End), ToolChecked { call: ToolCall { id: "c1", name: "t", arguments: "{}" }, outcome: Allowed({}) }, ToolChecked { call: ToolCall { id: "c1", name: "t", arguments: "{}" }, outcome: Allowed({}) }]

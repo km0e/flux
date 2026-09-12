@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <!-- viewport-fit=cover: the layout reaches the screen edges; safe-area
+         insets are consumed by the shell (top bar, drawer, dock, composer).
+         interactive-widget=resizes-content: Chrome Android shrinks the
+         layout viewport for the keyboard (iOS is handled by the
+         visualViewport hook in core/viewport.ts). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content"
+    />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f5" />
+    <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c1013" />
+    <!-- Installable as a standalone web app. No service worker on purpose:
+         the app is bound to its server (WS + all data) — offline caching
+         only risks serving stale hashed assets. -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="Flux" />
+    <!-- The brand icon (the VSCode-era logo) rides /assets like any other
+         static asset; the unhashed name is acceptable for a mark whose
+         content never changes. -->
+    <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg" />
+    <title>Flux</title>
+    <script>
+      // Theme bootstrap: apply the stored choice before first paint to
+      // avoid a light/dark flash. Kept inline + tiny on purpose.
+      try {
+        var t = localStorage.getItem('flux.theme');
+        if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t;
+      } catch (e) {}
+    </script>
+  </head>
+  <!-- The WS endpoint is derived from the page origin (same-origin /ws on
+       the port that served this page) — no injected config needed. -->
+    <div id="app"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

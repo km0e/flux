@@ -1,0 +1,29 @@
+[package]
+name = "flux-session"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+flux-core = { path = "../flux-core" }
+flux-proto = { path = "../flux-proto" }
+flux-chat = { path = "../flux-chat" }
+flux-store = { path = "../flux-store" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true }
+tempfile = { workspace = true }
+sqlx = { workspace = true }
+futures = { workspace = true }
+# The scripted provider/connection fakes live in flux-core behind its
+# `test-util` feature (they fake flux-core traits; both planes share them).
+flux-core = { path = "../flux-core", features = ["test-util"] }

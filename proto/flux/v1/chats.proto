@@ -1,0 +1,214 @@
+// The conversation family — chat lifecycle, user turns, and the
+// lease/viewer semantics.
+//
+// Ordering: the history/state snapshots ride the identity's SINK — a
+// single delivery point, never duplicated into these unary responses.
+// During the dual-stack period the sink is the WS connection; once the
+// event plane owns the identity (R3), the sink IS the Subscribe stream
+// (the `chat_history` / `chat_state` stream elements), so snapshot and
+// events are always ordered on one channel by construction.
+//
+// Lease semantics (server-enforced): the lease holder sends messages,
+// cancels, answers questions, deletes, renames, switches providers; every
+// lease-gated RPC from a non-holder is refused with a transport-level
+// FAILED_PRECONDITION (an unknown chat is NOT_FOUND). ClaimChat itself
+// never refuses: claiming a chat another session holds STEALS the lease,
+// and the previous holder is demoted in-band via `error{chat_busy}` on
+// its own stream (so its client degrades to a read-only viewer). A
+// disconnect detaches; leases survive the grace window for adoption on
+// the stream open.
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service ChatService {
+  // Create a conversation: persists immediately, grants lease +
+  // subscription to the caller, lazily spawns the engine on first message.
+  // provider and model are REQUIRED — providers are pure endpoints and
+  // carry no model of their own.
+  rpc CreateChat(CreateChatRequest) returns (CreateChatResponse);
+
+  // All conversations, ordered by last activity (the sidebar's key).
+  rpc ListChats(ListChatsRequest) returns (ListChatsResponse);
+
+  // Open in VIEW mode: subscribe to the live stream, no lease. Idempotent
+  // for an already-subscribed viewer (the history snapshot is skipped).
+  rpc OpenChat(OpenChatRequest) returns (OpenChatResponse);
+
+  // Take the lease (implies subscription). Claiming a chat another
+  // session holds STEALS the lease: the previous holder is demoted
+  // in-band (`error{chat_busy}`), the claimant becomes the operator
+  // watching the live round. Re-claim by the owner (a resumed identity)
+  // refreshes the snapshot and keeps the lease (`already_owned`).
+  rpc ClaimChat(ClaimChatRequest) returns (ClaimChatResponse);
+
+  // Fully exit a chat: unsubscribe AND release the lease if held.
+  rpc CloseChat(CloseChatRequest) returns (CloseChatResponse);
+
+  // Delete a conversation (cascades: messages, state, buffered outputs).
+  rpc DeleteChat(DeleteChatRequest) returns (DeleteChatResponse);
+
+  // Rename a conversation.
+  rpc RenameChat(RenameChatRequest) returns (RenameChatResponse);
+
+  // Submit a user turn. The turn is QUEUED (never dropped) — while a
+  // round runs it starts when the current round wraps. Events flow on the
+  // Subscribe stream; the response is the acceptance ack.
+  rpc SendMessage(SendMessageRequest) returns (SendMessageResponse);
+
+  // Cancel the current assistant round. A cancel is just another queue
+  // event; stale cancels are absorbed in every state.
+  rpc CancelRound(CancelRoundRequest) returns (CancelRoundResponse);
+
+  // Restart from a message: rebuild the conversation context to live
+  // only above `base_message_id`, archiving everything at/below it.
+  // Absent = rebase to the latest message. The client sends CancelRound
+  // first and waits for the round wrap-up, so the machine is idle when
+  // this lands. The response echoes the ACTUAL rebase point (the
+  // context_rebased stream event carries the same value).
+  rpc RebaseChat(RebaseChatRequest) returns (RebaseChatResponse);
+
+  // Hot-swap the conversation's provider/model. The swap NEVER interrupts
+  // a live round: it applies at the current or next round boundary, where
+  // the session is rebuilt over the persisted live context. Validation
+  // failures (unknown provider id, empty model) ride the response's
+  // inline `error` (D4'); only the lease gate rides transport statuses.
+  rpc SwitchProvider(SwitchProviderRequest) returns (SwitchProviderResponse);
+
+  // Answer the model's `question` tool (the lease holder only). Stale or
+  // unknown ids are dropped silently — same semantics as the WS frame.
+  rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
+}
+
+message CreateChatRequest {
+  string name = 1;
+  string workdir = 2;
+  // UNSPECIFIED reads as classic (the server default).
+  ChatKind kind = 3;
+  // Pin the chat to a registered provider (registry id). REQUIRED.
+  string provider = 4;
+  // Pin the model. REQUIRED.
+  string model = 5;
+}
+
+message CreateChatResponse {
+  // The created conversation (absent when `error` is set).
+  ChatInfo chat = 1;
+  // Validation failures (empty workdir, unknown provider id, model
+  // required) ride inline — request-scoped, never a transport status (D4').
+  optional string error = 2;
+}
+
+message ListChatsRequest {}
+
+message ListChatsResponse {
+  repeated ChatInfo chats = 1;
+}
+
+message OpenChatRequest {
+  string chat_id = 1;
+}
+
+message OpenChatResponse {}
+
+message ClaimChatRequest {
+  string chat_id = 1;
+}
+
+message ClaimChatResponse {
+  // True when the caller already owned the lease (a resumed identity
+  // re-claiming): the snapshot refreshes, the lease is untouched.
+  bool already_owned = 1;
+}
+
+message CloseChatRequest {
+  string chat_id = 1;
+}
+
+message CloseChatResponse {}
+
+message DeleteChatRequest {
+  string chat_id = 1;
+}
+
+message DeleteChatResponse {}
+
+message RenameChatRequest {
+  string chat_id = 1;
+  string name = 2;
+}
+
+message RenameChatResponse {}
+
+message SendMessageRequest {
+  string chat_id = 1;
+  string message = 2;
+  // R1 interrupt-send: cancel the live round AND submit this message as
+  // the next one, fused into ONE operation. Server-side both inputs ride
+  // the kernel's FIFO back-to-back under the chats lock, so the interject
+  // order (cancel-first — the machine's documented assumption) holds by
+  // construction and the ordering of independent HTTP requests stops
+  // mattering. The cancel keeps the kernel's "stop means stop" discipline:
+  // a newer interrupt-send supersedes an older one, and an explicit cancel
+  // after an interrupt-send kills the queued turn. On an Idle engine the
+  // cancel is absorbed and the message starts immediately (equals a plain
+  // send). Absent/false = plain send (a mid-round plain send still queues
+  // in the machine's turn queue).
+  bool interrupt = 3;
+  // Client-generated idempotency key (a uuid per user intent). A resend
+  // carrying an id the chat already accepted is absorbed as a duplicate
+  // (the ack carries `duplicate: true`, no second turn is enqueued) — a
+  // client retry after an ambiguous timeout can never double-submit the
+  // turn. Absent = no dedup (fire-once callers).
+  optional string client_msg_id = 4;
+}
+
+message SendMessageResponse {
+  // True when the request carried an already-accepted `client_msg_id` —
+  // the turn was NOT enqueued again.
+  bool duplicate = 1;
+}
+
+message CancelRoundRequest {
+  string chat_id = 1;
+}
+
+message CancelRoundResponse {}
+
+message RebaseChatRequest {
+  string chat_id = 1;
+  // Absent = rebase to the latest message (an auto-restart from the
+  // current top).
+  optional int64 base_message_id = 2;
+}
+
+message RebaseChatResponse {
+  // The actual rebase point the server landed on.
+  optional int64 base_message_id = 1;
+}
+
+message SwitchProviderRequest {
+  string chat_id = 1;
+  // The provider registry id — unknown ids are refused.
+  string provider = 2;
+  // REQUIRED (no defaults exist to imply).
+  string model = 3;
+}
+
+message SwitchProviderResponse {
+  // Validation failures (unknown provider id) ride inline —
+  // request-scoped, never a transport status (D4').
+  optional string error = 1;
+}
+
+message AnswerQuestionRequest {
+  string chat_id = 1;
+  // Pairs the answer with the question tool call.
+  string id = 2;
+  // The chosen option text or a free-form reply.
+  string answer = 3;
+}
+
+message AnswerQuestionResponse {}

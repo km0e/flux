@@ -10,18 +10,73 @@ name = "flux-server"
 path = "src/main.rs"
 
 [dependencies]
+bytes = "1"
+flux-core = { path = "../flux-core" }
+flux-provider = { path = "../flux-provider" }
 flux-tools = { path = "../flux-tools" }
 flux-mcp = { path = "../flux-mcp" }
-rig-core = { workspace = true, features = ["rmcp"] }
+flux-store = { path = "../flux-store" }
+flux-chat = { path = "../flux-chat" }
+flux-session = { path = "../flux-session" }
+flux-loop = { path = "../flux-loop" }
+# P4 spike — generated wire contracts (proto/ is the single source)
+flux-proto = { workspace = true }
+# gRPC-Web plane: tonic provides the service plumbing (no transport — the
+# services mount into axum); tonic-web adapts them to the browser's
+# HTTP/1.1 gRPC-Web framing.
+tonic = { version = "0.13", default-features = false, features = [
+    "codegen",
+    "prost",
+    "server",
+] }
+tonic-web = "0.13"
+tokio-stream = "0.1"
+# 0.3.1 minimum: the kill path relies on `PtyCtl::kill` (absent in
+# 0.3.0 — there the default impl returns Unsupported at runtime) and the
+# Windows env-block fix (CREATE_UNICODE_ENVIRONMENT) — this server always
+# passes a custom env (TERM/COLORTERM), which 0.3.0 failed to spawn with.
+e4pty = "0.3.1"
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = { workspace = true }
-thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
-futures = { workspace = true }
-schemars = { workspace = true }
-toml = "0.8"
+async-trait = { workspace = true }
+toml = "1.1"
 clap = { version = "4", features = ["derive"] }
+reqwest = { workspace = true }
+futures-util = "0.3"
+uuid = { workspace = true }
+# Single HTTP transport: /ws upgrade + the browser UI static site. axum owns
+# HTTP/WS semantics; tower-http owns static-file serving (MIME, conditional
+# requests, HEAD) and on-the-fly gzip (assets are immutable-cached, so
+# compression cost lands on cold loads only).
+axum = { version = "0.8", default-features = false, features = [
+    "http1",
+    "query",
+    "tokio",
+    "ws",
+] }
+tower = { version = "0.5", default-features = false }
+tower-http = { version = "0.7", default-features = false, features = [
+    "fs",
+    "compression-gzip",
+    "set-header",
+] }
+
+[dev-dependencies]
+sha2 = "0.10"
+base64 = "0.22"
+tokio = { workspace = true }
+serde_json = { workspace = true }
+futures = { workspace = true }
+tempfile = { workspace = true }
+# spike tests drive scripted providers through ServerState (in-process)
+flux-core = { path = "../flux-core", features = ["test-util"] }
+# e2e WS client (the server side is axum's ws feature)
+tokio-tungstenite = "0.30"
+# web.rs router tests drive the service directly (oneshot)
+tower = { version = "0.5", features = ["util"] }
+# gzip decode assertion in web.rs tests
+flate2 = "1"

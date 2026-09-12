@@ -1,0 +1,194 @@
+// The session-scoped event plane — ONE server-streaming Subscribe call per
+// connection multiplexes every chat's events plus the global broadcasts.
+//
+// Identity (R3): the stream IS the session lifecycle anchor — opening it
+// attaches the identity (the request's `session_id` adopts a previous
+// identity, absent mints a fresh one) and the first frame carries the
+// authoritative token plus the leases it holds (`ready`). The session
+// detaches when the stream closes; the grace window / reaper machinery is
+// unchanged mechanically. In-stream keepalive frames mark the connection
+// live — a client-side deadline on them detects a half-open connection.
+// ADOPTION DOES NOT RE-DELIVER SNAPSHOTS: a re-adopting client (a
+// reconnect) must re-claim/re-open the chats it renders — that is the
+// resync path; elements produced while the stream was down are lost (the
+// sink died with it), and only a fresh snapshot re-slots the ordering.
+//
+// Ordering (R2): `chat_seq` is the per-chat monotonic sequence that
+// reconciles stream elements against the claim/open unary snapshots
+// (drop elements strictly BELOW the snapshot's seq). Session-level events
+// (ready, keepalive, global broadcasts) carry chat_seq = 0 and an empty
+// chat_id.
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service EventService {
+  // Open the session's event stream. First frame is always `ready`
+  // (identity mint/resume result); events follow until the client
+  // cancels the call or the server closes it. The stream element is
+  // named per the standard RPC-response rule (SubscribeResponse), not
+  // "Event" — the contract keeps buf's STANDARD lint as the authority.
+  rpc Subscribe(SubscribeRequest) returns (stream SubscribeResponse);
+}
+
+message SubscribeRequest {
+  // A resume token to adopt (page refresh / reconnect). Absent = mint a
+  // fresh identity; the ready frame always carries the authoritative id.
+  optional string session_id = 1;
+}
+message SubscribeResponse {
+  // Per-chat monotonic sequence (R2). Session-level events carry 0.
+  uint64 chat_seq = 1;
+  // The owning chat; empty for session-level events (ready, broadcasts).
+  string chat_id = 2;
+  oneof kind {
+    Ready ready = 3;
+    // Server-injected liveness mark — carries no state. The client's
+    // frame deadline keys on ANY element (keepalive included) to detect
+    // a half-open connection (the WS ping/pong role on this plane).
+    Keepalive keepalive = 23;
+    TextDelta text_delta = 4;
+    // Unified error-channel events (the legacy WS `error` frame).
+    ErrorEvent error = 5;
+    ReasoningDelta reasoning_delta = 6;
+    Usage usage = 7;
+    ToolStart tool_start = 8;
+    ToolResult tool_result = 9;
+    // A tool call the model is still FORMING — emitted the moment the
+    // call's identity (id + name) is parsed from the provider stream, and
+    // optionally per argument fragment while the arguments stream in. The
+    // ToolStart/ToolResult pair supersedes it; a preview that never
+    // upgrades (cancel / truncation) is voided by the client at round end.
+    // Never persisted — ephemeral forward signaling.
+    ToolCallPreview tool_call_preview = 24;
+    QuestionRequired question_required = 10;
+    StreamEnd stream_end = 11;
+    StreamCancelled stream_cancelled = 12;
+    ChatState chat_state = 13;
+    // The history/state snapshot delivered through the identity's sink —
+    // the sink IS this stream, so a snapshot and the events it must be
+    // reconciled against are ordered on one channel by construction.
+    ChatHistory chat_history = 22;
+    ContextRebased context_rebased = 14;
+    ProviderSwitched provider_switched = 15;
+    // ── Global broadcasts (session-level) ──
+    ChatsBroadcast chats = 16;
+    ChatCreated chat_created = 17;
+    ProvidersBroadcast providers = 18;
+    ModelsBroadcast models = 19;
+    McpServersBroadcast mcp_servers = 20;
+    SkillsBroadcast skills = 21;
+  }
+}
+
+message Ready {
+  // The authoritative identity for this stream (fresh or adopted).
+  string session_id = 1;
+  // The chats whose lease the identity holds after the attach (empty on
+  // a fresh mint). The resume handshake collapsed into this frame — the
+  // stream open IS the adoption.
+  repeated string leases = 2;
+}
+
+message Keepalive {}
+
+message TextDelta {
+  string delta = 1;
+}
+
+message ReasoningDelta {
+  string delta = 1;
+}
+
+message Usage {
+  uint32 prompt_tokens = 1;
+  uint32 completion_tokens = 2;
+  uint32 cached_tokens = 3;
+}
+
+message ToolStart {
+  string id = 1;
+  string name = 2;
+  // Raw JSON arguments, verbatim.
+  string arguments = 3;
+}
+
+message ToolCallPreview {
+  string id = 1;
+  // Present only on the identity event (first emission for this call).
+  optional string name = 2;
+  // Present on argument-fragment events: the verbatim raw-JSON fragment.
+  optional string arguments_delta = 3;
+}
+
+message ToolResult {
+  string id = 1;
+  string result = 2;
+}
+
+message QuestionRequired {
+  // Pairs the question with its tool call (the answer references it).
+  string id = 1;
+  QuestionPrompt question = 2;
+}
+
+message StreamEnd {
+  // Present only when the provider reported an abnormal end ("length" /
+  // "content_filter" — a truncated answer).
+  optional string finish_reason = 1;
+}
+
+message StreamCancelled {}
+
+message ChatState {
+  // The authoritative round-state snapshot (UNSPECIFIED never occurs —
+  // the server always sets the machine's state).
+  ChatStateKind state = 1;
+}
+
+message ChatHistory {
+  repeated Message messages = 1;
+}
+
+message ContextRebased {
+  // The context now lives only above this message id.
+  int64 base_message_id = 1;
+}
+
+message ProviderSwitched {
+  string provider = 1;
+  string model = 2;
+}
+
+message ErrorEvent {
+  ErrorCode code = 1;
+  string message = 2;
+}
+
+// ── Global broadcast payloads (session-level; chat_seq = 0) ────────────────
+
+message ChatsBroadcast {
+  repeated ChatInfo chats = 1;
+}
+
+message ChatCreated {
+  ChatInfo chat = 1;
+}
+
+message ProvidersBroadcast {
+  repeated ProviderSummary providers = 1;
+}
+
+message ModelsBroadcast {
+  repeated ModelSummary models = 1;
+}
+
+message McpServersBroadcast {
+  repeated McpServerSummary servers = 1;
+}
+
+message SkillsBroadcast {
+  repeated SkillSummary skills = 1;
+}

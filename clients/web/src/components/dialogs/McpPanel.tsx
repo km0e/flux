@@ -1,0 +1,441 @@
+/**
+ * McpPanel — the MCP launch list's management section of the Settings
+ * dialog.
+ *
+ * The list lives in the server database (the server has no config file);
+ * a mutation is persist-first and applied LIVE: the server spawns the
+ * child, registers its tools, and rebuilds the running conversation
+ * engines so every chat's next round sees the fresh tool set (a live
+ * round finishes first — a spawn failure rides the ack inline while the
+ * row stays and is retried at the next server start). Summaries carry
+ * env KEYS only — values never leave the server; editing an entry =
+ * delete + re-add.
+ *
+ * Desktop: master-detail — a selection rail (a persistent "+ New server"
+ * row above the entries) and a detail pane that either previews the
+ * selected entry (launch line, env keys, the restart footnote, remove)
+ * or carries the creation form with the full explanation. Mobile keeps
+ * the stacked layout (hint, notice, rows with inline actions, form). The
+ * form draft lives at panel level, so switching the selection never
+ * loses a half-typed entry; after a successful add the new entry is
+ * auto-selected once its broadcast lands.
+ *
+ * Presentation shares the integration-ui building blocks with
+ * ProvidersPanel / SkillsPanel — one typography scale and spacing rhythm.
+ *
+ * Provides: McpPanel
+ * Depends: core/state.ts, services/mcp.ts, hooks/useIsMobile.ts,
+ *          components/ui/*, components/dialogs/integration-ui.tsx
+ */
+import { useEffect, useRef, useState } from 'react';
+import { Trash2 } from 'lucide-react';
+import { useFlux } from '../../core/state';
+import { addMcpServer, fetchMcpServers, removeMcpServer } from '../../services/mcp';
+import { useIsMobile } from '../../hooks/useIsMobile';
+import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
+import {
+  DetailPane,
+  DialogHint,
+  EmptyState,
+  FormArea,
+  FormField,
+  MasterDetail,
+  NewRailButton,
+  NoticeBar,
+  Rail,
+  RailButton,
+  RowShell,
+  RowSub,
+  RowTitle,
+  SectionLabel,
+} from './integration-ui';
+
+/** Parse a "one per line" textarea into a trimmed non-empty list. */
+function parseLines(text: string): string[] {
+  return text
+    .split('\n')
+    .map((l) => l.trim())
+    .filter(Boolean);
+}
+
+/** Parse "KEY=VALUE" lines into an env object; returns an error string for
+ * a malformed line instead of an entry. */
+function parseEnv(text: string): { env: Record<string, string>; error?: string } {
+  const env: Record<string, string> = {};
+  for (const line of parseLines(text)) {
+    const eq = line.indexOf('=');
+    if (eq <= 0) return { env, error: `malformed line (expected KEY=VALUE): ${line}` };
+    env[line.slice(0, eq).trim()] = line.slice(eq + 1).trim();
+  }
+  return { env };
+}
+
+/** The creation form — shared verbatim by the desktop detail pane and the
+ * mobile stacked layout. */
+function McpForm(props: {
+  id: string;
+  command: string;
+  argsText: string;
+  envText: string;
+  adding: boolean;
+  canAdd: boolean;
+  addError: string | null;
+  setId: (v: string) => void;
+  setCommand: (v: string) => void;
+  setArgsText: (v: string) => void;
+  setEnvText: (v: string) => void;
+  onSubmit: () => void;
+}): React.ReactElement {
+  return (
+    <form
+      className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (props.canAdd) props.onSubmit();
+      }}
+    >
+      <SectionLabel>Add MCP server</SectionLabel>
+      <div className="flex gap-2 max-md:flex-col">
+        <FormField label="Id" hint="e.g. filesystem" className="flex-1">
+          <TextField value={props.id} onChange={(e) => props.setId(e.target.value)} placeholder="filesystem" />
+        </FormField>
+        <FormField label="Command" hint="the executable to spawn" className="flex-[1.8]">
+          <TextField
+            value={props.command}
+            onChange={(e) => props.setCommand(e.target.value)}
+            placeholder="npx"
+            className="font-mono text-sm"
+          />
+        </FormField>
+      </div>
+      <FormField label="Arguments" hint="one per line">
+        <FormArea
+          aria-label="Arguments"
+          rows={4}
+          placeholder={'-y\n@modelcontextprotocol/server-filesystem\n/path/to/workspace'}
+          value={props.argsText}
+          onChange={(e) => props.setArgsText(e.target.value)}
+        />
+      </FormField>
+      <FormField label="Environment" hint="KEY=VALUE per line — values stored, never shown back">
+        <FormArea
+          aria-label="Environment"
+          rows={3}
+          placeholder="SOME_VAR=value"
+          value={props.envText}
+          onChange={(e) => props.setEnvText(e.target.value)}
+        />
+      </FormField>
+      {props.addError && <span className="text-2xs break-all text-danger">{props.addError}</span>}
+      <div className="flex justify-end">
+        <Button variant="primary" type="submit" disabled={!props.canAdd}>
+          {props.adding ? <Spinner /> : null}
+          Add server
+        </Button>
+      </div>
+    </form>
+  );
+}
+
+/** Mobile row: compact, with the inline actions the stacked layout needs. */
+function McpRow(props: {
+  id: string;
+  command: string;
+  args: string[];
+  envKeys: string[];
+  onRemove: () => Promise<string | undefined>;
+}): React.ReactElement {
+  const [confirming, setConfirming] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  const launch = [props.command, ...props.args].join(' ');
+  return (
+    <RowShell>
+      <div className="flex items-center gap-2">
+        <RowTitle>{props.id}</RowTitle>
+        {props.envKeys.map((k) => (
+          <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
+            {k}
+          </Badge>
+        ))}
+        {confirming ? (
+          <>
+            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
+              if (error) {
+                setRemoveError(error);
+                setConfirming(false);
+              }
+            })}>
+              Confirm
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
+              Keep
+            </Button>
+          </>
+        ) : (
+          <IconButton
+            label={`Remove ${props.id}`}
+            className="size-7 hover:text-danger"
+            onClick={() => setConfirming(true)}
+          >
+            <Trash2 size={13} />
+          </IconButton>
+        )}
+      </div>
+      <RowSub title={launch}>{launch}</RowSub>
+      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
+    </RowShell>
+  );
+}
+
+/** Desktop detail: the selected entry's preview. Keyed by id so the
+ * two-step confirm state resets per selection. */
+function McpPreview(props: {
+  id: string;
+  onRemove: () => Promise<string | undefined>;
+}): React.ReactElement {
+  const server = useFlux((s) => s.mcpServers.find((x) => x.id === props.id));
+  const [confirming, setConfirming] = useState(false);
+  const [removeError, setRemoveError] = useState<string | null>(null);
+  if (!server) return <EmptyState>Server removed.</EmptyState>;
+  const launch = [server.command, ...server.args].join(' ');
+  return (
+    <div className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4">
+      <div className="flex items-center gap-2">
+        <RowTitle>{server.id}</RowTitle>
+        {server.env_keys.map((k) => (
+          <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
+            {k}
+          </Badge>
+        ))}
+        <span className="flex-1" />
+        {confirming ? (
+          <>
+            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
+              if (error) {
+                setRemoveError(error);
+                setConfirming(false);
+              }
+            })}>
+              Confirm
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
+              Keep
+            </Button>
+          </>
+        ) : (
+          <IconButton
+            label={`Remove ${server.id}`}
+            className="size-7 hover:text-danger"
+            onClick={() => setConfirming(true)}
+          >
+            <Trash2 size={13} />
+          </IconButton>
+        )}
+      </div>
+      <RowSub title={launch}>{launch}</RowSub>
+      <span className="text-2xs text-faint">Applies live — running conversations pick the tools up when their current round ends.</span>
+      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
+    </div>
+  );
+}
+
+const HINT =
+  'External tool servers spawned as child processes at server start, stored in the server ' +
+  'database. Env values never leave the server after saving (keys only); editing an entry ' +
+  '= remove + re-add.';
+
+export function McpPanel(): React.ReactElement {
+  const servers = useFlux((s) => s.mcpServers);
+  const isMobile = useIsMobile();
+
+  // Selection: a server id or 'new' (the persistent creation row).
+  const [selected, setSelected] = useState<string | 'new'>('new');
+  const touchedRef = useRef(false);
+  const removeIndexRef = useRef<number | null>(null);
+  const pendingSelectRef = useRef<string | null>(null);
+
+  // The creation-form draft lives at panel level: switching the selection
+  // never loses a half-typed entry.
+  const [id, setId] = useState('');
+  const [command, setCommand] = useState('');
+  const [argsText, setArgsText] = useState('');
+  const [envText, setEnvText] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [addError, setAddError] = useState<string | null>(null);
+
+  // The list may be cold — pull on section show.
+  useEffect(() => {
+    fetchMcpServers();
+  }, []);
+
+  const canAdd = id.trim() !== '' && command.trim() !== '' && !adding;
+
+  const runAdd = () => {
+    const { env, error } = parseEnv(envText);
+    if (error) {
+      setAddError(error);
+      return;
+    }
+    setAdding(true);
+    setAddError(null);
+    const added = id.trim();
+    pendingSelectRef.current = added;
+    void addMcpServer({ id, command, args: parseLines(argsText), env }).then((addErr) => {
+      setAdding(false);
+      if (addErr) {
+        pendingSelectRef.current = null;
+        setAddError(addErr);
+        return;
+      }
+      // Success: the broadcast refreshes the list (and lands the pending
+      // selection) — reset the form.
+      setId('');
+      setCommand('');
+      setArgsText('');
+      setEnvText('');
+      useFlux.getState().pushToast('info', `MCP server "${added}" added — applied to new rounds`);
+    });
+  };
+
+  /** Shared by the preview pane and the mobile rows. */
+  const remove = (sid: string): Promise<string | undefined> => {
+    removeIndexRef.current = servers.findIndex((s) => s.id === sid);
+    return removeMcpServer(sid).then((error) => {
+      if (!error) useFlux.getState().pushToast('info', `MCP server "${sid}" removed — applied to new rounds`);
+      return error;
+    });
+  };
+
+  const choose = (next: string | 'new') => {
+    touchedRef.current = true;
+    setSelected(next);
+  };
+
+  // Selection repair — same contract as ProvidersPanel (pending add
+  // self-select, vanished selection falls to the next entry, untouched
+  // panel follows the list).
+  useEffect(() => {
+    if (pendingSelectRef.current) {
+      const want = pendingSelectRef.current;
+      if (servers.some((s) => s.id === want)) {
+        touchedRef.current = true;
+        setSelected(want);
+        pendingSelectRef.current = null;
+      }
+      return;
+    }
+    if (touchedRef.current) {
+      if (selected !== 'new' && !servers.some((s) => s.id === selected)) {
+        const idx = removeIndexRef.current;
+        const next =
+          idx !== null && servers.length > 0 ? servers[Math.min(idx, servers.length - 1)] : undefined;
+        setSelected(next ? next.id : 'new');
+        removeIndexRef.current = null;
+      }
+      return;
+    }
+    if (servers.length > 0) {
+      if (selected !== servers[0].id) setSelected(servers[0].id);
+    } else if (selected !== 'new') {
+      setSelected('new');
+    }
+  }, [servers, selected]);
+
+  const selectedServer = selected === 'new' ? undefined : servers.find((s) => s.id === selected);
+
+  // ── Mobile: the stacked layout (hint, notice, rows, form) ──
+  if (isMobile) {
+    return (
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto">
+        <DialogHint>{HINT}</DialogHint>
+        <NoticeBar>
+          Changes apply live — running conversations pick the tools up when their current round
+          ends; a command that fails to spawn is retried at the next server start.
+        </NoticeBar>
+        <div className="flex flex-col gap-2">
+          <SectionLabel>Registered</SectionLabel>
+          {servers.length === 0 ? (
+            <EmptyState>No MCP servers registered — add one below.</EmptyState>
+          ) : (
+            <ul aria-label="MCP servers" className="m-0 flex list-none flex-col gap-2 p-0">
+              {servers.map((s) => (
+                <McpRow key={s.id} id={s.id} command={s.command} args={s.args} envKeys={s.env_keys} onRemove={() => remove(s.id)} />
+              ))}
+            </ul>
+          )}
+        </div>
+        <McpForm
+          id={id}
+          command={command}
+          argsText={argsText}
+          envText={envText}
+          adding={adding}
+          canAdd={canAdd}
+          addError={addError}
+          setId={setId}
+          setCommand={setCommand}
+          setArgsText={setArgsText}
+          setEnvText={setEnvText}
+          onSubmit={runAdd}
+        />
+      </div>
+    );
+  }
+
+  // ── Desktop: master-detail ──
+  return (
+    <MasterDetail
+      list={
+        <Rail label="MCP servers">
+          <NewRailButton label="New server" selected={selected === 'new'} onClick={() => choose('new')} />
+          {servers.map((s) => (
+            <RailButton
+              key={s.id}
+              selected={selected === s.id}
+              onClick={() => choose(s.id)}
+              ariaLabel={`Select server ${s.id}`}
+              title={s.id}
+              sub={[s.command, ...s.args].join(' ')}
+            />
+          ))}
+          {servers.length === 0 && (
+            <li className="px-2 py-1 text-2xs leading-relaxed text-faint">No MCP servers registered.</li>
+          )}
+        </Rail>
+      }
+      detail={
+        <DetailPane>
+          {selectedServer ? (
+            <McpPreview
+              key={selectedServer.id}
+              id={selectedServer.id}
+              onRemove={() => remove(selectedServer.id)}
+            />
+          ) : (
+            <>
+              <DialogHint>{HINT}</DialogHint>
+              <NoticeBar>
+                Changes apply live — running conversations pick the tools up when their current
+                round ends; a command that fails to spawn is retried at the next server start.
+              </NoticeBar>
+              <McpForm
+                id={id}
+                command={command}
+                argsText={argsText}
+                envText={envText}
+                adding={adding}
+                canAdd={canAdd}
+                addError={addError}
+                setId={setId}
+                setCommand={setCommand}
+                setArgsText={setArgsText}
+                setEnvText={setEnvText}
+                onSubmit={runAdd}
+              />
+            </>
+          )}
+        </DetailPane>
+      }
+    />
+  );
+}

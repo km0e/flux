@@ -1,0 +1,478 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * app.css — the Tailwind entry: utilities + the token bridge + the shared
+ * keyframes. Component styling rides Tailwind utilities; the imperative
+ * streaming DOM is styled in stream.css (it cannot carry utilities).
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+  @import 'tailwindcss';
+@import './fonts.css';
+@import './tokens.css';
+@import './stream.css';
+
+/* The touch variant — hover-independent affordances must opt in with
+   `touch:*` (Tailwind has no hover-none variant built in). Desktop hover
+   reveals keep their behavior; touch devices get always-visible controls. */
+@custom-variant touch (@media (hover: none));
+
+/* Bridge the --fx-* token contract into Tailwind's theme so utilities like
+   `bg-panel`, `text-muted`, `border-border` resolve to the switching
+   semantic tokens (light-dark()). `inline` keeps the var() references. */
+@theme inline {
+  --color-bg: var(--fx-bg);
+  --color-panel: var(--fx-panel);
+  --color-elev: var(--fx-elev);
+  --color-inset: var(--fx-inset);
+  --color-fg: var(--fx-fg);
+  --color-muted: var(--fx-muted);
+  --color-faint: var(--fx-faint);
+  --color-border: var(--fx-border);
+  --color-border-strong: var(--fx-border-strong);
+  --color-accent: var(--fx-accent);
+  --color-accent-strong: var(--fx-accent-strong);
+  --color-accent-fg: var(--fx-accent-fg);
+  --color-accent-dim: var(--fx-accent-dim);
+  --color-success: var(--fx-success);
+  --color-warn: var(--fx-warn);
+  --color-danger: var(--fx-danger);
+  --color-info: var(--fx-info);
+  --color-hover: var(--fx-hover);
+  --color-active: var(--fx-active);
+
+  --radius-xs: var(--fx-radius-xs);
+  --radius-sm: var(--fx-radius-sm);
+  --radius-md: var(--fx-radius-md);
+  --radius-lg: var(--fx-radius-lg);
+
+  --font-ui: var(--fx-font-ui);
+  --font-mono: var(--fx-font-mono);
+
+  /* Type scale — the project-local steps override Tailwind's defaults;
+     each carries its own leading (see tokens.css). */
+  --text-2xs: var(--fx-text-2xs);
+  --text-xs: var(--fx-text-xs);
+  --text-sm: var(--fx-text-sm);
+  --text-base: var(--fx-text-base);
+  --text-md: var(--fx-text-md);
+  --text-lg: var(--fx-text-lg);
+  --text-xl: var(--fx-text-xl);
+  --text-2xs--line-height: var(--fx-text-2xs--line-height);
+  --text-xs--line-height: var(--fx-text-xs--line-height);
+  --text-sm--line-height: var(--fx-text-sm--line-height);
+  --text-base--line-height: var(--fx-text-base--line-height);
+  --text-md--line-height: var(--fx-text-md--line-height);
+  --text-lg--line-height: var(--fx-text-lg--line-height);
+  --text-xl--line-height: var(--fx-text-xl--line-height);
+
+  --animate-fade-in: fadeIn 0.2s var(--fx-ease-out) both;
+  --animate-scale-in: scaleIn 0.16s var(--fx-ease-out) both;
+}
+
+/* ── Base ───────────────────────────────────────────────────────────────
+   Custom base styles MUST live inside @layer base: unlayered rules beat
+   every Tailwind layer unconditionally, which silently neutered utility
+   overrides — e.g. `focus:outline-none` could never win against the global
+   focus ring below, so the composer textarea drew the ring INSIDE the
+   bordered #input-row (a double border; the row's own focus-within accent
+   border is the one true indication). Inside the layer, utilities win as
+   intended. */
+@layer base {
+  body {
+    background: var(--fx-bg);
+    color: var(--fx-fg);
+    font-family: var(--fx-font-ui);
+    font-size: 14px;
+    line-height: 1.5;
+    /* Mobile viewport chain: 100vh → 100dvh (URL-bar tracking) → --fx-vvh
+       (visualViewport px, set by core/viewport.ts when the KEYBOARD opens —
+       iOS overlays the layout viewport, so dvh alone still buries the
+       composer). Each line falls back to the previous. */
+    height: 100vh;
+    height: 100dvh;
+    height: var(--fx-vvh, 100dvh);
+    overflow: hidden;
+    /* A chat workspace has no pull-to-refresh; rubber-banding only exposes
+       the app background. */
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+    -webkit-text-size-adjust: 100%;
+    text-size-adjust: 100%;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Text selection rides the accent family. */
+  ::selection {
+    background: var(--fx-selection);
+  }
+
+  #app {
+    display: flex;
+    height: 100vh;
+    height: 100dvh;
+    height: var(--fx-vvh, 100dvh);
+  }
+
+  /* Touch: kill the legacy double-tap-zoom delay on controls (taps respond
+     instantly; pinch zoom on the page is unaffected). */
+  @media (hover: none) {
+    button,
+    [role='button'],
+    [role='tab'],
+    [role='treeitem'],
+    [role='option'],
+    [role='menuitem'],
+    a {
+      touch-action: manipulation;
+    }
+  }
+
+  /* Global keyboard focus ring — one rule for every interactive element
+     that has no focus indication of its own. :where() keeps specificity 0
+     so component rules stay in charge; the layer placement lets
+     `focus:outline-none` utilities opt out (inputs that show their own
+     accent border must not ALSO draw this ring). */
+  :where(
+      button,
+      [role='button'],
+      [role='tab'],
+      [role='treeitem'],
+      [role='option'],
+      [role='menuitem'],
+      input,
+      textarea,
+      select,
+      a
+    ):focus-visible {
+    outline: 2px solid var(--fx-accent);
+    outline-offset: 1px;
+  }
+
+  /* Subtle overlay scrollbars, theme-adaptive. */
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--fx-fg) 22%, transparent) transparent;
+  }
+
+  ::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  ::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--fx-fg) 20%, transparent);
+    border-radius: var(--fx-radius-full);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--fx-fg) 34%, transparent);
+    border: 2px solid transparent;
+    background-clip: content-box;
+  }
+
+  ::-webkit-scrollbar-track,
+  ::-webkit-scrollbar-corner {
+    background: transparent;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+}
+
+/* ── The Flux line — the ONE signature motion ─────────────────────────
+   While a round streams, a 2px "current" sweeps along the composer's top
+   edge: the brand wave reduced to a traveling highlight. It encodes real
+   state (idle hairline → working current → settled) and is the only
+   non-user-triggered animation in the app. Reduced motion: a static
+   accent border. */
+#input-row {
+  position: relative;
+}
+
+#input-row::before {
+  content: '';
+  position: absolute;
+  inset: -1px 0 auto;
+  height: 2px;
+  border-radius: var(--fx-radius-full);
+  background: linear-gradient(90deg, transparent, var(--fx-accent), transparent);
+  background-size: 45% 100%;
+  background-repeat: no-repeat;
+  opacity: 0;
+  pointer-events: none;
+}
+
+#input-row.streaming::before {
+  opacity: 1;
+  animation: fluxSweep 1.6s linear infinite;
+}
+
+@keyframes fluxSweep {
+  from {
+    background-position: -45% 0;
+  }
+
+  to {
+    background-position: 190% 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #input-row.streaming::before {
+    animation: none;
+    background: var(--fx-accent);
+    background-size: 100% 100%;
+    opacity: 0.7;
+  }
+}
+
+/* ── App shell layout ───────────────────────────────────────────────────
+   The sidebar layer is ID-addressed (App.tsx targets these ids); Tailwind
+   covers the components INSIDE. The sidebar's width is authored here —
+   `--fx-sidebar-w` (published from the store, persisted in prefs) — so
+   switching Chats/Files tabs or creating chats can never reflow it
+   (content-driven width was a bug: the tabs remount and the Files tree
+   collapsed the column to its content). */
+@layer base {
+  #sidebar-layer {
+    display: flex;
+    align-self: stretch; /* fill the body row's height (flex stretch) */
+    flex-shrink: 0;
+  }
+
+  #sidebar-layer.closed {
+    display: none;
+  }
+
+  #sidebar {
+    width: var(--fx-sidebar-w, 240px);
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    overflow: hidden; /* the fixed width is authoritative — content truncates */
+    background: var(--fx-panel);
+    border-right: 1px solid var(--fx-border);
+  }
+
+  /* Desktop drag handle — a quiet strip that lights up on hover. The ::after
+     extends the grab zone to 13px without widening the visual strip. */
+  #sidebar-resizer {
+    position: relative;
+    width: 5px;
+    cursor: col-resize;
+    flex-shrink: 0;
+    background: transparent;
+    transition: background-color var(--fx-duration-fast);
+  }
+
+  #sidebar-resizer::after {
+    content: '';
+    position: absolute;
+    inset: 0 -4px;
+  }
+
+  #sidebar-resizer:hover,
+  body.resizing-sidebar #sidebar-resizer {
+    background: var(--fx-accent);
+    opacity: 0.35;
+  }
+
+  /* While dragging: kill text selection everywhere. */
+  body.resizing-sidebar,
+  body.resizing-preview {
+    user-select: none;
+    cursor: col-resize;
+  }
+
+  #sidebar-backdrop {
+    display: none;
+  }
+}
+
+/* MOBILE regime (<768px, the one breakpoint): the layer becomes a fixed
+   overlay drawer; the sidebar slides, the backdrop dims the conversation,
+   the resizer disappears and the toggle is always available (hidden while
+   the drawer is open — the backdrop owns closing then). Kept OUTSIDE the
+   layer: the drawer's fixed-position overrides must beat the base rules
+   above regardless of what utilities the markup carries. Safe-area: the
+   drawer content clears the top notch / home indicator. */
+@media (max-width: 767.5px) {
+  #sidebar-layer {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    pointer-events: none;
+  }
+
+  #sidebar-layer.closed {
+    display: flex;
+  }
+
+  #sidebar {
+    width: min(80vw, 300px);
+    pointer-events: auto;
+    transform: translateX(-105%);
+    transition: transform var(--fx-duration-base) var(--fx-ease-out);
+    box-shadow: 0 0 24px rgb(0 0 0 / 35%);
+  }
+
+  #sidebar-layer.open #sidebar {
+    transform: translateX(0);
+  }
+
+  #sidebar-layer.open #sidebar-backdrop {
+    display: block;
+    pointer-events: auto;
+    position: absolute;
+    inset: 0;
+    background: rgb(0 0 0 / 40%);
+  }
+
+  #sidebar-resizer {
+    display: none;
+  }
+
+  /* Drawer content clears the notch (top) and the home indicator (bottom). */
+  #sidebar {
+    padding-top: env(safe-area-inset-top);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+}
+
+  #right-dock {
+    /* Width is authored here — the drag writes the --fx-preview-w var
+       directly (zero React renders per pointermove, mirroring the
+       sidebar); the store commit happens once on release. The mobile
+       sheet's width:100% !important below still beats this var. */
+    width: var(--fx-preview-w, 480px);
+  }
+
+  /* MOBILE regime: the dock is a FULL-SCREEN sheet (files/terminals are
+     a different activity there, not a side pane): inset 0, safe-area
+     padding, no width carry-over from a persisted desktop value. */
+  @media (max-width: 767.5px) {
+    #right-dock {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      /* inset:0 stretches, but the desktop width (persisted pref) would
+         win over the right constraint — neutralize it (width beats
+         over-constrained inset in fixed positioning). */
+      width: 100% !important;
+      max-width: 100vw;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      box-shadow: none;
+    }
+
+    /* No drag-resize on a full-screen sheet. */
+    #dock-resizer {
+      display: none;
+    }
+  }
+
+
+/* ── Shared keyframes (used by stream.css + components) ──────────────── */
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes scaleIn {
+  from {
+    opacity: 0;
+    transform: scale(0.97) translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+@keyframes msgIn {
+  from {
+    opacity: 0;
+    transform: translateY(var(--fx-rise, 6px));
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toolIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes toolDonePop {
+  0% {
+    transform: scale(1.015);
+  }
+
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+    transform: translateY(0);
+  }
+
+  50% {
+    opacity: 1;
+    transform: translateY(-2px);
+  }
+}
+
+@keyframes caretBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: 0;
+  }
+}
+
+@keyframes dots {
+  0% {
+    width: 0;
+  }
+
+  100% {
+    width: 1.2em;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}

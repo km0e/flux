@@ -1,0 +1,73 @@
+// Provider registry management — pure endpoints, NEVER secrets
+// (api_key leaves only at add time, is stored server-side, never returns).
+//
+// Validation failures (empty id, unknown protocol, duplicate id, unknown
+// id on remove) ride the response's inline `error` — request-scoped, never
+// a transport status (D4'). Saves never validate connectivity; a bad
+// endpoint surfaces at the next round / model probe.
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service ProviderService {
+  // The registered providers, sorted by id.
+  rpc ListProviders(ListProvidersRequest) returns (ListProvidersResponse);
+
+  // Probe one provider's upstream model catalog (the OpenAI-compatible
+  // `GET /models`; also validates base URL + API key in one request).
+  // Probe failures ride the response's `error`, never a transport status.
+  rpc GetModels(GetModelsRequest) returns (GetModelsResponse);
+
+  // Register a provider. An entry is a PURE ENDPOINT: id, interface
+  // protocol, url, api_key — NO model (the model is a per-chat pin).
+  rpc AddProvider(AddProviderRequest) returns (AddProviderResponse);
+
+  // Remove a provider. Chats pinned to it keep their pin and fail on the
+  // next round with an error naming the dead pin (recovery: SwitchChat).
+  rpc RemoveProvider(RemoveProviderRequest) returns (RemoveProviderResponse);
+}
+
+message ListProvidersRequest {}
+
+message ListProvidersResponse {
+  repeated ProviderSummary providers = 1;
+}
+
+message GetModelsRequest {
+  // The registry id to probe — required (no default to imply).
+  string provider = 1;
+}
+
+message GetModelsResponse {
+  // Sorted by id.
+  repeated ModelCatalogEntry models = 1;
+  optional string error = 2;
+}
+
+message AddProviderRequest {
+  string id = 1;
+  // Interface protocol — only "openai" is supported. Empty = the server
+  // default ("openai"; proto3 scalars have no presence, so absence and
+  // "" carry the same meaning the WS frame's serde default did).
+  string protocol = 2;
+  // Endpoint base url (bare, no `/chat/completions` suffix). Absent =
+  // the OpenAI default base url.
+  optional string url = 3;
+  optional string api_key = 4;
+}
+
+message AddProviderResponse {
+  string id = 1;
+  optional string error = 2;
+}
+
+message RemoveProviderRequest {
+  string id = 1;
+}
+
+message RemoveProviderResponse {
+  string id = 1;
+  optional string error = 2;
+}

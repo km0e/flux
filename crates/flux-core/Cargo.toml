@@ -1,0 +1,27 @@
+[package]
+name = "flux-core"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+strum = { version = "0.28", features = ["derive"] }
+async-trait = { workspace = true }
+tokio = { workspace = true, optional = true }
+tokio-util = { workspace = true }
+tracing = { workspace = true }
+futures = { workspace = true }
+
+[features]
+# Scripted `Provider`/`Connection` fakes for downstream crates' tests
+# (they fake THIS crate's traits, so they live here). Pulls in tokio for
+# the scripted stream push + polling helpers.
+test-util = ["dep:tokio"]
+
+[dev-dependencies]
+tempfile = { workspace = true }

@@ -9,19 +9,21 @@
 *.swo
 .DS_Store
 
-# Node / VSCode extension
-clients/vscode/node_modules
-clients/vscode/out
-clients/vscode/.vscode-test
-clients/vscode/*.tsbuildinfo
-*.vsix
+# Web UI build output
+clients/web/dist
+
+# Local dev scratch (never committed)
+/local/
 
 # Logs
 *.log
-docs/technology_evaluation_report.md
 
-# VSCode isolated extension testing
-.vscode-test/
+# Distribution artifacts
+dist/
 
-# Local server configuration
-flux.toml
+# Node (run from root by accident)
+/package-lock.json
+/node_modules/
+/flux.db
+/flux.db-shm
+/flux.db-wal

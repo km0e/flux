@@ -1,0 +1,87 @@
+// Filesystem browsing — the UI's workdir picker + explorer (fs family).
+//
+// Error model (D4'): browse failures (permission denied, vanished dir,
+// not-a-directory) ride the response's `error` field as UI data — never a
+// gRPC status. Status codes stay reserved for transport/infrastructure
+// faults.
+//
+// Identity: this service deliberately does NOT resolve the session
+// metadata — browsing is global filesystem state under the server's OS
+// user (same-origin trust model, no per-chat scoping here). The chat
+// family's lease gates have no meaning for a directory listing.
+syntax = "proto3";
+
+package flux.v1;
+
+service FileSystemService {
+  // List one directory, directories first. `path` absent/empty asks for
+  // the server's default start directory ($HOME, falling back to its cwd).
+  rpc FsList(FsListRequest) returns (FsListResponse);
+
+  // Read a bounded, lossy-UTF-8 head of one file for the preview pane.
+  rpc FsRead(FsReadRequest) returns (FsReadResponse);
+}
+
+message FsListRequest {
+  // The directory to list. Absent or empty = the default start dir.
+  optional string path = 1;
+}
+
+message FsListResponse {
+  // The request's path as given ("" = default start dir). Under gRPC the
+  // HTTP round-trip pairs the response natively; the echo remains for
+  // display/debug parity with the legacy WS frame.
+  string requested = 1;
+  // Inline browse failure — the UI renders it in the picker; never a
+  // transport-level status (see D4').
+  optional string error = 2;
+  // The canonicalized directory actually listed (empty on error).
+  optional string path = 3;
+  // The listed dir's parent, when one exists ("" on error / at the root).
+  optional string parent = 4;
+  // Directories first, then files, each name-sorted case-insensitively.
+  repeated FsEntry entries = 5;
+}
+
+message FsEntry {
+  string name = 1;
+  FsEntryKind kind = 2;
+  // Bytes, files only, when stat succeeds.
+  optional uint64 size = 3;
+  // Working-tree status inside a git repository; absent = clean, not a
+  // repo, or git unavailable. Directories aggregate their subtree.
+  optional GitStatus git = 4;
+}
+
+enum FsEntryKind {
+  FS_ENTRY_KIND_UNSPECIFIED = 0;
+  FS_ENTRY_KIND_DIR = 1;
+  FS_ENTRY_KIND_FILE = 2;
+}
+
+enum GitStatus {
+  GIT_STATUS_UNSPECIFIED = 0;
+  // Tracked content changed (porcelain M/R/C/T, deletions folded in).
+  GIT_STATUS_MODIFIED = 1;
+  // Staged new file (porcelain A).
+  GIT_STATUS_ADDED = 2;
+  // Untracked (porcelain `??`; directories when wholly untracked).
+  GIT_STATUS_UNTRACKED = 3;
+  // Unmerged (porcelain DD/AU/UD/UA/DU/AA/UU).
+  GIT_STATUS_CONFLICTED = 4;
+}
+
+message FsReadRequest {
+  string path = 1;
+}
+
+message FsReadResponse {
+  string requested = 1;
+  optional string error = 2;
+  // The bounded head; binary files carry a placeholder note instead.
+  optional string content = 3;
+  // True when the file was larger than the preview budget.
+  optional bool truncated = 4;
+  // Full file size in bytes (the truncated hint needs the total).
+  optional uint64 size = 5;
+}

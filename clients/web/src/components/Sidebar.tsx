@@ -1,0 +1,333 @@
+/**
+ * Sidebar.tsx — left panel: conversations list (+ file explorer tab).
+ *
+ * Radix primitives own the behavior (DropdownMenu for row actions, Tabs for
+ * panels); the row keeps the D-06 wiring: a selection = a lease handover
+ * driven by the activeChatId subscription in mount. A client-side filter
+ * (name/workdir substring) narrows the list.
+ *
+ * Provides: Sidebar, relativeTime
+ * Depends: core/state.ts, core/bridge.ts, lib/cn.ts, services/*,
+ *          components/ui/*, components/Explorer.tsx
+ */
+import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { useFlux } from '../core/state';
+import { bridge } from '../core/bridge';
+import { cn } from '../lib/cn';
+import { log } from '../logger';
+import { clearChatPane } from '../services/panes';
+import { dialogs } from '../services/dialogs';
+import { startNewChatFlow } from '../services/new-chat';
+// The Files tree (react-arborist + react-window) is a secondary surface —
+// loaded on first Files-tab activation instead of the initial bundle.
+const Explorer = lazy(() => import('./Explorer'));
+import { Button, Badge, TextField } from './ui';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
+import { ChatRowMenu } from './ui/dropdown-menu';
+import { Search } from 'lucide-react';
+import type { Chat } from '../core/state';
+
+/** Relative time for the chat list: "now", "5m", "3h", "2d", else a date. */
+export function relativeTime(ts: number): string {
+  const diff = Date.now() - ts;
+  if (diff < 60_000) return 'now';
+  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
+  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
+  if (diff < 14 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`;
+  const d = new Date(ts);
+  return `${d.getMonth() + 1}/${d.getDate()}`;
+}
+
+/** One conversation row: name + time + workdir line + hover ⋯ menu. */
+function ChatRow(props: {
+  chat: Chat;
+  activeId: string;
+  /** Suppress the In-use badge: this row is one side of an in-flight lease
+   * switch, so its wire `active` flag is stale (the flip lands with the
+   * next chats broadcast). Rendering it would flash the badge for a frame. */
+  suppressBadge: boolean;
+  renaming: boolean;
+  onStartEditing: (id: string) => void;
+  onCommitRename: (id: string, raw: string) => void;
+  onSelect: (id: string) => void;
+  onRowKeyDown: (e: React.KeyboardEvent, id: string) => void;
+  onDelete: (id: string) => void;
+}): React.ReactElement {
+  const { chat: c, activeId } = props;
+  const [draft, setDraft] = useState(c.name);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Entering rename mode focuses + selects the input.
+  useEffect(() => {
+    if (props.renaming) {
+      setDraft(c.name);
+      inputRef.current?.focus();
+      inputRef.current?.select();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.renaming]);
+
+  const commit = () => props.onCommitRename(c.id, draft.trim()); // '' = cancel
+
+  const active = c.id === activeId;
+  return (
+    <div
+      role="button"
+      tabIndex={0}
+      aria-current={active ? 'true' : undefined}
+      aria-label={`Open chat ${c.name || 'New Chat'}`}
+      className={cn(
+        // The 2px left rail is the selection marker: every row carries it
+        // (transparent when inactive) so the active state never shifts layout.
+        'group/row flex cursor-pointer items-center gap-1 border-l-2 px-3 py-2',
+        'transition-colors duration-100 focus:outline-none',
+        active
+          ? 'border-l-[color:var(--fx-accent)] bg-active'
+          : cn('border-l-transparent', 'hover:bg-hover'),
+      )}
+      onClick={() => props.onSelect(c.id)}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          props.onSelect(c.id);
+        } else {
+          props.onRowKeyDown(e, c.id);
+        }
+      }}
+    >
+      <div className="min-w-0 flex-1">
+        {props.renaming ? (
+          /* Edit mode: swallow click/keys so the row's select and menu
+             handlers never see them; Enter/blur commit and Esc reverts. */
+          <div
+            className="w-full"
+            onClick={(e) => e.stopPropagation()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === 'Escape') {
+                e.preventDefault();
+                props.onCommitRename(c.id, ''); // cancel
+              }
+            }}
+          >
+            <input
+              ref={inputRef}
+              className="h-7 w-full rounded-sm border border-accent bg-inset px-1.5 text-sm text-fg focus:outline-none"
+              aria-label="Chat name"
+              maxLength={80}
+              value={draft}
+              onChange={(e) => setDraft(e.target.value)}
+              onBlur={commit}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') {
+                  e.preventDefault();
+                  commit();
+                }
+              }}
+            />
+          </div>
+        ) : (
+          <>
+            <div className="flex items-center gap-1.5">
+              <span className="truncate text-sm">{c.name || 'New Chat'}</span>
+              {c.kind === 'feature' && (
+                <Badge tone="accent" title="Feature mode — per-feature context">
+                  Feature
+                </Badge>
+              )}
+              {/* wire active = lease held by ANY window (incl. this one) —
+                  only flag it when the holder is NOT the selected chat, and
+                  never while the row's flag is stale (in-flight switch). */}
+              {c.active && c.id !== activeId && !props.suppressBadge && (
+                <Badge tone="warn">In use</Badge>
+              )}
+            </div>
+            {/* cwd line (the sandbox boundary) + the chat's last activity —
+                both machine facts, both mono. Activity (not creation) is
+                what a conversation list means by "5m ago". */}
+            <div className="mt-0.5 flex items-center gap-2">
+              {c.workdir && (
+                <span className="min-w-0 flex-1 truncate font-mono text-2xs text-faint" title={c.workdir}>
+                  {c.workdir}
+                </span>
+              )}
+              {!c.workdir && <span className="flex-1" />}
+              <span className="shrink-0 font-mono text-2xs text-faint tabular-nums">
+                {relativeTime(c.lastActivityAt ?? c.createdAt)}
+              </span>
+            </div>
+          </>
+        )}
+      </div>
+      {!props.renaming && (
+        <ChatRowMenu
+          label={`Chat actions for ${c.name || 'chat'}`}
+          onRename={() => props.onStartEditing(c.id)}
+          onDelete={() => props.onDelete(c.id)}
+        />
+      )}
+    </div>
+  );
+}
+
+
+export function Sidebar(): React.ReactElement {
+  const chats = useFlux((s) => s.chats);
+  const activeId = useFlux((s) => s.activeChatId);
+  const leaseSwitch = useFlux((s) => s.leaseSwitch);
+  // The Files tab remounts per workdir (the tree roots at the chat's cwd).
+  const activeWorkdir = chats.find((c) => c.id === activeId)?.workdir ?? 'none';
+  const [tab, setTab] = useState<'chats' | 'files'>('chats');
+  const [filter, setFilter] = useState('');
+  // The id being renamed — plain state: the row callbacks are fresh
+  // closures each render (no stale-capture machine, unlike the old impl).
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+
+  // Relative-time freshness: an IDLE chat re-renders nothing, so its row's
+  // "now" would sit frozen for hours. A minute tick re-renders the list —
+  // skipped while the page is hidden (matches the Explorer's discipline)
+  // and cheap otherwise (the rows are small; zustand re-renders only on
+  // state change, and the tick is the only thing that moves).
+  const [, bumpClock] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => {
+      if (!document.hidden) bumpClock((n) => n + 1);
+    }, 30_000);
+    return () => clearInterval(t);
+  }, []);
+
+  const startEditing = (id: string) => {
+    setRenamingId(id);
+  };
+
+  /** Enter/blur commit. '' = the Esc cancel path (revert, never send). */
+  const commitRename = (id: string, raw: string) => {
+    setRenamingId(null);
+    if (raw === '') return;
+    const chat = useFlux.getState().chats.find((c) => c.id === id);
+    if (!chat || raw === chat.name) return;
+    log.info('sidebar: rename (inline) ' + id);
+    bridge.send({ type: 'chat_rename', chat_id: id, name: raw });
+  };
+
+  const onNewChat = () => startNewChatFlow();
+
+  const onSelect = (id: string) => {
+    log.info('sidebar: select ' + id);
+    useFlux.setState({ activeChatId: id });
+    // Mobile regime (<768px — the ONE breakpoint, matching app.css) runs
+    // the sidebar as an overlay drawer: a selection implies "I'm done
+    // navigating" — close it so the conversation shows.
+    if (window.innerWidth < 768) {
+      useFlux.setState({ sidebarOpen: false });
+    }
+    // D-06: no standalone chat_open — an activeChatId change triggers
+    // switchLease in mount → chat_claim, the single message carrying
+    // history snapshot + subscription + lease. When occupied,
+    // error{chat_busy} degrades to a read-only pane (handlers.ts sends the
+    // follow-up chat_open).
+  };
+
+  /** Roving keyboard navigation on the chat list: ↑/↓ move row focus,
+   * Enter/Space open (existing), Delete deletes. Rows are siblings, so
+   * sibling focus is a property jump — no index bookkeeping. */
+  const onRowKeyDown = (e: React.KeyboardEvent, id: string) => {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+      e.preventDefault();
+      const row = e.currentTarget as HTMLElement;
+      const next = e.key === 'ArrowDown' ? row.nextElementSibling : row.previousElementSibling;
+      (next as HTMLElement | null)?.focus();
+    } else if (e.key === 'Delete') {
+      e.preventDefault();
+      onDelete(id);
+    }
+  };
+
+  const onDelete = (id: string) => {
+    log.info('sidebar: delete ' + id);
+    const name = useFlux.getState().chats.find((c) => c.id === id)?.name ?? id;
+    void dialogs.confirmDelete(name).then((confirmed) => {
+      if (!confirmed) return;
+      // The server already aborted the task and broadcast the list; converge the local UI immediately.
+      clearChatPane(id);
+      useFlux.getState().deleteChat(id);
+      bridge.send({ type: 'chat_delete', chat_id: id });
+    });
+  };
+
+  const q = filter.trim().toLowerCase();
+  const visible = q
+    ? chats.filter((c) => c.name.toLowerCase().includes(q) || c.workdir.toLowerCase().includes(q))
+    : chats;
+
+  return (
+    <Tabs
+      id="sidebar"
+      value={tab}
+      onValueChange={(v) => setTab((v as 'chats' | 'files') ?? 'chats')}
+      className="flex min-h-0 flex-1 flex-col"
+    >
+      {/* The panel switcher IS the header — terminal creation lives in
+          the dock (its surface): the tab strip's "+" and the empty
+          state's action; the dock itself opens from ChatHeader. */}
+      <div className="px-2 pt-2">
+        <TabsList aria-label="Sidebar panels">
+          <TabsTrigger value="chats">Chats</TabsTrigger>
+          <TabsTrigger value="files">Files</TabsTrigger>
+        </TabsList>
+      </div>
+      <TabsContent value="files" className="flex min-h-0 flex-1 flex-col">
+        <Suspense fallback={<div className="p-4 text-xs text-muted">Loading files…</div>}>
+          <Explorer key={activeWorkdir} />
+        </Suspense>
+      </TabsContent>
+      <TabsContent value="chats" className="flex min-h-0 flex-1 flex-col">
+        <div className="flex flex-col gap-2 border-b border-border p-2">
+          <Button id="new-chat-btn" variant="primary" className="w-full max-md:h-10" onClick={onNewChat}>
+            + New chat
+          </Button>
+          <div className="relative">
+            <Search
+              size={12}
+              aria-hidden="true"
+              className="pointer-events-none absolute top-1/2 left-2.5 -translate-y-1/2 text-faint"
+            />
+            <TextField
+              type="search"
+              placeholder="Filter chats…"
+              aria-label="Filter chats"
+              className="pl-7"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+            />
+          </div>
+        </div>
+        <div id="conversation-list" className="min-h-0 flex-1 overflow-y-auto">
+          {chats.length === 0 ? (
+            <div className="p-4 text-xs text-muted">No conversations yet.</div>
+          ) : visible.length === 0 ? (
+            <div className="p-4 text-xs text-muted">No chats match “{filter.trim()}”.</div>
+          ) : (
+            visible.map((c) => (
+              <ChatRow
+                key={c.id}
+                chat={c}
+                activeId={activeId}
+                suppressBadge={
+                  leaseSwitch !== null && (leaseSwitch.from === c.id || leaseSwitch.to === c.id)
+                }
+                renaming={renamingId === c.id}
+                onStartEditing={startEditing}
+                onCommitRename={commitRename}
+                onSelect={onSelect}
+                onRowKeyDown={onRowKeyDown}
+                onDelete={onDelete}
+              />
+            ))
+          )}
+        </div>
+      </TabsContent>
+    </Tabs>
+  );
+}
+

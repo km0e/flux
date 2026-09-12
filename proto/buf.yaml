@@ -1,0 +1,7 @@
+version: v2
+lint:
+  # STANDARD = file/package naming, field casing, ENUM_VALUE_PREFIX,
+  # ENUM_FIRST_VALUE_ZERO, PACKAGE_VERSION_SUFFIX — the rules a ~60-frame
+  # contract needs enforced mechanically (the old wire-sync relied on review).
+  use:
+    - STANDARD

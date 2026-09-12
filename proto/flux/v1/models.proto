@@ -1,0 +1,75 @@
+// The LOCAL saved models — user-saved rows with editable params + models.dev
+// metadata snapshots. Create/edit share Save (upsert); `meta` is NEVER
+// client-writable (only the import/refresh path writes it server-side).
+// A save/remove of a row any chat is pinned to triggers an engine rebuild
+// for exactly those chats; sync rebuilds nothing (meta is display-only).
+syntax = "proto3";
+
+package flux.v1;
+
+import "flux/v1/common.proto";
+
+service ModelService {
+  // The saved models, sorted by (provider, model).
+  rpc ListModels(ListModelsRequest) returns (ListModelsResponse);
+
+  // Create or edit one saved model (upsert). The catalog import is a
+  // create whose metadata is auto-filled from models.dev server-side.
+  rpc SaveModel(SaveModelRequest) returns (SaveModelResponse);
+
+  // Remove one saved model. A chat pinned to it keeps its pin (models
+  // are free-text strings — only the params default back to unset).
+  rpc RemoveModel(RemoveModelRequest) returns (RemoveModelResponse);
+
+  // Re-sync saved models against models.dev — metadata ONLY (user params
+  // preserved). Scope: both ids absent = every saved model; provider
+  // alone = that provider's models; both present = exactly one model.
+  rpc SyncModels(SyncModelsRequest) returns (SyncModelsResponse);
+}
+
+message ListModelsRequest {}
+
+message ListModelsResponse {
+  repeated ModelSummary models = 1;
+}
+
+message SaveModelRequest {
+  string provider = 1;
+  string model = 2;
+  // The editable request-knob JSON object, verbatim (see ModelSummary).
+  string params_json = 3;
+}
+
+message SaveModelResponse {
+  string provider = 1;
+  string model = 2;
+  // Whether a models.dev enrichment landed (the create path).
+  bool enriched = 3;
+  // Failures (unknown provider, invalid params) ride inline — never a
+  // transport status (D4').
+  optional string error = 4;
+}
+
+message RemoveModelRequest {
+  string provider = 1;
+  string model = 2;
+}
+
+message RemoveModelResponse {
+  string provider = 1;
+  string model = 2;
+  optional string error = 3;
+}
+
+message SyncModelsRequest {
+  optional string provider = 1;
+  optional string model = 2;
+}
+
+message SyncModelsResponse {
+  optional string provider = 1;
+  // Rows whose metadata actually changed.
+  uint32 updated = 2;
+  // A models.dev fetch failure rides inline — best-effort, never fatal.
+  optional string error = 3;
+}

@@ -1,28 +1,47 @@
 [workspace]
 resolver = "2"
-members = ["crates/*"]
+members = [
+    "crates/flux-core",
+    "crates/flux-context",
+    "crates/flux-macros",
+    "crates/flux-loop",
+    "crates/flux-provider",
+    "crates/flux-proto",
+    "crates/flux-chat",
+    "crates/flux-session",
+    "crates/flux-store",
+    "crates/flux-mcp",
+    "crates/flux-server",
+    "crates/flux-tools",
+]
 
 [workspace.package]
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 authors = ["Flux Contributors"]
 license = "MIT"
-repository = "https://github.com/example/flux"
+repository = "https://github.com/kumudiaorong/flux"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
+tokio-util = "0.7"
+sqlx = { version = "0.9", features = ["runtime-tokio", "sqlite", "migrate"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 async-trait = "0.1"
 anyhow = "1"
 futures = "0.3"
+uuid = { version = "1", features = ["v4"] }
+tempfile = "3"
 
-# Rig ecosystem
-rig-core = "0.39"
-schemars = "1.2"
+# P4 spike — generated wire contracts (proto/ is the single source)
+flux-proto = { path = "crates/flux-proto" }
+reqwest = { version = "0.13.4", default-features = false, features = [
+    "native-tls",
+] }
 
 # MCP
-rmcp = { version = "1.7", features = ["client", "transport-child-process"] }
+rmcp = { version = "3", features = ["client", "transport-child-process"] }

@@ -1,0 +1,981 @@
+/* ═══════════════════════════════════════════════════════════════════════
+ * stream.css — styles for the IMPERATIVE streaming DOM (lib/dom.ts,
+ * services/stream.ts, panes.ts, history.ts).
+ *
+ * The streaming pipeline renders raw HTML (append-only paragraphs, tool
+ * cards, reasoning blocks) — it cannot use Tailwind utilities, so this
+ * stylesheet owns its class hooks. Colors ride the --fx-* tokens only.
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+/* ── Conversation column ─────────────────────────────────────────────── */
+
+.chat-pane {
+  transition: opacity 120ms var(--fx-ease-out);
+  opacity: 1;
+
+  width: min(100%, var(--fx-chat-max));
+  margin-inline: auto;
+  overflow-x: hidden; /* animations extend scrollable overflow; code/table own their own X scrolling */
+  /* Native scroll anchoring is disabled ON PURPOSE: the stick-state follow
+     (dom.ts) owns repositioning. Tailwind generates no overflow-anchor
+     utility — the old `overflow-anchor-none` class was silently DEAD (the
+     built CSS carried no rule), leaving anchoring ON to fight the follow
+     every frame of an expansion transition (the bottom-pin bug). This
+     declaration is the real one. */
+  overflow-anchor: none;
+}
+
+.chat-pane.switching-out {
+  opacity: 0;
+}
+
+.chat-pane > * + * {
+  margin-top: 12px;
+}
+
+/* The pane is a flex column with a definite height: without an explicit
+   floor, flex shrink squeezes children BEFORE scrolling kicks in — and
+   .tool (overflow: hidden) has an automatic minimum size of 0, collapsing
+   every tool card into a 2px line in long conversations. Content must
+   overflow, never shrink. */
+.chat-pane > * {
+  flex-shrink: 0;
+}
+
+/* ── Message bubbles ─────────────────────────────────────────────────── */
+
+.message {
+  animation: msgIn var(--fx-duration-base) var(--fx-ease-out) both;
+}
+
+.message.live {
+  animation: none;
+}
+
+.message.live .message-body,
+.stream-parts,
+.stream-tail {
+  contain: content;
+}
+
+/* Streaming paragraph float-in — only :last-child animates: older committed
+   wrappers must never replay the animation (visual stability, no flicker). */
+.stream-parts > :last-child {
+  animation: paraIn var(--fx-duration-fast) var(--fx-ease-out) both;
+}
+
+@keyframes paraIn {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.message.staggered {
+  animation-delay: var(--stagger, 0s);
+}
+
+.message:hover .message-header {
+  opacity: 1;
+}
+
+/* User: a compact accent-tinted bubble, right-aligned — the human voice
+   gets the only tinted container in the conversation. `anywhere` (not
+   `break-word`): it also zeroes the min-content contribution, so a
+   pasted unbreakable token wraps instead of stretching the shell. */
+.message.user {
+  display: flex;
+  justify-content: flex-end;
+}
+
+/* Context-rebase affordance (history user bubbles): sits LEFT of the
+   bubble, revealed on hover — touch devices keep it visible (a hover
+   reveal is unreachable there). */
+.msg-rebase {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  margin-right: 6px;
+  flex-shrink: 0;
+  border: none;
+  border-radius: var(--fx-radius-sm);
+  background: transparent;
+  color: var(--fx-faint);
+  cursor: pointer;
+  opacity: 0;
+  transition:
+    opacity var(--fx-duration-fast),
+    color var(--fx-duration-fast),
+    background-color var(--fx-duration-fast);
+}
+
+.message.user:hover .msg-rebase,
+.msg-rebase:focus-visible {
+  opacity: 1;
+}
+
+.msg-rebase:hover {
+  color: var(--fx-accent);
+  background: var(--fx-accent-soft);
+}
+
+/* Touch: always visible + the 36px tap floor (padding does the work). */
+@media (hover: none) {
+  .msg-rebase {
+    opacity: 1;
+    width: 36px;
+    height: 36px;
+  }
+}
+
+.message.user .message-body {
+  max-width: 82%;
+  background: var(--fx-accent-soft);
+  border: 1px solid color-mix(in srgb, var(--fx-accent) 28%, transparent);
+  color: var(--fx-fg);
+  padding: 9px 14px;
+  border-radius: var(--fx-radius-lg);
+  border-bottom-right-radius: var(--fx-radius-xs);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Assistant: full-width prose. */
+.message.assistant .message-body {
+  color: var(--fx-fg);
+}
+
+/* Copy button rides a quiet header row, revealed on hover — hover-capable
+   devices only; touch devices keep it visible (a hover reveal is
+   unreachable there). */
+.message-header {
+  display: flex;
+  justify-content: flex-end;
+  opacity: 0;
+  transition: opacity var(--fx-duration-fast);
+  margin-bottom: 2px;
+}
+
+@media (hover: none) {
+  .message-header {
+    opacity: 1;
+  }
+}
+
+.copy-btn {
+  border: none;
+  background: transparent;
+  color: var(--fx-faint);
+  font-size: var(--fx-text-2xs);
+  padding: 1px 6px;
+  border-radius: var(--fx-radius-sm);
+  cursor: pointer;
+  transition:
+    color var(--fx-duration-fast),
+    background-color var(--fx-duration-fast);
+}
+
+/* Touch: the copy targets clear 40px (Apple HIG floor) — padding, not
+   font-size, does the work. */
+@media (hover: none) {
+  .copy-btn {
+    padding: 10px 12px;
+  }
+}
+
+.copy-btn:hover {
+  color: var(--fx-fg);
+  background: var(--fx-hover);
+}
+
+/* System events (cancelled / context rebased / provider switched) —
+   centered machine microcopy, a voice NEITHER the bubbles nor the tool
+   cards use. Deliberately muted, not an error. */
+.message.notice {
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+  color: var(--fx-faint);
+  text-align: center;
+  padding: 2px 4px;
+}
+
+/* stream_gap — a clickable resync affordance (the one interactive system
+   line; the underline marks it). */
+.message.notice.stream-gap {
+  color: var(--fx-info);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+  text-decoration-color: color-mix(in srgb, var(--fx-info) 45%, transparent);
+}
+
+/* Error — the system line in the danger tone (same centered voice). */
+.message.error {
+  color: var(--fx-danger);
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+  text-align: center;
+  padding: 4px 6px;
+}
+
+.message .error-icon {
+  margin-right: 4px;
+}
+
+/* Approval-wait hint (legacy hook) — the system-line voice, warn tone. */
+.message.approval-wait {
+  color: var(--fx-warn);
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+  text-align: center;
+  padding: 2px 4px;
+}
+
+/* Question-wait context hint (the dialog layer owns the real card). */
+.message.question-wait {
+  color: var(--fx-info);
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+  text-align: center;
+  padding: 2px 4px;
+}
+
+/* ── Typing indicator (TTFT: three-dot pulse before the first token) ── */
+
+.message.typing {
+  align-self: flex-start;
+  display: inline-flex;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: var(--fx-radius-lg);
+  background: var(--fx-inset);
+}
+
+.message.typing span {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--fx-muted);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+.message.typing span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.message.typing span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+/* Streaming caret: a soft blinking block at the live tail. */
+.message.live .stream-tail:not(:empty)::after,
+.message.live .stream-tail:empty::after {
+  content: '▍';
+  color: var(--fx-accent);
+  animation: caretBlink 1s steps(2) infinite;
+  font-size: 0.9em;
+}
+
+/* ── Reasoning / Thinking ────────────────────────────────────────────── */
+
+.thinking {
+  animation: toolIn var(--fx-duration-base) var(--fx-ease-out) both;
+}
+
+.thinking summary {
+  cursor: pointer;
+  color: var(--fx-muted);
+  font-size: 0.9em;
+  user-select: none;
+  list-style: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.thinking summary::-webkit-details-marker {
+  display: none;
+}
+
+.thinking summary::before {
+  content: '▸';
+  font-size: 0.75em;
+  transition: transform var(--fx-duration-base) var(--fx-ease-out);
+}
+
+.thinking[open] summary::before {
+  transform: rotate(90deg);
+}
+
+.thinking-content {
+  margin-top: 6px;
+  padding-left: 12px;
+  border-left: 2px solid var(--fx-border);
+  color: var(--fx-muted);
+  font-size: 0.92em;
+}
+
+/* Animated ellipsis for "Thinking" — width-based reveal, no-wrap prevents
+ * breaks. vertical-align: baseline + inherited line-height put the
+ * pseudo-element's text baseline exactly on the summary's — the animated
+ * dots sit at the SAME height as literal text periods (bottom/1lh made
+ * them render lower). */
+.thinking summary .dots {
+  white-space: nowrap;
+}
+
+.thinking summary .dots::after {
+  display: inline-block;
+  overflow: hidden;
+  vertical-align: baseline;
+  content: '...';
+  width: 0;
+  animation: dots 1.2s steps(4) infinite;
+}
+
+/* ── Tool cards — the flight records ─────────────────────────────────
+   Tool executions ARE the agent's work, so the card is the visual
+   signature of the conversation: quiet, rhythmically structured, with a
+   2px status rail carrying the flight state (running = the accent
+   current, done = settled, error = coral). No border-pulse; the rail is
+   the status. */
+.tool {
+  position: relative;
+  border: 1px solid var(--fx-border);
+  border-radius: var(--fx-radius-sm);
+  background: var(--fx-elev);
+  overflow: hidden;
+  animation: toolIn var(--fx-duration-base) var(--fx-ease-out) both;
+}
+
+.tool::before {
+  content: '';
+  position: absolute;
+  inset-block: 0;
+  left: 0;
+  width: 2px;
+  background: transparent;
+  pointer-events: none;
+}
+
+.tool.staggered {
+  animation-delay: var(--stagger, 0s);
+}
+
+.tool.done {
+  opacity: 0.82;
+}
+
+.tool.running::before {
+  background: var(--fx-accent);
+}
+
+/* Pending = tool_call_preview: the model is still forming the call.
+ * Dimmed like a ghost of the card it will become; a soft left rail
+ * instead of the running accent. */
+.tool.pending {
+  opacity: 0.66;
+}
+
+.tool.pending::before {
+  background: color-mix(in srgb, var(--fx-accent) 45%, transparent);
+}
+
+.tool.pending .tool-header::before {
+  opacity: 0.4;
+}
+
+.tool .tool-status.pending {
+  color: var(--fx-info);
+}
+
+/* Live argument tail on a pending card: one line of the raw-JSON args
+ * streaming in (O(delta) text-node updates from appendToolPreviewArgs). */
+.tool .tool-args-live {
+  display: block;
+  margin-top: 6px;
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-xs);
+  line-height: 1.5;
+  color: var(--fx-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tool .tool-args-live:empty {
+  display: none;
+}
+
+.tool.done.just-completed {
+  animation: toolDonePop 0.35s var(--fx-ease-spring) both;
+}
+
+.tool .tool-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  cursor: pointer;
+  user-select: none;
+  font-size: var(--fx-text-sm);
+  color: var(--fx-fg);
+}
+
+.tool .tool-header::before {
+  content: '▸';
+  display: inline-block;
+  width: 10px;
+  font-size: 0.8em;
+  color: var(--fx-faint);
+  transition: transform var(--fx-duration-base) var(--fx-ease-out);
+}
+
+.tool.expanded .tool-header::before {
+  transform: rotate(90deg);
+}
+
+.tool .tool-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
+  border-radius: var(--fx-radius-xs);
+  background: var(--fx-accent-dim);
+  color: var(--fx-accent);
+}
+
+.tool strong {
+  font-weight: 600;
+  font-family: var(--fx-font-mono);
+  font-size: 0.92em;
+}
+
+.tool .tool-detail {
+  display: grid;
+  grid-template-rows: 0fr;
+  opacity: 0;
+  transition:
+    grid-template-rows var(--fx-duration-base) var(--fx-ease-in-out),
+    opacity var(--fx-duration-base) var(--fx-ease-in-out);
+}
+
+.tool.expanded .tool-detail {
+  grid-template-rows: 1fr;
+  opacity: 1;
+}
+
+.tool .tool-detail-inner {
+  overflow: hidden;
+  min-height: 0;
+  padding: 0 10px;
+}
+
+.tool.expanded .tool-detail-inner {
+  padding-bottom: 10px;
+}
+
+.tool .tool-status {
+  white-space: nowrap;
+  font-size: var(--fx-text-2xs);
+  color: var(--fx-faint);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.tool .tool-status.running {
+  color: var(--fx-info);
+}
+
+.tool .tool-status.completed {
+  color: var(--fx-success);
+}
+
+/* Running spinner. */
+.tool .spinner {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  vertical-align: -1px;
+  border: 1.5px solid currentcolor;
+  border-top-color: transparent;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+}
+
+/* Collapsed argument summary: a muted one-liner on the right. */
+.tool-args-summary {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
+  color: var(--fx-muted);
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+}
+
+.tool-result-meta {
+  font-size: var(--fx-text-2xs);
+  color: var(--fx-faint);
+  margin: 6px 0 2px;
+  user-select: none;
+}
+
+.tool-args-display {
+  margin-top: 6px;
+}
+
+.tool-args-display code {
+  display: block;
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-xs);
+  line-height: 1.5;
+  background: var(--fx-inset);
+  border-radius: var(--fx-radius-xs);
+  padding: 6px 8px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  color: var(--fx-muted);
+}
+
+.tool-result-container {
+  margin-top: 6px;
+}
+
+.tool-result-container pre {
+  margin: 0;
+  white-space: pre-wrap;
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-xs);
+  line-height: 1.5;
+  background: var(--fx-inset);
+  border-radius: var(--fx-radius-xs);
+  padding: 6px 8px;
+  max-height: 280px;
+  overflow-y: auto;
+  color: var(--fx-fg);
+}
+
+.tool-result-container .copy-btn {
+  margin-top: 4px;
+}
+
+/* ── Shared Markdown Prose ───────────────────────────────────────────── */
+
+.prose {
+  line-height: 1.6;
+  font-size: var(--fx-text-md);
+  /* `anywhere` wraps unbreakable tokens (URLs, hashes) AND zeroes their
+     min-content contribution — without it a pathological message width
+     propagates up the flex chain and scrolls the page sideways. Tables
+     and code blocks keep their own internal scrolling (.table-wrap / pre). */
+  overflow-wrap: anywhere;
+}
+
+.prose code {
+  font-family: var(--fx-font-mono);
+  background: var(--fx-inset);
+  border: 1px solid var(--fx-border);
+  padding: 1px 5px;
+  border-radius: var(--fx-radius-xs);
+  font-size: 0.88em;
+}
+
+.prose pre {
+  background: var(--fx-inset);
+  border: 1px solid var(--fx-border);
+  padding: 10px 12px;
+  border-radius: var(--fx-radius-sm);
+  overflow-x: auto;
+  font-size: 0.9em;
+  margin: 8px 0;
+  position: relative;
+}
+
+.prose pre code {
+  background: transparent;
+  border: none;
+  padding: 0;
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-sm);
+  line-height: 1.55;
+}
+
+.prose h1,
+.prose h2,
+.prose h3,
+.prose h4,
+.prose h5,
+.prose h6 {
+  margin: 12px 0 6px;
+  font-weight: 650;
+  line-height: 1.3;
+}
+
+.prose h1 {
+  font-size: 1.3em;
+}
+
+.prose h2 {
+  font-size: 1.2em;
+}
+
+.prose h3 {
+  font-size: 1.08em;
+}
+
+.prose p {
+  margin: 6px 0;
+}
+
+.prose ul,
+.prose ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.prose li {
+  margin: 3px 0;
+}
+
+.prose li::marker {
+  color: var(--fx-faint);
+}
+
+.prose a {
+  color: var(--fx-info);
+  text-underline-offset: 3px;
+}
+
+.prose blockquote {
+  margin: 6px 0;
+  padding: 2px 0 2px 12px;
+  border-left: 3px solid var(--fx-border-strong);
+  color: var(--fx-muted);
+}
+
+.prose .table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+  margin: 8px 0;
+}
+
+.prose table {
+  border-collapse: collapse;
+  margin: 4px 0;
+  font-size: 0.92em;
+}
+
+.prose th,
+.prose td {
+  border: 1px solid var(--fx-border);
+  padding: 5px 10px;
+}
+
+.prose th {
+  background: var(--fx-inset);
+  font-weight: 600;
+}
+
+.prose hr {
+  border: none;
+  border-top: 1px solid var(--fx-border);
+  margin: 12px 0;
+}
+
+/* ── File preview: rendered markdown ──────────────────────────────────
+   The preview dock renders .md files through the same renderMarkdown
+   pipeline, so it reuses .prose wholesale (headings, code, tables, and
+   the copy-button chrome). Only document-reading typography differs. */
+.md-preview.prose {
+  font-size: var(--fx-text-sm);
+  color: var(--fx-fg);
+}
+
+.md-preview.prose > :first-child {
+  margin-top: 0;
+}
+
+.md-preview.prose h1 {
+  font-size: 1.4em;
+  margin-top: 18px;
+  padding-bottom: 4px;
+  border-bottom: 1px solid var(--fx-border);
+}
+
+.md-preview.prose h2 {
+  font-size: 1.25em;
+  margin-top: 16px;
+}
+
+.md-preview.prose h3 {
+  font-size: 1.1em;
+  margin-top: 14px;
+}
+
+/* Thinking blocks use tighter code/pre overrides. */
+.thinking-content .prose code {
+  padding: 1px 3px;
+}
+
+.thinking-content .prose pre {
+  padding: 6px;
+  margin: 0;
+}
+
+.thinking-content .prose pre.has-code-lang {
+  padding-top: 24px;
+}
+
+/* ── Code block chrome (language badge + copy) ───────────────────────── */
+
+/* The floating badge reserves headroom on the pre. */
+.prose pre.has-code-lang {
+  padding-top: 26px;
+}
+
+.code-lang {
+  position: absolute;
+  top: 6px;
+  left: 10px;
+  font-size: var(--fx-text-2xs);
+  line-height: 1.4;
+  color: var(--fx-faint);
+  text-transform: lowercase;
+  letter-spacing: 0.04em;
+  user-select: none;
+  pointer-events: none;
+}
+
+.code-copy {
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  padding: 2px 7px;
+  font-size: var(--fx-text-2xs);
+  line-height: 1.4;
+  border-radius: var(--fx-radius-xs);
+  color: var(--fx-muted);
+  background: color-mix(in srgb, var(--fx-elev) 80%, transparent);
+  border: 1px solid var(--fx-border);
+  opacity: 0;
+  cursor: pointer;
+  user-select: none;
+  transition: opacity var(--fx-duration-base) ease;
+}
+
+.code-copy::before {
+  content: attr(aria-label);
+}
+
+.prose pre:hover .code-copy,
+.code-copy:focus-visible,
+.code-copy.copied {
+  opacity: 1;
+}
+
+/* Touch: no hover to reveal the copy button — keep it visible. */
+@media (hover: none) {
+  .code-copy {
+    opacity: 1;
+    padding: 6px 12px;
+  }
+}
+
+.code-copy:hover,
+.code-copy:focus-visible {
+  border-color: var(--fx-border-strong);
+  color: var(--fx-fg);
+}
+
+.code-copy.copied {
+  color: var(--fx-success);
+  border-color: color-mix(in srgb, var(--fx-success) 40%, transparent);
+}
+
+/* ── Empty state (per-chat pane) — an invitation to act ──────────────────
+   The wave mark (no tile, no gradient, no float — non-user-triggered
+   decoration) + a plain-language heading + three real prompt entries that
+   fill the composer on click. The prompt rows are HUMAN voice (sans), the
+   wave is the only brand moment. */
+.fx-empty-state {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 55vh;
+  text-align: center;
+  animation: fadeIn 0.4s var(--fx-ease-out) both;
+}
+
+.fx-empty-mark {
+  color: var(--fx-accent);
+  margin-bottom: 10px;
+  user-select: none;
+}
+
+.fx-empty-title {
+  font-size: var(--fx-text-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  color: var(--fx-fg);
+}
+
+.fx-empty-sub {
+  font-size: var(--fx-text-sm);
+  color: var(--fx-muted);
+  margin-bottom: 18px;
+}
+
+.fx-empty-prompts {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  width: min(100%, 460px);
+  gap: 2px;
+}
+
+.fx-empty-prompt {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--fx-muted);
+  font-family: var(--fx-font-ui);
+  font-size: var(--fx-text-sm);
+  text-align: left;
+  padding: 7px 12px;
+  border-radius: var(--fx-radius-sm);
+  cursor: pointer;
+  transition:
+    color var(--fx-duration-fast),
+    background-color var(--fx-duration-fast);
+}
+
+.fx-empty-prompt:hover,
+.fx-empty-prompt:focus-visible {
+  color: var(--fx-fg);
+  background: var(--fx-hover);
+}
+
+/* ── Syntax highlighting (hljs) — the code voice, token-mapped, both themes ──
+   Maps to the dedicated --fx-code-* tokens (tokens.css), so code carries
+   its own two-theme palette instead of borrowing UI semantics. */
+
+.prose .hljs {
+  color: var(--fx-fg);
+  background: transparent;
+}
+
+.prose .hljs-comment,
+.prose .hljs-quote,
+.prose .hljs-meta {
+  color: var(--fx-faint);
+  font-style: italic;
+}
+
+.prose .hljs-keyword,
+.prose .hljs-selector-tag,
+.prose .hljs-literal,
+.prose .hljs-doctag,
+.prose .hljs-name {
+  color: var(--fx-code-keyword);
+  font-weight: 600;
+}
+
+.prose .hljs-string,
+.prose .hljs-regexp,
+.prose .hljs-addition,
+.prose .hljs-attribute,
+.prose .hljs-selector-attr,
+.prose .hljs-selector-pseudo {
+  color: var(--fx-code-string);
+}
+
+.prose .hljs-number,
+.prose .hljs-symbol,
+.prose .hljs-bullet,
+.prose .hljs-link {
+  color: var(--fx-code-number);
+}
+
+.prose .hljs-title,
+.prose .hljs-section,
+.prose .hljs-title.class_,
+.prose .hljs-title.function_,
+.prose .hljs-built_in,
+.prose .hljs-type {
+  color: var(--fx-code-fn);
+}
+
+.prose .hljs-attr,
+.prose .hljs-variable,
+.prose .hljs-template-variable,
+.prose .hljs-params {
+  color: var(--fx-fg);
+}
+
+.prose .hljs-deletion {
+  color: var(--fx-danger);
+  text-decoration: line-through;
+}
+
+.prose .hljs-emphasis {
+  font-style: italic;
+}
+
+.prose .hljs-strong {
+  font-weight: 650;
+}
+
+/* ── Screen reader only ──────────────────────────────────────────────── */
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ── Mobile regime (<768px) — tap geometry for the imperative DOM ──────
+   The hover-independent affordances above cover VISIBILITY; this block
+   covers SIZE: headers and status rows clear the 40px touch floor. */
+
+@media (max-width: 767.5px) {
+  .tool .tool-header {
+    padding: 11px 12px;
+  }
+
+  .thinking summary {
+    padding: 4px 0;
+  }
+
+  .fx-empty-prompt {
+    padding: 11px 12px;
+  }
+
+  .fx-empty-state {
+    min-height: 46vh;
+  }
+}
