@@ -192,7 +192,6 @@ pub(crate) async fn create_chat(
             &sess(state, sid).await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider,
                 id: "test".into(),

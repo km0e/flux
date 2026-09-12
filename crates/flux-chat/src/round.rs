@@ -18,8 +18,7 @@
 //!   `tool_start` wire + a supervised flight ([`Flights`], two-tier
 //!   interrupt, panic capture); `InterruptTools` → cancel the in-flight
 //!   token inline; the flight completion arm pushes exactly one
-//!   `ToolFinished` back into the loop's FIFO (stamped with `ends_round`
-//!   from the consumer's round-ending-name config);
+//!   `ToolFinished` back into the loop's FIFO;
 //! - **engine rebuild**: the ONE control command. The session layer
 //!   mutates the truth sources (provider pin, context base, the global
 //!   tool registry) and sends `Rebuild`; the consumer arms the machine's
@@ -29,25 +28,17 @@
 //!   current global truth, the connection re-begin over the live history
 //!   above the context base, the provider instance from the carried pin.
 //!   The same deterministic assembly every spawn uses — the engine never
-//!   dies for a rebuild, and a live round is never mutated;
-//! - **feature orchestration**: a `feature_done` result + round end
-//!   composes onto the same rebuild flow: the consumer arms the gate,
-//!   and at the fired gate archives the context base (the whole live
-//!   context), swaps the connection over the archived prefix, and
-//!   injects the follow-up (the `feature_done` result — the next
-//!   feature's opening turn) as the next round's user turn. A racing
-//!   user message waits behind the gate and its round lands INSIDE the
-//!   archive (it runs first, on the intact context).
+//!   dies for a rebuild, and a live round is never mutated.
 
 use crate::chat::{CONTEXT_BASE_KEY, Chat, ResolvedPin};
 use crate::question::QuestionTool;
 use crate::spawn::{ChatKit, assemble_tools};
 use crate::tool_exec::{FlightOutput, Flights};
 use flux_core::{
-    ChatKind, ChatStateKind, Connection, FEATURE_DONE_TOOL, LoopFact, LoopInput, OutputPort,
-    Provider, RoundOutcome, StreamEvent, ToolDefinition, ToolRegistry, WireEvent,
+    ChatStateKind, Connection, LoopFact, LoopInput, OutputPort, Provider, StreamEvent,
+    ToolDefinition, ToolRegistry, WireEvent,
 };
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::mpsc;
 
@@ -84,23 +75,16 @@ impl RoundControl {
 /// rebuilds it IN PLACE at the machine gate (never mid-round).
 pub(crate) struct RoundDeps {
     /// The chat entity: persistence fold (transcript appends + the
-    /// overflow-buffer round marking), the `ToolPort` the supervised
-    /// flights call, and the store for the feature orchestration's
-    /// truth-source writes. Its `id` doubles as the consumer's chat id
+    /// overflow-buffer round marking), and the `ToolPort` the supervised
+    /// flights call. Its `id` doubles as the consumer's chat id
     /// (logging + the store calls).
     pub(crate) chat: Arc<Chat>,
     /// The wire sink (production: the router; tests: a collector).
     pub(crate) wire: Arc<dyn OutputPort>,
-    /// The round-ending tool NAMES (adapter config — feature mode
-    /// configures `feature_done`); the consumer stamps `ends_round` on
-    /// each flight feedback. The machine knows only the bool.
-    pub(crate) round_ending_tools: HashSet<String>,
     pub(crate) state_slot: Arc<StdMutex<ChatStateKind>>,
     /// The connection the loop's `ModelInputRequested` opens. Replaced in
     /// place at every fired gate — the in-place rebuild's whole point.
     pub(crate) connection: Box<dyn Connection>,
-    /// Whether the feature orchestration hook is active (feature chats).
-    pub(crate) feature_mode: bool,
     // ── in-place rebuild materials (read fresh at every gate) ──
     /// The agent preamble — every re-begin carries it.
     pub(crate) system_prompt: Arc<str>,
@@ -111,8 +95,6 @@ pub(crate) struct RoundDeps {
     pub(crate) descriptions: Arc<HashMap<String, String>>,
     /// The chat's question board (re-assembles the question tool).
     pub(crate) questions: Arc<crate::question::QuestionBoard>,
-    /// The conversation kind (feature_done registration).
-    pub(crate) kind: ChatKind,
     /// The chat's provider instance (model-pinned) — replaced by a
     /// `Rebuild` carrying a fresh pin, used by every re-begin.
     pub(crate) provider: Arc<dyn Provider>,
@@ -137,17 +119,10 @@ pub(crate) async fn run_round(
     // InterruptTools cancels the in-flight token, the completion arm
     // pushes exactly one ToolFinished per dispatch into the loop's FIFO.
     let mut flights = Flights::new();
-    // Feature-restart intent captured mid-round: (call id, result text).
-    // Taken (consumed) when the armed gate fires — so it survives queued
-    // rounds that run pre-gate — and cleared by a user cancel (the user
-    // said stop: no rebuild, no injection).
-    let mut feature_result: Option<(String, String)> = None;
     // The gate is in flight: the Hold went out, waiting for the machine's
-    // `GateReleased`. Exactly two triggers arm it — a `Rebuild` command or
-    // a feature_done result observed at a round end — and a second trigger
-    // while this is set coalesces into the same gate. `GateReleased` always
-    // discharges into `apply_rebuild` (the feature follow-up, if any, rides
-    // it), so no separate intent flag exists: the gate IS the intent.
+    // `GateReleased`. The one trigger is a `Rebuild` command; a second
+    // trigger while this is set coalesces into the same gate.
+    // `GateReleased` always discharges into `apply_rebuild`.
     let mut gate_awaited = false;
     loop {
         // Deterministic order: facts first (the loop's trace is the
@@ -173,17 +148,10 @@ pub(crate) async fn run_round(
             Item::Flight(done) => {
                 // The flight's outcome — exactly one feedback per dispatch,
                 // pushed into the loop's FIFO like every other peer's
-                // feedback. The consumer stamps `ends_round` here (adapter
-                // config: the round-ending tool NAMES; the machine knows
-                // only the bool).
+                // feedback.
                 let (call, result) = flights.collect(done);
-                let ends_round = deps.round_ending_tools.contains(&call.name);
                 if loop_tx
-                    .send(LoopInput::ToolFinished {
-                        call,
-                        result,
-                        ends_round,
-                    })
+                    .send(LoopInput::ToolFinished { call, result })
                     .is_err()
                 {
                     break; // loop gone — nothing left to feed
@@ -214,32 +182,10 @@ pub(crate) async fn run_round(
                     LoopFact::Wire(event) => {
                         deps.wire.emit(event).await;
                     }
-                    LoopFact::RoundEnded(outcome) => {
-                        // The semantic round classification — the feature
-                        // hook's input. The machine assigns it at the single
-                        // wrap-up point; no wire-event scraping here:
-                        // - `ToolEnded` carries the round-ending tool's call
-                        //   + full result (the next feature's opening turn);
-                        //   only `feature_done` composes onto the rebuild
-                        //   flow — other round-ending names (if an adapter
-                        //   ever configures more) just end their round.
-                        // - `Cancelled` clears the intent: a user cancel
-                        //   absorbed during the feature_done flight wrapped
-                        //   the round with Cancelled (the machine exempts
-                        //   the tool from interruption) — the user said
-                        //   stop: no rebuild, no injection; the next user
-                        //   message continues on the intact context.
-                        if deps.feature_mode {
-                            match outcome {
-                                RoundOutcome::ToolEnded { call, result }
-                                    if call.name == FEATURE_DONE_TOOL =>
-                                {
-                                    feature_result = Some((call.id, result));
-                                }
-                                RoundOutcome::Cancelled => feature_result = None,
-                                _ => {}
-                            }
-                        }
+                    LoopFact::RoundEnded(_) => {
+                        // The semantic round classification — no consumer
+                        // fold today; the fact remains the machine's
+                        // authoritative terminal record.
                     }
                     LoopFact::ModelInputRequested(pending) => {
                         // The connection is never replaced — reads here are
@@ -285,28 +231,14 @@ pub(crate) async fn run_round(
                     LoopFact::GateReleased => {
                         // The gate fired: rebuild the engine IN PLACE from
                         // the truth sources — provider instance, tool
-                        // registry, live history above the context base —
-                        // then inject the feature follow-up (if any) as
-                        // the next round's user turn. The engine never
-                        // dies for a rebuild; the consumer keeps folding.
-                        apply_rebuild(&mut deps, feature_result.take(), &loop_tx).await;
+                        // registry, live history above the context base.
+                        // The engine never dies for a rebuild; the consumer
+                        // keeps folding.
+                        apply_rebuild(&mut deps).await;
                         gate_awaited = false;
                     }
                     LoopFact::RoundState(kind) => {
                         *deps.state_slot.lock().unwrap() = kind;
-                        // Feature restart: the round ended of its own accord
-                        // with a feature_done result — compose onto the same
-                        // rebuild flow. If a rebuild is already holding or
-                        // draining, the feature intent finalizes at ITS exit;
-                        // if a user message already started the next round,
-                        // the Hold arms and lands at THAT round's wrap-up.
-                        // (`feature_result` is only ever Some in feature
-                        // mode — its capture site is guarded by it.)
-                        if kind == ChatStateKind::Idle && feature_result.is_some() && !gate_awaited
-                        {
-                            let _ = loop_tx.send(LoopInput::Hold);
-                            gate_awaited = true;
-                        }
                     }
                 }
             }
@@ -321,50 +253,18 @@ enum Item {
     Closed,
 }
 
-/// Finalize the feature orchestration at the drained gate: persist the
-/// context base (archive the WHOLE live context — a round that raced the
-/// gate already reached the store and lands inside the archive) and hand
-/// the follow-up to the session layer (the respawn injects it as the
-/// fresh engine's first user turn). The wire notice rides the truth-source
-/// write (the mutator announces). A persistence failure logs and skips the
-/// injection — respawning on an un-archived context with a feature opening
-/// turn would start the next feature on a stale context.
 /// Rebuild the engine in place at the fired gate. Order matters:
 ///
-/// 1. **feature archive** (if a feature_done result is pending) — the new
-///    connection's prefix is the live history above the NEW base;
+/// 1. **base read** — the new connection's prefix is the live history
+///    above the persisted context base (manual rebase path);
 /// 2. **re-assembly** — the registry from the CURRENT global truth (the
 ///    same `assemble_tools` the initial spawn runs) and the connection
 ///    re-begin over the live history above the context base, on the
-///    chat's current provider instance;
-/// 3. **follow-up injection** — the archived feature's opening turn rides
-///    the loop channel as a plain user turn; the machine is Idle here
-///    (the gate fired only once the turn queue drained), so it starts
-///    the next feature on the FRESH connection.
+///    chat's current provider instance.
 ///
 /// A store failure keeps the current engine materials (the rebuild
-/// retries at the next gate); an archive failure skips only the
-/// injection — the next feature would start on an un-archived context,
-/// the same conservative call the respawn flow made.
-async fn apply_rebuild(
-    deps: &mut RoundDeps,
-    feature: Option<(String, String)>,
-    loop_tx: &mpsc::UnboundedSender<LoopInput>,
-) {
-    let follow_up = match feature {
-        Some((call_id, text)) => match archive_feature(deps, &call_id, &text).await {
-            Ok(text) => Some(text),
-            Err(e) => {
-                tracing::warn!(
-                    chat_id = %deps.chat.id,
-                    error = %e,
-                    "feature context archive failed; skipping the follow-up injection"
-                );
-                None
-            }
-        },
-        None => None,
-    };
+/// retries at the next gate).
+async fn apply_rebuild(deps: &mut RoundDeps) {
     let base = match deps.chat.store.load_state(&deps.chat.id).await {
         Ok(state) => state
             .get(CONTEXT_BASE_KEY)
@@ -410,7 +310,6 @@ async fn apply_rebuild(
         &kit,
         &deps.chat.id,
         &deps.chat.store,
-        deps.kind,
     );
     let tool_defs: Arc<[ToolDefinition]> = Arc::from(fresh.definitions().into_boxed_slice());
     deps.chat.tools.replace_with(&fresh);
@@ -423,49 +322,6 @@ async fn apply_rebuild(
         history = history.len(),
         "engine rebuilt in place at the machine gate"
     );
-    if let Some(text) = follow_up {
-        let _ = loop_tx.send(LoopInput::UserMessage(text));
-    }
-}
-
-/// Archive the feature context at the gate: resolve the follow-up's FULL
-/// text first (a buffered feature_done result must not dangle behind the
-/// GC below), persist the context base (the whole live context archives —
-/// a round that raced the gate already reached the store and lands inside
-/// the archive), GC the buffered outputs whose calls the archive removed
-/// from the model's view, and announce the rebase. Returns the resolved
-/// follow-up text (the injection's payload).
-async fn archive_feature(
-    deps: &mut RoundDeps,
-    call_id: &str,
-    text: &str,
-) -> anyhow::Result<String> {
-    let text = match deps
-        .chat
-        .store
-        .load_buf_entry(&deps.chat.id, call_id)
-        .await?
-    {
-        Some(full) => full,
-        None => text.to_string(),
-    };
-    let base = deps.chat.store.max_message_id(&deps.chat.id).await?;
-    deps.chat
-        .store
-        .save_state_entry(&deps.chat.id, CONTEXT_BASE_KEY, &base.to_string())
-        .await?;
-    deps.chat.store.gc_buf_entries(&deps.chat.id, base).await?;
-    deps.wire
-        .emit(WireEvent::ContextRebased {
-            base_message_id: base,
-        })
-        .await;
-    tracing::info!(
-        chat_id = %deps.chat.id,
-        base,
-        "feature context archived at the machine gate"
-    );
-    Ok(text)
 }
 
 /// Sets the done flag on drop — every exit from the consumer task body,

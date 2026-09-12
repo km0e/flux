@@ -227,7 +227,6 @@ async fn test_chat() -> (Chat, Arc<MockSink>) {
             &kit,
             "test-chat",
             &store,
-            flux_core::ChatKind::Classic,
         )),
         store,
     };
@@ -299,7 +298,6 @@ async fn spawn_scripted(
         ChatInit {
             id: "test-chat".into(),
             history: Vec::new(),
-            kind: flux_core::ChatKind::Classic,
             questions: Arc::new(crate::question::QuestionBoard::new()),
             provider: provider.clone(),
         },
@@ -365,7 +363,6 @@ async fn rebuild_command_rebuilds_the_engine_in_place() {
         ChatInit {
             id: "test-chat".into(),
             history: Vec::new(),
-            kind: flux_core::ChatKind::Classic,
             questions: Arc::new(crate::question::QuestionBoard::new()),
             provider: provider.clone(),
         },
@@ -445,155 +442,6 @@ async fn rebuild_during_a_live_round_defers_to_its_wrap_up() {
     assert_eq!(sink.tool_results.lock().unwrap().len(), 1);
 }
 
-/// End-to-end feature restart through a real spawned Chat: the model
-/// calls `feature_done`, the round wraps WITHOUT a follow-up stream, the
-/// consumer composes the rebuild — at the drained gate it archives the
-/// whole live context (context_base persists), hands the feature_done
-/// result to the session layer (the follow-up handoff key), and announces
-/// the rebase. The respawn + injection live in flux-session's tests; this
-/// pins the consumer's half of the composition.
-async fn spawn_feature(
-    scripts: Vec<Vec<Result<StreamChunk, CoreError>>>,
-) -> (ChatHandle, Arc<ScriptedProvider>, Arc<MockSink>, Arc<Store>) {
-    // A real feature chat always has a workdir (create_chat enforces it);
-    // the scaffold build must be fast here so a cancelled flight finishes
-    // inside the interrupt grace instead of force-terminating.
-    let workdir = tempfile::tempdir().unwrap();
-    let sink = Arc::new(MockSink::new());
-    let store = Arc::new(Store::open_in_memory().await.unwrap());
-    store.insert_chat("test-chat", "test").await.unwrap();
-    store
-        .save_state_entry("test-chat", "workdir", workdir.path().to_str().unwrap())
-        .await
-        .unwrap();
-    let provider = Arc::new(ScriptedProvider::staged(
-        scripts
-            .into_iter()
-            .map(|script| {
-                // One segment per stage.
-                vec![
-                    script
-                        .into_iter()
-                        .map(ScriptItem::Chunk)
-                        .collect::<Vec<_>>(),
-                ]
-            })
-            .collect(),
-    ));
-    let handle = spawn(
-        ChatInit {
-            id: "test-chat".into(),
-            history: Vec::new(),
-            kind: flux_core::ChatKind::Feature,
-            questions: Arc::new(crate::question::QuestionBoard::new()),
-            provider: provider.clone(),
-        },
-        Arc::from(""),
-        Arc::new(ToolRegistry::default()),
-        store.clone(),
-        Arc::new(HashMap::new()),
-        sink.clone(),
-    )
-    .await;
-    (handle, provider, sink, store)
-}
-
-#[tokio::test]
-async fn feature_done_archives_context_and_injects_the_follow_up() {
-    let (handle, provider, sink, store) = spawn_feature(vec![
-        vec![
-            Ok(StreamChunk::ToolCalls(vec![ToolCall {
-                id: "f1".into(),
-                name: flux_core::FEATURE_DONE_TOOL.into(),
-                arguments: r#"{"summary":"did the thing"}"#.into(),
-            }])),
-            Ok(StreamChunk::End {
-                finish_reason: None,
-            }),
-        ],
-        // Stage 1: the INJECTED follow-up round streams to completion on
-        // the rebuilt connection.
-        vec![
-            Ok(StreamChunk::Text("next feature starts".into())),
-            Ok(StreamChunk::End {
-                finish_reason: None,
-            }),
-        ],
-    ])
-    .await;
-
-    // Simulate a TRUNCATED feature_done result: seed the buffered FULL
-    // output under the call id BEFORE the round runs (this scaffold is
-    // small, so the tool's own bounding never writes — the seed is the
-    // only entry). The archive must resolve the FULL content into the
-    // injected turn: the GC at this very boundary deletes the entry, and
-    // the scaffold must not dangle behind a dead reference.
-    store
-        .save_buf_entry("test-chat", "f1", "FULL SCAFFOLD CONTENT")
-        .await
-        .unwrap();
-
-    handle.send_user("build it".into());
-    wait_for(|| *sink.stream_ends.lock().unwrap() >= 1).await;
-    // The tool result landed, then the consumer composed the rebuild:
-    // archive → in-place re-begin → the follow-up injected as the next
-    // round's user turn, which streams on the FRESH connection.
-    assert!(
-        sink.tool_results
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|(id, _, _)| id == "f1"),
-        "feature_done executed"
-    );
-    wait_for(|| *sink.stream_ends.lock().unwrap() >= 2).await;
-    assert_eq!(provider.begin_count(), 2, "re-begun in place");
-    assert!(!handle.is_done(), "the engine never dies for a rebuild");
-
-    // The rebase notice rode the truth-source write.
-    assert_eq!(sink.rebase_bases.lock().unwrap().len(), 1);
-    // The whole PRE-INJECTION context archived: base = the last message
-    // before the boundary (user + feature tool_call + its result), and
-    // the injected turn + its reply land ABOVE the base (they ARE the
-    // next feature's live context).
-    let state = store.load_state("test-chat").await.unwrap();
-    let base = state.get(crate::chat::CONTEXT_BASE_KEY).unwrap();
-    let base = base.parse::<i64>().unwrap();
-    assert_eq!(base, 3, "everything before the boundary archived");
-    // The follow-up was injected as a USER turn carrying the FULL
-    // buffered content (not the bounded head) — the next feature's
-    // opening context, persisted like any user message.
-    // The injected turn + its reply are exactly the LIVE context above
-    // the base (the store's keep-set) — the injection is live context,
-    // not archive, and it carries the FULL buffered content (not the
-    // bounded head).
-    let live = store.load_messages_after("test-chat", base).await.unwrap();
-    assert_eq!(live.len(), 2);
-    assert_eq!(live[0].role, flux_core::Role::User);
-    assert!(live[0].content.contains("FULL SCAFFOLD CONTENT"));
-    assert!(!live[0].content.contains("output truncated"));
-    // The GC at this boundary swept the buffered entry (its call is
-    // archived) — the content survives only in the injected turn.
-    assert!(
-        store
-            .load_buf_entry("test-chat", "f1")
-            .await
-            .unwrap()
-            .is_none(),
-        "the archived call's buf entry is gone"
-    );
-    // The feature's decision was recorded.
-    let decisions = store.list_feature_logs("test-chat", 10).await.unwrap();
-    assert_eq!(decisions.len(), 1);
-}
-
-// (A user cancel absorbed during the feature_done flight skipping the
-// restart is pinned at the kernel level: machine_tests'
-// user_cancel_during_ends_round_tool_wins_no_wrap_interrupt + the
-// consumer's Cancelled-clears-the-intent fold. The e2e race window is not
-// deterministically constructible — a fast tool finishes before the cancel
-// lands, which is the legitimate ends_round path.)
-
 #[tokio::test]
 async fn cancel_during_active_stream_aborts_collection() {
     let sink = Arc::new(MockSink::new());
@@ -604,7 +452,6 @@ async fn cancel_during_active_stream_aborts_collection() {
         ChatInit {
             id: "test-chat".into(),
             history: Vec::new(),
-            kind: flux_core::ChatKind::Classic,
             questions: Arc::new(crate::question::QuestionBoard::new()),
             provider,
         },
@@ -823,7 +670,6 @@ async fn chat_with_tools(tools: ToolRegistry) -> (Chat, Arc<MockSink>) {
             &kit,
             "test-chat",
             &store,
-            flux_core::ChatKind::Classic,
         )),
         store,
     };
@@ -961,7 +807,6 @@ async fn tool_port_enriches_ctx_with_chat_boundary() {
             &kit,
             "test-chat",
             &store,
-            flux_core::ChatKind::Classic,
         )),
         store,
     };
@@ -1121,14 +966,7 @@ async fn assemble_tools_includes_state_tools_and_global_entries() {
         descriptions: &HashMap::new(),
         question: question_tool(sink_for_assemble()),
     };
-    let registry = assemble_tools(
-        &global,
-        sm,
-        &kit,
-        "c1",
-        &store,
-        flux_core::ChatKind::Classic,
-    );
+    let registry = assemble_tools(&global, sm, &kit, "c1", &store);
     let names: Vec<String> = registry
         .entries()
         .iter()
@@ -1155,56 +993,4 @@ async fn assemble_tools_includes_state_tools_and_global_entries() {
     assert!(defs.iter().any(|d| d.name == "state_get"));
     assert!(defs.iter().any(|d| d.name == "state_set"));
     assert!(defs.iter().any(|d| d.name == flux_core::QUESTION_TOOL));
-}
-
-#[tokio::test]
-async fn feature_chat_registers_feature_done_but_classic_does_not() {
-    let global = ToolRegistry::default();
-    let store = Arc::new(Store::open_in_memory().await.unwrap());
-
-    let feature_sm = Arc::new(StateManager::for_chat(store.clone(), "f", &HashMap::new()).await);
-    let kit = crate::spawn::ChatKit {
-        descriptions: &HashMap::new(),
-        question: question_tool(sink_for_assemble()),
-    };
-    let feature = assemble_tools(
-        &global,
-        feature_sm,
-        &kit,
-        "f",
-        &store,
-        flux_core::ChatKind::Feature,
-    );
-    let names: Vec<String> = feature
-        .entries()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-    assert!(
-        names.contains(&flux_core::FEATURE_DONE_TOOL.to_string()),
-        "feature chat registers feature_done: {names:?}"
-    );
-
-    let classic_sm = Arc::new(StateManager::for_chat(store.clone(), "c", &HashMap::new()).await);
-    let kit = crate::spawn::ChatKit {
-        descriptions: &HashMap::new(),
-        question: question_tool(sink_for_assemble()),
-    };
-    let classic = assemble_tools(
-        &global,
-        classic_sm,
-        &kit,
-        "c",
-        &store,
-        flux_core::ChatKind::Classic,
-    );
-    let names: Vec<String> = classic
-        .entries()
-        .iter()
-        .map(|t| t.name().to_string())
-        .collect();
-    assert!(
-        !names.contains(&flux_core::FEATURE_DONE_TOOL.to_string()),
-        "classic chat does not register feature_done: {names:?}"
-    );
 }

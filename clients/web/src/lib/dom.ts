@@ -29,9 +29,6 @@ const TOOL_ICON_PATHS: Record<string, string> = {
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
   // feather: package — rust_* project tools
   box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
-  // feather: git-branch —— feature_done
-  branch:
-    '<line x1="6" y1="3" x2="6" y2="15"/><circle cx="18" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M18 9a9 9 0 0 1-9 9"/>',
   // feather: share-2 — external MCP tools
   share:
     '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>',
@@ -45,7 +42,6 @@ function toolIconKey(name: string): string {
     return 'search';
   if (n.includes('rust')) return 'box';
   if (n.includes('mcp') || n.includes('remote')) return 'share';
-  if (n === 'feature_done') return 'branch';
   return 'file';
 }
 

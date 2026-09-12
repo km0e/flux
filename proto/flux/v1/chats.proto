@@ -85,8 +85,6 @@ service ChatService {
 message CreateChatRequest {
   string name = 1;
   string workdir = 2;
-  // UNSPECIFIED reads as classic (the server default).
-  ChatKind kind = 3;
   // Pin the chat to a registered provider (registry id). REQUIRED.
   string provider = 4;
   // Pin the model. REQUIRED.

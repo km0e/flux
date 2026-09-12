@@ -417,7 +417,6 @@ async fn create_chat(server: &Server, token: &str, name: &str, workdir: &str) ->
         CreateChatRequest {
             name: name.into(),
             workdir: workdir.into(),
-            kind: 0,
             provider: "default".into(),
             model: "test-model".into(),
         },
@@ -446,7 +445,6 @@ async fn connect_round_trip_create_list() {
         CreateChatRequest {
             name: "E2E Test".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "default".into(),
             model: "test-model".into(),
         },
@@ -1059,7 +1057,6 @@ async fn chat_create_requires_an_explicit_provider() {
         CreateChatRequest {
             name: "No Pin".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "".into(),
             model: "test-model".into(),
         },
@@ -1078,7 +1075,6 @@ async fn chat_create_requires_an_explicit_provider() {
         CreateChatRequest {
             name: "No Model".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "default".into(),
             model: "".into(),
         },
@@ -1106,7 +1102,6 @@ async fn chat_create_requires_an_explicit_provider() {
         CreateChatRequest {
             name: "Ghost".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "ghost".into(),
             model: "test-model".into(),
         },

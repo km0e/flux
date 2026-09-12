@@ -58,8 +58,6 @@ export interface Chat {
   lastActivityAt?: number;
   /** Another window holds the lease (wire ChatInfo.active) — the sidebar shows "In use". */
   active: boolean;
-  /** Conversation kind — classic (accumulating context) / feature (re-scaffolded per feature). */
-  kind: 'classic' | 'feature';
   /** The chat's working directory (the tool sandbox boundary; shown as a cwd line). */
   workdir: string;
   /** The chat's pinned provider registry id. */

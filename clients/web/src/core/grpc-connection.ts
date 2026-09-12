@@ -35,7 +35,7 @@ import type {
 } from './types';
 import type { ChatInfo as ProtoChatInfo, Message as ProtoMessage } from '../gen/flux/v1/common_pb';
 import type { SubscribeResponse } from '../gen/flux/v1/events_pb';
-import { ChatKind as ProtoChatKind, ChatStateKind as ProtoChatStateKind } from '../gen/flux/v1/common_pb';
+import { ChatStateKind as ProtoChatStateKind } from '../gen/flux/v1/common_pb';
 import { SkillSource as ProtoSkillSource } from '../gen/flux/v1/common_pb';
 import { log } from '../logger';
 import { newId } from '../lib/id';
@@ -60,7 +60,6 @@ export function protoChatToChat(c: ProtoChatInfo): ChatInfo {
     created_at: c.createdAt,
     last_activity_at: c.lastActivityAt,
     active: c.active,
-    kind: c.kind === ProtoChatKind.FEATURE ? 'feature' : 'classic',
     workdir: c.workdir,
     provider: c.provider,
     model: c.model,
@@ -505,7 +504,6 @@ export class ConnectConnection {
             {
               name: data.name,
               workdir: data.workdir,
-              kind: data.kind === 'feature' ? 2 : 1,
               provider: data.provider,
               model: data.model,
             },

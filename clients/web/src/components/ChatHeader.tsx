@@ -1,6 +1,6 @@
 /**
  * ChatHeader.tsx — the conversation's header row, above the message
- * column: the chat identity (name, kind, workdir), the dock toggle, and
+ * column: the chat identity (name, workdir), the dock toggle, and
  * the per-chat token usage. The global TopBar carries only app-wide
  * state; THIS row owns everything that belongs to the open conversation,
  * so the canvas has an anchor and the workdir (the sandbox boundary)
@@ -15,7 +15,7 @@
  *          components/UsageStats
  */
 import { useFlux } from '../core/state';
-import { Badge, IconButton } from './ui';
+import { IconButton } from './ui';
 import { Tooltip } from './ui/tooltip';
 import { PanelRight } from 'lucide-react';
 import { cn } from '../lib/cn';
@@ -40,11 +40,6 @@ export function ChatHeader(): React.ReactElement | null {
       >
         {active.name || 'New Chat'}
       </span>
-      {active.kind === 'feature' && (
-        <Badge tone="accent" title="Feature mode — per-feature context">
-          Feature
-        </Badge>
-      )}
       {active.workdir && (
         <span
           className="hidden min-w-0 flex-1 truncate font-mono text-2xs text-faint md:block"

@@ -45,7 +45,6 @@ function toChat(c: ChatInfo): Chat {
     createdAt: new Date(c.created_at).getTime(),
     lastActivityAt: new Date(c.last_activity_at).getTime(),
     active: c.active,
-    kind: c.kind,
     workdir: c.workdir,
     provider: c.provider,
     model: c.model,
@@ -179,9 +178,9 @@ const HANDLERS = {
     }
   },
 
-  /** Feature mode: the context re-scaffolded at the feature boundary (rebase
-   * archive) — insert a neutral notice into the chat flow (the history stays
-   * viewable in the DB but is no longer in the model's context). */
+  /** Context rebase: the archive boundary moved (manual rebase) — insert a
+   * neutral notice into the chat flow (the history stays viewable in the
+   * DB but is no longer in the model's context). */
   context_rebased: (msg, _ctx) => {
     const pane = getPaneIfExists(msg.chat_id);
     if (!pane) return;

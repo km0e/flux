@@ -11,7 +11,7 @@ import { resetBridgeForTest, setBridge } from '../../core/bridge';
 import { setDialogImpls, resetDialogsForTest } from '../../services/dialogs';
 
 function chat(id: string, over: Partial<Chat> = {}): Chat {
-  return { id, name: id, createdAt: Date.now(), kind: 'classic', active: false, workdir: `/tmp/${id}`, provider: '', model: '', ...over };
+  return { id, name: id, createdAt: Date.now(), active: false, workdir: `/tmp/${id}`, provider: '', model: '', ...over };
 }
 
 describe('Sidebar', () => {
@@ -93,16 +93,6 @@ describe('Sidebar', () => {
     fireEvent.change(filter, { target: { value: 'gamma' } });
     expect(screen.getByLabelText('Open chat Beta')).toBeTruthy();
     expect(screen.queryByLabelText('Open chat Alpha')).toBeNull();
-  });
-
-  it('feature chats carry the kind badge; in-use chats are flagged', () => {
-    useFlux.setState({
-      chats: [chat('c1', { kind: 'feature' }), chat('c2', { active: true })],
-      activeChatId: 'c1',
-    });
-    render(<Sidebar />);
-    expect(screen.getByText('Feature')).toBeTruthy();
-    expect(screen.getByText('In use')).toBeTruthy();
   });
 
   it('the In-use badge is suppressed for rows on an in-flight lease switch', () => {

@@ -8,7 +8,6 @@ repository.workspace = true
 
 [dependencies]
 flux-core = { path = "../flux-core" }
-flux-context = { path = "../flux-context" }
 flux-loop = { path = "../flux-loop" }
 flux-store = { path = "../flux-store" }
 tokio = { workspace = true }

@@ -1,16 +1,16 @@
 /**
- * NewChatDialog.tsx — filesystem browser + conversation-kind
- * picker, one dialog (D-26: the web host is the only host).
+ * NewChatDialog.tsx — filesystem browser, one dialog (D-26: the web host is
+ * the only host).
  *
  * Navigate anywhere the server's user can read (`fs_list` over the WS),
- * preview directory contents and file heads (`fs_read`), pick the kind,
- * then create the chat in the browsed directory. No server-configured
- * project list — the workdir source is the filesystem itself.
+ * preview directory contents and file heads (`fs_read`), then create the
+ * chat in the browsed directory. No server-configured project list — the
+ * workdir source is the filesystem itself.
  *
  * Provides: NewChatDialog
  * Depends: services/fs.ts, services/dialogs.ts (types), components/ui/*
  */
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useState } from 'react';
 import {
   ArrowUp,
   ChevronRight,
@@ -25,7 +25,6 @@ import { listDir, readFile, isDisconnect } from '../../services/fs';
 import { useFlux } from '../../core/state';
 import { fmtBytes } from '../../lib/format';
 import type { NewChatChoice } from '../../services/dialogs';
-import type { ChatKind } from '../../services/dialogs';
 import type { FsEntry } from '../../core/types';
 import { cn } from '../../lib/cn';
 import { FileIcon } from '../FileIcon';
@@ -58,66 +57,6 @@ function visibleCrumbs(path: string): { label: string; path: string | null }[] {
   ];
 }
 
-const KIND_OPTIONS: { value: ChatKind; label: string; hint: string }[] = [
-  { value: 'classic', label: 'Classic', hint: 'context keeps accumulating' },
-  { value: 'feature', label: 'Feature', hint: 'context re-scaffolds per feature' },
-];
-
-/** Kind selector — a radiogroup with roving tabindex and arrow keys. */
-function KindPicker(props: { value: ChatKind; onChange: (k: ChatKind) => void }): React.ReactElement {
-  const refs = useRef<(HTMLButtonElement | null)[]>([]);
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    const idx = KIND_OPTIONS.findIndex((o) => o.value === props.value);
-    if (e.key === 'ArrowRight' || e.key === 'ArrowDown') {
-      e.preventDefault();
-      const next = KIND_OPTIONS[(idx + 1) % KIND_OPTIONS.length];
-      props.onChange(next.value);
-      refs.current[KIND_OPTIONS.indexOf(next)]?.focus();
-    } else if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') {
-      e.preventDefault();
-      const prev = KIND_OPTIONS[(idx - 1 + KIND_OPTIONS.length) % KIND_OPTIONS.length];
-      props.onChange(prev.value);
-      refs.current[KIND_OPTIONS.indexOf(prev)]?.focus();
-    }
-  };
-  return (
-    <div role="radiogroup" aria-label="Conversation type" onKeyDown={onKeyDown} className="flex flex-wrap gap-2">
-      {KIND_OPTIONS.map((o, i) => (
-        <button
-          key={o.value}
-          ref={(el) => {
-            refs.current[i] = el;
-          }}
-          type="button"
-          role="radio"
-          aria-checked={props.value === o.value}
-          tabIndex={props.value === o.value ? 0 : -1}
-          className={cn(
-            'flex cursor-pointer items-center gap-2 rounded-lg border px-3.5 py-2 text-sm transition-colors',
-            'focus:outline-none focus-visible:ring-2 focus-visible:ring-accent',
-            props.value === o.value
-              ? 'border-accent bg-accent-dim text-fg'
-              : 'border-border bg-inset text-muted hover:border-border-strong hover:text-fg',
-          )}
-          onClick={() => props.onChange(o.value)}
-        >
-          <span
-            aria-hidden="true"
-            className={cn(
-              'size-2 rounded-full border',
-              props.value === o.value ? 'border-accent bg-accent' : 'border-faint',
-            )}
-          />
-          <span>
-            {o.label}
-            <em className="ml-1 text-2xs text-muted not-italic"> — {o.hint}</em>
-          </span>
-        </button>
-      ))}
-    </div>
-  );
-}
-
 /** Inline message for a listing that failed because the server is down —
  * kept OUT of the error state so the reconnect self-heal can key on it. */
 const OFFLINE_HINT = 'server disconnected';
@@ -127,8 +66,8 @@ export function NewChatDialog(props: {
   onCancel: () => void;
 }): React.ReactElement {
   // Inheritance: the last opened chat (the active one; the most recent as
-  // the fallback) seeds EVERY field but the name — kind, provider pin,
-  // model, and the initially browsed workdir all start from it. The dialog
+  // the fallback) seeds EVERY field but the name — provider pin, model,
+  // and the initially browsed workdir all start from it. The dialog
   // remounts per invocation, so the initializers re-read the store fresh
   // each time it opens.
   const chats = useFlux((s) => s.chats);
@@ -141,7 +80,6 @@ export function NewChatDialog(props: {
   const [entries, setEntries] = useState<FsEntry[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const [kind, setKind] = useState<ChatKind>(seed?.kind ?? 'classic');
   const [providerId, setProviderId] = useState(seed?.provider ?? '');
   const [model, setModel] = useState(seed?.model ?? '');
   const [preview, setPreview] = useState<{
@@ -240,8 +178,6 @@ export function NewChatDialog(props: {
       <DialogContent className="flex h-[min(88dvh,600px)] w-[min(94vw,960px)] flex-col overflow-y-hidden">
         <DialogTitle>New chat</DialogTitle>
         <div className="flex min-h-0 flex-1 flex-col gap-2.5">
-          <KindPicker value={kind} onChange={setKind} />
-
           <ProviderPicker
             providerId={providerId}
             model={model}
@@ -385,7 +321,6 @@ export function NewChatDialog(props: {
                   providerId &&
                   model.trim() &&
                   props.onCreate({
-                    kind,
                     workdir: path,
                     provider: providerId,
                     model: model.trim(),

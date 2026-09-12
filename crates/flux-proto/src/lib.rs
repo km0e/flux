@@ -67,15 +67,6 @@ pub mod conv {
         }
     }
 
-    impl From<flux_core::ChatKind> for v1::ChatKind {
-        fn from(k: flux_core::ChatKind) -> Self {
-            match k {
-                flux_core::ChatKind::Classic => v1::ChatKind::Classic,
-                flux_core::ChatKind::Feature => v1::ChatKind::Feature,
-            }
-        }
-    }
-
     impl From<flux_core::ChatStateKind> for v1::ChatStateKind {
         fn from(s: flux_core::ChatStateKind) -> Self {
             match s {

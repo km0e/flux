@@ -14,7 +14,6 @@ A general-purpose coding agent framework in Rust with a browser chat UI frontend
 - **Chat history**: persistent conversations with full message history across restarts.
 - **Built-in terminal**: interactive shells (e4pty PTY, xterm.js UI) over a dedicated `/ws/term` side channel — multiple per chat, added on demand via the dock's "+" or the sidebar button; kept alive across tab switches and re-attached after a page refresh within the session grace window.
 - **Tabbed right dock**: opened files accumulate as tabs (multi-file, editor-style); file bodies scroll horizontally; `.md` files render through the shared markdown pipeline with a Raw toggle.
-- **Feature mode** (code-engineering mode): `kind = "feature"` chats re-orchestrate the context at every feature boundary — the model sees only a project scaffold (profile, tree, git status, convention files, last-feature decisions), never archived history. Project-level tuning lives in `<workdir>/.flux/config.toml`; multi-project (monorepo) aware, and prefix-cache friendly: info blocks are measured by change frequency (git history / content hash) and ordered stable-first.
 - **Web UI**: a React chat UI served BY DEFAULT by flux-server on the SAME port as the WS endpoint (one listener) — `./scripts/run-server.sh` (builds the UI when missing); `--no-web` runs headless. The page is a viewer/controller connecting back same-origin over WS. Bind beyond localhost only behind a TLS proxy — the server has no auth layer.
 
 ## Project layout
@@ -56,7 +55,7 @@ Plain JSON with a `type` field dispatch. Connect to `ws://localhost:{port}`.
 
 | Direction | Type | Purpose |
 |-----------|------|---------|
-| → | `chat_create {name, workdir, kind, provider, model}` | Create conversation — `kind`: `classic` (accumulating context) / `feature` (re-orchestrated per feature); `provider` and `model` are both REQUIRED (providers are pure endpoints managed from the UI) |
+| → | `chat_create {name, workdir, provider, model}` | Create conversation — `provider` and `model` are both REQUIRED (providers are pure endpoints managed from the UI) |
 | → | `chat {chat_id, message}` | Send message (auto-claims when unleased) |
 | → | `chat_claim {chat_id}` | Acquire the chat's lease — history + subscribe + lease in one message; busy → `error{chat_busy}` |
 | → | `chat_open {chat_id}` | Viewer path: subscribe + history (first subscription only; idempotent when already subscribed) |
@@ -79,7 +78,7 @@ Plain JSON with a `type` field dispatch. Connect to `ws://localhost:{port}`.
 | ← | `question_required {chat_id, id, question}` | The `question` tool awaits the user's answer (direct to lease holder; parked until answered) |
 | ← | `chat_history {chat_id, messages}` | Chat history snapshot |
 | ← | `chat_state {chat_id, state}` | Authoritative round-state snapshot (idle/streaming) |
-| ← | `context_rebased {chat_id, base_message_id}` | Feature mode: context re-based at a feature boundary |
+| ← | `context_rebased {chat_id, base_message_id}` | Context re-based (manual rebase): everything at/below the base was archived |
 | ← | `usage {chat_id, prompt_tokens, completion_tokens, cached_tokens}` | Token usage |
 | ← | `stream_end {chat_id, finish_reason?}` | Assistant turn complete (abnormal `finish_reason` = truncated) |
 | ← | `stream_cancelled {chat_id}` | Round cancelled (user cancel; broadcast to viewers) |

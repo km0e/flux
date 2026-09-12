@@ -8,16 +8,6 @@ syntax = "proto3";
 
 package flux.v1;
 
-// How the context accumulates. UNSPECIFIED reads as classic (the server's
-// default for chats persisted before kind existed).
-enum ChatKind {
-  CHAT_KIND_UNSPECIFIED = 0;
-  // Full history accumulates for the model.
-  CHAT_KIND_CLASSIC = 1;
-  // feature-mode: `feature_done` fences a rebase-to-latest per feature.
-  CHAT_KIND_FEATURE = 2;
-}
-
 // The role of a chat message.
 enum Role {
   ROLE_UNSPECIFIED = 0;
@@ -96,7 +86,6 @@ message ChatInfo {
   string last_activity_at = 4;
   // A session holds the chat's lease (marked "in use").
   bool active = 5;
-  ChatKind kind = 6;
   // The chat's working directory — its tools' sandbox boundary.
   string workdir = 7;
   // Pinned provider registry id.

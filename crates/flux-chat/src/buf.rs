@@ -14,7 +14,7 @@
 //! one output) and never wiped by new activity — they live as long as
 //! their tool call is visible in the model's live context. The store is
 //! the only truth: entries survive engine rebuilds AND process restarts,
-//! and the GC (at a rebase / feature boundary, see
+//! and the GC (at a rebase boundary, see
 //! `Store::gc_buf_entries`) deletes the entries whose calls the rebase
 //! archived.
 

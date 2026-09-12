@@ -43,7 +43,6 @@ describe('TopBar', () => {
           id: 'c1',
           name: 'Refactor',
           createdAt: 1,
-          kind: 'feature',
           active: false,
           workdir: '/tmp/proj',
           provider: 'default',
@@ -79,7 +78,7 @@ describe('TopBar', () => {
     setBridge({ send });
     useFlux.setState({
       chats: [
-        { id: 'c1', name: 'R', createdAt: 1, kind: 'classic', active: false, workdir: '', provider: '', model: '' },
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
       ],
       activeChatId: 'c1',
       streaming: { c1: true },

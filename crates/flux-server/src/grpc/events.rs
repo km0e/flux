@@ -350,7 +350,6 @@ mod tests {
                 &session,
                 "plane",
                 "/tmp",
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: scripted,
                     id: "pinned".into(),
@@ -459,7 +458,6 @@ mod tests {
                 &session,
                 "c",
                 "/tmp",
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: scripted,
                     id: "pinned".into(),
@@ -530,7 +528,6 @@ mod tests {
                 &session,
                 "c",
                 "/tmp",
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: scripted,
                     id: "pinned".into(),

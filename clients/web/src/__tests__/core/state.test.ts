@@ -16,7 +16,6 @@ function chat(id: string, over: Partial<Chat> = {}): Chat {
     id,
     name: id,
     createdAt: 1,
-    kind: 'classic',
     active: false,
     workdir: '/tmp/proj',
     provider: '',

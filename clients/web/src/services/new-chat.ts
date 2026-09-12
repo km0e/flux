@@ -1,9 +1,8 @@
 /**
  * new-chat.ts — the shared new-chat flow.
  *
- * One dialog (components/dialogs): kind selection + workdir browsing resolve
- * together, then chat_create goes out. Used by the sidebar button and the
- * pane empty state.
+ * One dialog (components/dialogs): workdir browsing resolves, then
+ * chat_create goes out. Used by the sidebar button and the pane empty state.
  *
  * Provides: startNewChatFlow
  * Depends: services/dialogs.ts, core/bridge.ts, logger.ts
@@ -13,7 +12,7 @@ import { bridge } from '../core/bridge';
 import { log } from '../logger';
 
 export function startNewChatFlow(): void {
-  log.info('new chat (kind + workdir picker)');
+  log.info('new chat (workdir picker)');
   void (async () => {
     const choice = await dialogs.pickNewChat();
     if (!choice) return; // dismissed
@@ -21,9 +20,8 @@ export function startNewChatFlow(): void {
     // provider AND model (providers carry no default model).
     bridge.send({
       type: 'chat_create',
-      name: choice.kind === 'feature' ? 'Feature Chat' : 'New Chat',
+      name: 'New Chat',
       workdir: choice.workdir,
-      kind: choice.kind,
       provider: choice.provider,
       model: choice.model,
     });

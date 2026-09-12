@@ -8,8 +8,8 @@
 use crate::buf;
 use crate::domain::StateManager;
 use async_trait::async_trait;
-use flux_core::{ChatKind, ToolCtx, ToolPort, ToolRegistry};
 use flux_core::{Message, ToolCall};
+use flux_core::{ToolCtx, ToolPort, ToolRegistry};
 use flux_store::Store;
 use serde_json::Value;
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ impl Chat {
     /// every tool — bash, grep, read_file, MCP, and anything registered
     /// later. The reference IS the call id — self-describing, stable across
     /// rebuilds and restarts (the store persists it), and the GC at a
-    /// rebase/feature boundary deletes exactly the entries whose calls the
+    /// rebase boundary deletes exactly the entries whose calls the
     /// archive removed from the model's view.
     pub(crate) async fn bounded_output(&self, call_id: &str, result: &str) -> String {
         const INLINE_BUDGET: usize = 8000;
@@ -110,11 +110,9 @@ impl ToolPort for Chat {
 
 /// Context-base key: the first message id that belongs to the CURRENT live
 /// context. Messages at/below it are archived (never re-sent). Written by
-/// the session layer at a rebase request and by the round consumer at the
-/// feature boundary; read back on every engine (re)build — the connection
-/// always begins over the live context ABOVE the base, never the archive.
-/// Mirrors the historical `context_base` key from the reference
-/// feature-mode scaffold.
+/// the session layer at a rebase request; read back on every engine
+/// (re)build — the connection always begins over the live context ABOVE
+/// the base, never the archive.
 pub const CONTEXT_BASE_KEY: &str = "context_base";
 
 // ── ResolvedPin ─────────────────────────────────────────────────────────
@@ -140,9 +138,6 @@ pub struct ResolvedPin {
 pub struct ChatInit {
     pub id: String,
     pub history: Vec<Message>,
-    /// Conversation kind — feature chats get the `feature_done` tool
-    /// registered and carry feature orchestration.
-    pub kind: ChatKind,
     /// Pending-question registry for this chat's `question` tool.
     pub questions: Arc<crate::question::QuestionBoard>,
     /// The chat's resolved provider instance (model-pinned) — selection

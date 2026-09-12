@@ -70,7 +70,6 @@ async fn provider_swap_applies_at_boundary_and_persists_pin() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: Arc::clone(&pinned_provider),
                 id: "pinned".into(),
@@ -174,7 +173,6 @@ async fn provider_swap_during_live_round_applies_at_wrap_up() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: Arc::clone(&pinned_provider),
                 id: "pinned".into(),
@@ -273,7 +271,6 @@ async fn rebase_persists_base_and_respawns_above_it() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: staged_provider(vec![vec![vec![
                     ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
@@ -388,7 +385,6 @@ async fn provider_swap_rebegins_in_place_and_the_engine_stays_alive() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: old_provider.clone(),
                 id: "old".into(),
@@ -476,7 +472,6 @@ async fn a_zero_commit_round_does_not_wedge_the_engine() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 // Every round fails at the stream open: the user message
                 // commits (round start), then StreamEvent::Failed wraps the
@@ -541,7 +536,6 @@ async fn interrupt_send_cancels_the_live_round_and_runs_the_next() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 // ONE engine, TWO streams on its connection: stream 0 =
                 // round 1 (hangs — the cancel's victim), stream 1 = the
@@ -648,7 +642,6 @@ async fn interrupt_send_on_an_idle_engine_equals_a_plain_send() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: Arc::new(ScriptedProvider::once(vec![vec![
                     ScriptItem::Chunk(Ok(StreamChunk::Text("replied".into()))),
@@ -685,99 +678,6 @@ async fn interrupt_send_on_an_idle_engine_equals_a_plain_send() {
     );
 }
 
-/// The full feature cycle end-to-end through ServerState: feature_done
-/// ends the round, the consumer archives the context at the machine gate,
-/// rebuilds the engine IN PLACE, and injects the follow-up (the
-/// feature_done result) as the next feature's opening turn on the fresh
-/// connection.
-#[tokio::test]
-async fn feature_done_rebuilds_in_place_and_injects_the_follow_up() {
-    let (state, store) = instance_state().await;
-    let recorded = register(&state, "a").await;
-    let info = state
-        .create_chat(
-            &sess(&state, "a").await,
-            "c",
-            "/tmp",
-            flux_core::ChatKind::Feature,
-            ResolvedPin {
-                provider: staged_provider(vec![
-                    // Stage 0: the feature round ends with feature_done.
-                    vec![vec![
-                        ScriptItem::Chunk(Ok(StreamChunk::ToolCalls(vec![flux_core::ToolCall {
-                            id: "f1".into(),
-                            name: flux_core::FEATURE_DONE_TOOL.into(),
-                            arguments: r#"{"summary":"did the thing"}"#.into(),
-                        }]))),
-                        ScriptItem::Chunk(Ok(StreamChunk::End {
-                            finish_reason: None,
-                        })),
-                    ]],
-                    // Stage 1: the INJECTED round streams on the fresh engine.
-                    vec![vec![
-                        ScriptItem::Chunk(Ok(StreamChunk::Text("next feature".into()))),
-                        ScriptItem::Chunk(Ok(StreamChunk::End {
-                            finish_reason: None,
-                        })),
-                    ]],
-                ]),
-                id: "pinned".into(),
-                model: String::new(),
-            },
-        )
-        .await
-        .unwrap();
-    let cid = info.chat_id.clone();
-
-    state
-        .send_message(&sess(&state, "a").await, &cid, "build it".into())
-        .await
-        .unwrap();
-
-    // Two stream ends: the feature round, then the INJECTED round.
-    wait_for(|| {
-        recorded
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|el| matches!(&el.kind, Some(Kind::StreamEnd(_))))
-            .count()
-            >= 2
-    })
-    .await;
-    // The injected round streamed the second stage.
-    assert!(
-        recorded.lock().unwrap().iter().any(|el| {
-            matches!(&el.kind, Some(Kind::TextDelta(t)) if t.delta == "next feature")
-        }),
-        "the follow-up round streamed on the fresh engine"
-    );
-    // The context archived at the feature boundary (the feature round is
-    // ids 1–3); the injected round appended AFTER the base — live. The
-    // handoff cleared after the injection.
-    let state_map = store.load_state(&cid).await.unwrap();
-    let base: i64 = state_map
-        .get(flux_chat::CONTEXT_BASE_KEY)
-        .and_then(|v| v.parse().ok())
-        .expect("feature boundary archived the context");
-    assert_eq!(base, 3, "the feature round is fully archived");
-    assert!(
-        store.max_message_id(&cid).await.unwrap() > base,
-        "the injected round is live above the base"
-    );
-    // The injected turn persisted as the opening user message of the new
-    // feature (above the base).
-    let messages = store_messages(&state, &cid).await;
-    let injected = messages
-        .iter()
-        .filter(|m| m.role == flux_core::Role::User)
-        .any(|m| m.content.contains("did the thing"));
-    assert!(injected, "the feature_done result is the opening turn");
-}
-
-/// A rebase GCs the buffered outputs whose tool calls it archived: entries
-/// anchored below the new base die, entries above it survive — the model
-/// can only reference calls its live context still shows.
 #[tokio::test]
 async fn rebase_gcs_buf_entries_of_archived_calls() {
     let (state, store) = instance_state().await;
@@ -787,7 +687,6 @@ async fn rebase_gcs_buf_entries_of_archived_calls() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider: Arc::new(DummyProvider),
                 id: "default".into(),
@@ -907,7 +806,6 @@ async fn send_with_a_client_msg_id_dedups_resends() {
             &sess(&state, "a").await,
             "c",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider,
                 id: "pinned".into(),
@@ -976,7 +874,6 @@ async fn send_with_a_client_msg_id_dedups_resends() {
             &sess(&state, "a").await,
             "c2",
             "/tmp",
-            flux_core::ChatKind::Classic,
             ResolvedPin {
                 provider,
                 id: "pinned".into(),

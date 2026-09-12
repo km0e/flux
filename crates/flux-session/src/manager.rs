@@ -11,7 +11,7 @@
 
 use crate::identity::SessionRef;
 use crate::router::RouterHandle;
-use flux_core::{ChatKind, Provider, ToolRegistry};
+use flux_core::{Provider, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -38,8 +38,6 @@ pub(crate) struct CachedChat {
     pub(crate) created_at: String,
     /// Most recent message-append time — the wire recency key.
     pub(crate) last_activity_at: String,
-    /// Conversation kind — `classic` / `feature`.
-    pub(crate) kind: ChatKind,
     /// The chat's working directory (sandbox boundary; UI display).
     pub(crate) workdir: String,
     /// The chat's pinned provider registry id (resolved at creation; the
@@ -110,7 +108,6 @@ impl CachedChat {
             last_activity_at: self.last_activity_at.clone(),
             // Wire `active` means a lease is held.
             active: self.lease.is_some(),
-            kind: self.kind,
             workdir: self.workdir.clone(),
             provider: self.provider_id.clone(),
             model: self.model.clone(),
@@ -157,8 +154,6 @@ pub struct ChatInfoOwned {
     pub last_activity_at: String,
     /// Whether a session holds the lease — the wire `active` flag.
     pub active: bool,
-    /// Conversation kind.
-    pub kind: ChatKind,
     /// The chat's working directory.
     pub workdir: String,
     /// The chat's pinned provider registry id.
@@ -176,7 +171,6 @@ impl From<&ChatInfoOwned> for flux_proto::flux::v1::ChatInfo {
             last_activity_at: i.last_activity_at.clone(),
             // Wire `active` means a lease is held.
             active: i.active,
-            kind: flux_proto::flux::v1::ChatKind::from(i.kind) as i32,
             workdir: i.workdir.clone(),
             provider: i.provider.clone(),
             model: i.model.clone(),
@@ -293,14 +287,6 @@ impl ServerState {
         // router task (idle until events flow through it).
         let mut loaded: HashMap<ChatId, CachedChat> = HashMap::new();
         for s in store.list_chats().await? {
-            let kind = s
-                .kind
-                .as_deref()
-                .and_then(|k| match k {
-                    "feature" => Some(ChatKind::Feature),
-                    _ => None,
-                })
-                .unwrap_or_default();
             // Hydrate the pin into an instance. A pin is REQUIRED at
             // creation, so a miss here means the registry changed across
             // restarts — the chat spawns nowhere until the operator swaps
@@ -320,7 +306,6 @@ impl ServerState {
                     name: s.name,
                     created_at: s.created_at.clone(),
                     last_activity_at: s.last_activity_at,
-                    kind,
                     workdir: s.workdir.unwrap_or_default(),
                     provider_id: s.provider.unwrap_or_default(),
                     model: s.model.unwrap_or_default(),
@@ -414,7 +399,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "broken",
                 dir.path().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -455,7 +439,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "broken",
                 dir.path().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -481,7 +464,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 "/nonexistent/flux-workdir",
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -505,7 +487,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 "",
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -533,7 +514,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 link.to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),

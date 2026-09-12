@@ -8,7 +8,6 @@
 
 pub mod buf;
 pub mod chats;
-pub mod feature_log;
 pub mod mcp;
 pub mod messages;
 pub mod models;
@@ -49,14 +48,6 @@ pub struct ChatSummary {
     /// `None` only for rows older than the requirement; hydration leaves
     /// the pin unresolved and the spawn path names the dead pin.
     pub model: Option<String>,
-}
-
-/// One entry of a chat's feature decision log.
-#[derive(Debug, Serialize)]
-pub struct FeatureLogEntry {
-    pub id: i64,
-    pub summary: String,
-    pub created_at: String,
 }
 
 /// SQLite PRAGMAs applied on every new connection to the pool.

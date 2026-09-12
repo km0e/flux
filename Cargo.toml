@@ -2,7 +2,6 @@
 resolver = "2"
 members = [
     "crates/flux-core",
-    "crates/flux-context",
     "crates/flux-macros",
     "crates/flux-loop",
     "crates/flux-provider",

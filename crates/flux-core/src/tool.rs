@@ -19,14 +19,6 @@ pub const BUF_READ_TOOL: &str = "buf_read";
 /// QuickPick — but the content is entirely agent-produced).
 pub const QUESTION_TOOL: &str = "question";
 
-/// Canonical name of the feature-completion tool — the single source of
-/// truth for the tool's `name()` and for the kernel's auto-restart hook
-/// ([`crate::Tool`] executors fence cancel/rebase/inject when this tool
-/// name executes). The tool's `result` is both handed to the model as a
-/// normal tool result and re-injected as the next feature's starting
-/// context. Pure mechanism: this constant carries no orchestration logic.
-pub const FEATURE_DONE_TOOL: &str = "feature_done";
-
 /// Per-invocation context handed to every tool execution.
 ///
 /// Carries the kernel-owned cancellation token for the current tool

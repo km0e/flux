@@ -105,7 +105,7 @@ impl ChatHandle {
     /// turns queued behind it — finish first), and at the fired gate the
     /// consumer rebuilds the engine IN PLACE from the truth sources
     /// (provider instance, tool registry, live history above the context
-    /// base) and injects a pending feature follow-up if one exists. The
+    /// base). The
     /// carried `provider` replaces the chat's provider instance for this
     /// and every later rebuild (the hot-swap path); `None` keeps the
     /// current one. Non-blocking; false = the consumer is gone (stale

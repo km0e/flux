@@ -28,8 +28,6 @@ export interface ChatInfo {
   last_activity_at: string;
   /** Another window holds the lease (non-null) — the sidebar shows "In use". */
   active: boolean;
-  /** Conversation kind — classic (accumulating context) / feature (re-scaffolded per feature). */
-  kind: 'classic' | 'feature';
   /** The chat's working directory (the tool sandbox boundary; shown as a cwd line). */
   workdir: string;
   /** The chat's pinned provider registry id. */
@@ -247,7 +245,6 @@ export type ClientMessage =
       type: 'chat_create';
       name: string;
       workdir: string;
-      kind: 'classic' | 'feature';
       /** Pin the chat to a registered provider — REQUIRED (no server
        * default; an omitted field is a protocol error). */
       provider: string;

@@ -11,30 +11,6 @@ pub enum Role {
     Tool,
 }
 
-/// Conversation kind — how the context accumulates.
-///
-/// [`ChatKind::Classic`] accumulates the full history for the model.
-/// [`ChatKind::Feature`] is feature-mode: an `feature_done` tool fences a
-/// rebase-to-latest at the end of each feature round, so every feature
-/// starts from a clean context — the tool's orchestrated result is what
-/// carries the project context forward (mechanism = generic rebase, no
-/// separate driver).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(strum::Display)]
-#[strum(serialize_all = "snake_case")]
-pub enum ChatKind {
-    Classic,
-    Feature,
-}
-
-impl Default for ChatKind {
-    /// Absent kind (e.g. chats persisted before kind existed) = classic.
-    fn default() -> Self {
-        ChatKind::Classic
-    }
-}
-
 /// A single chat message.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {

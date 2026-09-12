@@ -5,9 +5,9 @@
 //! provider connection and the tool executor as channel peers) and emits
 //! [`LoopFact`]s — a semantic, past-tense trace of the conversation that
 //! the chat layer folds independently (persistence, routing, provider
-//! triggering, rebase/feature orchestration). Policy (when to interrupt,
-//! when a round ends) lives here; every mechanism (tokens, drops, I/O)
-//! lives in the peers.
+//! triggering, rebuild orchestration). Policy (when to interrupt, when a
+//! round ends) lives here; every mechanism (tokens, drops, I/O) lives in
+//! the peers.
 
 use flux_core::LoopFact;
 use flux_core::LoopInput;
@@ -46,8 +46,7 @@ pub enum State {
         exec_queue: VecDeque<ToolCallWithArgs>,
         /// Tools dispatched and in flight: call_id → tool name. One entry
         /// today (single flight); a map so parallel dispatch later needs no
-        /// state reshape. The name drives kernel policy (feature_done is
-        /// exempt from user interruption).
+        /// state reshape.
         inflight: HashMap<String, String>,
         /// A cancel was absorbed into this flag after interrupting the
         /// in-flight tool; wrap up with a Cancelled event once the
@@ -276,11 +275,7 @@ impl Machine {
                 mut inflight,
                 cancelled,
             } => match event {
-                LoopInput::ToolFinished {
-                    call,
-                    result,
-                    ends_round,
-                } if inflight.contains_key(&call.id) => {
+                LoopInput::ToolFinished { call, result } if inflight.contains_key(&call.id) => {
                     inflight.remove(&call.id);
                     self.dual_write(&call.id, result.clone());
                     let mut facts = vec![LoopFact::Wire(WireEvent::ToolResult {
@@ -295,20 +290,6 @@ impl Machine {
                         // (cancel is a user action, not an error).
                         facts.push(LoopFact::Wire(WireEvent::Cancelled));
                         facts.extend(self.end_round(RoundOutcome::Cancelled));
-                    } else if ends_round {
-                        // Round-ending tool (feature_done): no follow-up
-                        // stream. Void every committed-but-unexecuted tool
-                        // — the caller's rebase archives the whole round,
-                        // so those messages would dangle against the
-                        // rebuilt prefix. The semantic `RoundEnded`
-                        // classification carries the call + result to the
-                        // consumer (the feature hook's injection payload).
-                        self.void_cancelled_tools(&exec_queue);
-                        self.pending.clear();
-                        facts.extend(self.end_round(RoundOutcome::ToolEnded {
-                            call: call.clone(),
-                            result: result.clone(),
-                        }));
                     } else if let Some((call, args)) = exec_queue.pop_front() {
                         inflight.insert(call.id.clone(), call.name.clone());
                         self.state = State::ProcessingTools {
@@ -347,14 +328,11 @@ impl Machine {
                     // cancel — stop means stop.
                     self.void_cancelled_tools(&exec_queue);
                     self.queued.clear();
-                    // Kernel policy: feature_done is exempt from user
-                    // interruption — its result is the next feature's
-                    // opening context (aborting it would inject garbage),
-                    // and it is fast, so let it finish. A second cancel is
-                    // a no-op (the interrupt already went out).
-                    let facts = if !cancelled
-                        && !inflight.values().any(|n| n == flux_core::FEATURE_DONE_TOOL)
-                    {
+                    // Kernel policy: no tool is exempt from user
+                    // interruption — a cancel interrupts the in-flight
+                    // flight. A second cancel is a no-op (the interrupt
+                    // already went out).
+                    let facts = if !cancelled {
                         vec![LoopFact::InterruptTools]
                     } else {
                         Vec::new()
@@ -434,7 +412,7 @@ impl Machine {
     /// the chat layer's persistence fold awaits the append BEFORE the
     /// client sees the wrap-up (persist-before-announce), and the semantic
     /// [`RoundOutcome`] classification follows — the consumer folds it
-    /// instead of scraping wire events (feature hook, cancel handling).
+    /// instead of scraping wire events (cancel handling).
     /// The active stream handle drops — the connection stops pushing
     /// (residual chunks, if any, are absorbed by Idle). An armed
     /// control-plane gate fires here — but a turn queued BEFORE the gate
@@ -470,10 +448,10 @@ impl Machine {
 
     /// Start a turn that queued mid-round, in the same step that wrapped
     /// the previous round: the boundary is REPORTED (`RoundState(Idle)` —
-    /// the feature hook and state snapshots read it; the loop's own
-    /// transition check cannot emit it because the step re-enters
-    /// Streaming) and the next round opens without the machine resting
-    /// Idle. `RoundState(Streaming)` restores the snapshot truth.
+    /// state snapshots read it; the loop's own transition check cannot
+    /// emit it because the step re-enters Streaming) and the next round
+    /// opens without the machine resting Idle.
+    /// `RoundState(Streaming)` restores the snapshot truth.
     fn start_queued_round(&mut self, text: String) -> Vec<LoopFact> {
         let mut facts = vec![LoopFact::RoundState(ChatStateKind::Idle)];
         facts.extend(self.start_round_with_user(Message::user(text)));
@@ -569,8 +547,8 @@ impl Machine {
                 }));
             }
             RoundOutcome::Cancelled => facts.push(LoopFact::Wire(WireEvent::Cancelled)),
-            // Completed/ToolEnded wrap via end_round directly — this path
-            // only carries failure-shaped endings.
+            // Completed wraps via end_round directly — this path only
+            // carries failure-shaped endings.
             _ => {}
         }
         self.push_partial(&output);

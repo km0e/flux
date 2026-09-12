@@ -13,7 +13,7 @@ use crate::registry::ProviderRegistry;
 use flux_proto::flux::v1::chat_service_server::ChatService;
 use flux_proto::flux::v1::{
     AnswerQuestionRequest, AnswerQuestionResponse, CancelRoundRequest, CancelRoundResponse,
-    ChatInfo, ChatKind, ClaimChatRequest, ClaimChatResponse, CloseChatRequest, CloseChatResponse,
+    ChatInfo, ClaimChatRequest, ClaimChatResponse, CloseChatRequest, CloseChatResponse,
     CreateChatRequest, CreateChatResponse, DeleteChatRequest, DeleteChatResponse, ListChatsRequest,
     ListChatsResponse, OpenChatRequest, OpenChatResponse, RebaseChatRequest, RebaseChatResponse,
     RenameChatRequest, RenameChatResponse, SendMessageRequest, SendMessageResponse,
@@ -65,11 +65,6 @@ fn chat_info(info: &flux_session::manager::ChatInfoOwned) -> ChatInfo {
         created_at: info.created_at.clone(),
         last_activity_at: info.last_activity_at.clone(),
         active: info.active,
-        kind: match info.kind {
-            flux_core::ChatKind::Classic => ChatKind::Classic,
-            flux_core::ChatKind::Feature => ChatKind::Feature,
-        }
-        .into(),
         workdir: info.workdir.clone(),
         provider: info.provider.clone(),
         model: info.model.clone(),
@@ -109,13 +104,9 @@ impl ChatService for ChatManagement {
                 }));
             }
         };
-        let kind = match ChatKind::try_from(req.kind).unwrap_or(ChatKind::Unspecified) {
-            ChatKind::Feature => flux_core::ChatKind::Feature,
-            _ => flux_core::ChatKind::Classic,
-        };
         match self
             .state
-            .create_chat(&session, &req.name, &req.workdir, kind, pin)
+            .create_chat(&session, &req.name, &req.workdir, pin)
             .await
         {
             Ok(info) => Ok(tonic::Response::new(CreateChatResponse {
@@ -430,7 +421,6 @@ mod tests {
         let bad = CreateChatRequest {
             name: "x".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "nope".into(),
             model: "m".into(),
         };
@@ -475,7 +465,6 @@ mod tests {
         let good = CreateChatRequest {
             name: "chat".into(),
             workdir: "/tmp".into(),
-            kind: 0,
             provider: "p1".into(),
             model: "m".into(),
         };

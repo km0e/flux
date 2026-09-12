@@ -10,12 +10,9 @@
 //! force-drop with Drop-based cleanup), panic capture, and the "exactly
 //! one feedback per dispatch" contract — every dispatched call yields
 //! exactly one collectable outcome, however the flight ends (the consumer
-//! stamps `ends_round` and pushes `LoopInput::ToolFinished` back into the
-//! loop's FIFO).
+//! pushes `LoopInput::ToolFinished` back into the loop's FIFO).
 //!
-//! Policy stays in the machine; no adapter-provided knowledge lives here —
-//! the round-ending tool NAMES are consumer config (feature mode
-//! configures `feature_done` — the NAME never enters the kernel).
+//! Policy stays in the machine; no adapter-provided knowledge lives here.
 
 use flux_core::{ToolCall, ToolPort};
 use futures::FutureExt;

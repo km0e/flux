@@ -6,8 +6,8 @@
 //! executor) and emits [`LoopFact`]s — the semantic fact trace the chat
 //! layer folds. The loop holds no I/O, no trait objects, no provider, no
 //! persistence: every collaborator is a channel peer wired by the
-//! adapter. Conversation kinds (`classic` / `feature`) differ only in
-//! registered tools + adapter-side wiring — the machine is kind-agnostic.
+//! adapter. The machine is adapter-agnostic — differences between chat
+//! flavors live entirely in registered tools + adapter-side wiring.
 //!
 //! Design rationale: the kernel is a pure state machine.
 

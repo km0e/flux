@@ -23,8 +23,8 @@ It is built as a Cargo workspace:
 - [`flux-context`](crates/flux-context/) — pure scaffold data-production (no driver/trait coupling): the pluggable scaffold information blocks (`blocks.rs` compute engines + frequency bases), `build_scaffold_text` (project profile/tree/git/conventions/decisions), and project introspection (`detector.rs`: language/build/test detection; `collector.rs`: per-source info collectors; `git.rs`: change-frequency measurement; `.flux` project config). The information-collection system's growth point — may split into `flux-project` when it outgrows this layout.
 - [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, skill, and Rust project tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
 - [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: spawns external MCP servers (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
-- [`flux-store`](crates/flux-store/) — SQLite persistence layer (chats, messages, state, feature log, provider registry).
-- [`flux-loop`](crates/flux-loop/) — conversation kernel: pure state machine (`machine.rs`) + the single pump (`runtime.rs` — machine + two channels, zero I/O, zero feature concepts); the I/O vocabulary (`LoopInput`/`LoopFact`/`StreamEvent`/`StreamHandle`/`Connection`) and the tool/boundary contracts live in flux-core, the round consumer (which supervises the tool flights) is the flux-chat channel peer.
+- [`flux-store`](crates/flux-store/) — SQLite persistence layer (chats, messages, state, provider registry).
+- [`flux-loop`](crates/flux-loop/) — conversation kernel: pure state machine (`machine.rs`) + the single pump (`runtime.rs` — machine + two channels, zero I/O); the I/O vocabulary (`LoopInput`/`LoopFact`/`StreamEvent`/`StreamHandle`/`Connection`) and the tool/boundary contracts live in flux-core, the round consumer (which supervises the tool flights) is the flux-chat channel peer.
 - [`flux-session`](crates/flux-session/) — session layer, CONTROL plane: the chat manager (`ServerState` — global config, the chat cache hydrated from the store, the session identity registry), lease/viewers operations (`ops`), session identity objects (`Session`/`SessionRef` — opaque handles carrying the typed sink; lease/viewers keyed by handle, not string), session detach/resume/reap, the per-chat event router (mapping the kernel's WireEvents onto the proto stream elements), and task lifecycle. Depends on flux-chat and flux-proto; never the reverse.
 - [`flux-chat`](crates/flux-chat/) — session layer, DATA plane: the per-chat task machinery — the chat entity (`chat` ToolPort + persistence helpers, `domain` state, `handle` control handle, `spawn` assembly, `round` round consumer (also supervises the tool flights), `tool_exec` flight supervision, `buf` overflow buffer, per-chat `question` tool, reserved tool-name check). The chat boundary (`workdir`/`current_dir`) fills the per-invocation `ToolCtx` at dispatch (adapter-side). The engine-rebuild flow is an in-place gate rebuild INSIDE the consumer (truth-source change → `Rebuild` ctrl → machine gate → re-assemble at `GateReleased`); the engine never dies for one; output rides flux-core's `OutputPort`.
 - [`flux-server`](crates/flux-server/) — ONE axum transport hosting the Connect surface (`/flux.v1.*`, gRPC-Web) + the terminal side channel (`/ws/term`) + the browser UI static site (single port), filesystem browsing for the workdir picker, server wiring.
@@ -50,7 +50,6 @@ flux/
 │ │ ├── ports.rs # ToolPort (tool execution) + OutputPort (adapter-side wire sink) — persistence is a fact-trace fold, the provider is a Connection
 │ │ ├── loop_io.rs # Loop I/O vocabulary: LoopInput / LoopFact + RoundOutcome / StreamEvent / StreamHandle / Connection
 │ │ └── wire.rs # WireEvent vocabulary
-│ ├── flux-context/ # Feature-mode context orchestration: detectors (project judgment), collectors (info gathering), blocks (orchestration), scaffold policy
 │ ├── flux-macros/ # #[derive(Tool)] proc-macro
 │ │ ├── src/lib.rs
 │ │ └── tests/derive_tool.rs
@@ -81,7 +80,7 @@ flux/
 │ │ │ └── state.rs # load_state, save_state_entry
 │ │ └── migrations/
 │ │ └── 001_consolidated_schema.sql # 单一合并 schema
-│ ├── flux-loop/ # Conversation kernel (pure machine + pump; zero I/O, zero feature concepts)
+│ ├── flux-loop/ # Conversation kernel (pure machine + pump; zero I/O)
 │ │ └── src/
 │ │ ├── lib.rs # Re-exports (Machine, Loop, OUT_CAPACITY)
 │ │ ├── machine.rs # Pure reducer: State × LoopInput → Vec<LoopFact> (table tests)
@@ -103,12 +102,11 @@ flux/
 │ │ ├── domain.rs # ChatState, INITIAL_STATE, state tools
 │ │ ├── handle.rs # ChatHandle control handle (send/cancel/rebuild/state snapshot)
 │ │ ├── spawn.rs # Task assembly (ChatInit incl. questions, loop + peers wiring)
-│ │ ├── round.rs # Round consumer (fact-trace fold; Rebuild cmd → in-place gate rebuild; feature hook)
+│ │ ├── round.rs # Round consumer (fact-trace fold; Rebuild cmd → in-place gate rebuild)
 │ │ ├── tool_exec.rs # Supervised tool flights (two-tier interrupt, panic capture) — a library folded by the round consumer, no task/channel
 │ │ ├── buf.rs # Overflow buffer, store-backed (call-id-anchored, never overwritten; GC at rebase)
 │ │ ├── reserved.rs # Reserved tool-name check (state_get/state_set/buf_read/question)
 │ │ ├── question.rs # `question` tool: agent-produced prompt to the user (board + tool)
-│ │ ├── feature.rs # `feature_done` tool (feature-mode orchestration hook)
 │ │ └── tests.rs # Data-plane tests (spawn/round/buf/question/domain)
 │ └── flux-server/ # Transport + Session + wiring
 │ ├── src/
@@ -177,6 +175,12 @@ npm run ui-check # headless-browser e2e smoke (e2e/, needs node ≥ 22 + Chrome)
 
 ## Architecture
 
+> Note: the experimental feature-mode line (`ChatKind::Feature`, the
+> `feature_done` tool, the `flux-context` scaffold orchestration, the
+> `feature_log` table) lives on the `feature-mode` snapshot branch — it is
+> deliberately absent from `main` (chat kinds were removed; every chat runs
+> the single accumulating context). Re-integration is evaluated later.
+
 ### Concepts
 
 Three core concepts:
@@ -187,11 +191,10 @@ Three core concepts:
 | **Chat** | `flux-chat/src/chat.rs` | Conversation entity — implements the `ToolPort` the supervised tool flights call (execute pipeline + per-invocation `ToolCtx` boundary fill) and owns the persistence helpers the fact-trace fold drives. **Model-agnostic** (resolved provider instances arrive from the server). |
 | **Loop / Machine** | `flux-loop/` | The conversation itself: a pure reducer (`Machine::step` over `LoopInput`) pumped between two channels — an input FIFO every peer writes and an ordered fact trace the chat layer folds. No I/O in the kernel. |
 | **EventPlane** | `flux-server/src/grpc/events.rs` | 会话级 `Subscribe` 流 = 身份生命周期锚：流开 = attach（token 采纳或新铸，首帧 `ready` 携 token+leases），流断 = detach（宽限/reaper 机械不变）；流自带 sink（双队列 + biased pump，控制优先）+ 30s keepalive（客户端 frame deadline 判半开） |
-| **ChatKind** | `flux-core` types.rs | 对话类型 = 持久化枚举（`classic`/`feature`），`chat_create{kind}` 创建时固定，`ChatInfo.kind` 透出。两类型跑**同一个驱动器** `Runtime`；feature 只多注册 `feature_done` 工具 |
 
 **Key design**: 任务归 ChatManager（session 无关）；对话权 = 每 chat 至多一个 `lease`（发消息/取消/应答 question/删除/改名需租约，他人操作被拒 → `ErrorEvent{chat_busy}` / failed_precondition status）；观看权 = `viewers` 集合（ClaimChat 隐含订阅；OpenChat 为 viewer 降级订阅，可并发）。流断开 = **detach**：租约保留一个宽限期等流重开采纳，过期由 reaper 释放（任务继续跑）。Chat IDs are UUID v4.
 
-**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / context base / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文，落在归档内）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在 base 之上的存活历史上 re-begin 连接，随后注入待落的 feature follow-up（作为下一轮用户消息，落在 base 之上 = 下一 feature 的存活上下文）。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
+**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / context base / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文，落在归档内）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在 base 之上的存活历史上 re-begin 连接。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
 
 ### Lifecycle
 
@@ -206,30 +209,11 @@ Page opens the session-scoped Subscribe stream → attach（无 token 铸新；
  → 首次发消息: ensure_task 懒 spawn Chat loop → 挂 router → WireEvent 经
  router 映射为 proto 流元素广播给 viewers（含租约持有者；R2 seq 直写 chat_seq）
  → 真相源变更（SwitchProvider / RebaseChat / MCP 增删）: 先持久化 + 公告
- → Rebuild ctrl 命令 → 引擎在机器门原地重建（活轮次收尾 → 注册表/连接换装 → 注入 follow-up）
+ → Rebuild ctrl 命令 → 引擎在机器门原地重建（活轮次收尾 → 注册表/连接换装）
  → 切走/关闭: CloseChat（完全退出 = 退订 + 还租约）
  → 流断开 = detach：viewer 注册移除、租约保留 30s 宽限期等流重开采纳；
  过期由 reaper 释放并广播（任务继续跑完轮次后闲置）；
  半开检测 = 服务端 30s keepalive 帧，客户端 frame deadline（3×）判死重开
-```
-
-### Feature mode — pure composition over the generic restart primitive
-
-**对话类型 = `ChatKind`（`classic`/`feature`，`chat_create {kind}` 固定，`ChatInfo.kind` 透出）**。feature 不是独立驱动器 —— 两类型跑**同一个** `flux_loop::Loop`。feature chat 只做两件差异：注册 `feature_done` 工具（spawn 按 `kind == Feature`），以及 `feature_done` 触发轮末自动重启（消费者把 feature 钩子组装到通用引擎重建上）。机器与 pump 无任何 feature 概念，只处理通用事件。
-
-**编排机制 = `flux-context` 纯数据生产**（不依赖驱动/trait）：
-- 上下文 = **项目基本内容**（scaffold）：项目概况（类型/构建/测试命令/入口/git 分支）+ 目录树 + git status + 约定文件 + 最近 feature 决策日志。**多项目**（monorepo）每项目独立判定/收集，产出独立信息块，全部进入同一稳定优先排序。**不含历史对话** —— feature 从创建起只看到 scaffold + 当前 feature 的消息。**trait 化插件体系**：`ProjectDetector`（按 priority 逐语言：cargo/node/python/go/generic）、`InfoCollector`（按数据源：tree/git/file/decisions）、`InfoBlock`（组合收集器 + 预算优先级）；新增信息类型 = 实现一个 struct 注册，零改编排器。**前缀稳定性排序**：`preamble/概况` 恒稳 → 约定文件/树按 git 历史或内容 hash 测量 → `git status/决策日志` 恒变放末，让 prefix cache 跨 feature 重建保持命中。
-- **配置在项目侧**：`<workdir>/.flux/config.toml` 细粒度控制 —— 逐元素开关/参数、`max_tokens` 预算裁剪、`preamble` 约定（server 侧无配置——编排恒用内置保守默认）。
-- **入口**：`flux_context::build_scaffold_text(store, workdir, chat_id, &ScaffoldConfig)`（纯函数，无 trait 抽象）。`feature_done` 工具（`flux-chat/src/feature.rs`）记录决策到 `feature_log` 表，然后调用它以产生编排上下文。
-
-**自动重启机制（feature 钩子组合到通用引擎重建上）**：内核以 `FEATURE_DONE_TOOL` 常量为钩子 —— 执行器收集到该工具的 flight 结果时在 `ToolFinished` 事件上置 `ends_round`，机器**直接收尾**（void 剩余批次 + 丢弃 provider 缓冲，**不发起 follow-up 流**，边界处无 `stream_cancelled`）；消费者在 `RoundState(Idle)` 观察到 feature_done 结果后，组装到与其他重建完全相同的流程：`Hold`（控制平面屏障）→ `GateReleased`（活轮次与排队轮收尾后门触发）→ **原地重建**。消费者把真相源写好：`context_base = max`（整轮归档，抢跑的用户轮也落在归档内），重装注册表 + 以新连接在 base 之上的历史上 re-begin，注入编排文本为下一轮用户轮（下一 feature 从干净上下文开工），并广播 `context_rebased`。若用户消息抢先入队，门顺延到该轮收尾（该轮落在归档内）。取消以 `Cancelled` wire 事件为门——用户在 feature_done 飞行中取消（machine 免除其 `Interrupt`）则消费者清空 feature 意图，不归档不注入，下一消息在完整上下文上继续。machine 层策略：`feature_done` 在飞时免除用户中断。key 在 `chat.rs`：`CONTEXT_BASE_KEY`（rebase 请求时由 session 层持久化 + feature 边界由消费者持久化）。
-
-```
-feature 轮次: 用户消息 → 模型调 feature_done → 工具写 feature_log + 编排 scaffold
- → 执行器置 ends_round，机器直接收尾 → 消费者写真相源（base=max 归档）+ context_rebased 通知
- → Hold → GateReleased（排队轮先跑完）→ 原地重建（注册表/连接换装）→ 注入编排文本
- → 注入的编排文本 = 下一 feature 首条用户轮（从干净上下文，模型自主开工）
- → cancel 收尾回 Idle（Cancelled wire 清空意图），下一消息在完整上下文上继续
 ```
 
 ### Conversation kernel (`crates/flux-loop/`) — two channels, zero I/O
@@ -270,8 +254,6 @@ the contract layer.
   grace → force-drop so Drop-based process-group cleanup runs), and
   pushes exactly one `ToolFinished` per dispatch into the loop's FIFO
   (panic captured structurally; results kernel-marked `INTERRUPTED_MARK`).
-  The round-ending tool NAMES are consumer config (`feature_done`); the
-  machine knows only an `ends_round` bool.
 - **Round consumer** (`flux-chat/src/round.rs`, the fact-trace fold) —
   ONE task per chat, living for the chat's lifetime, interprets the
   trace in order: persistence fold (`TranscriptCommitted` → store
@@ -283,15 +265,9 @@ the contract layer.
   pre-rebuild context — and at `GateReleased` rebuilds IN PLACE:
   re-assembles the registry from the current global truth, re-begins
   the connection on the carried provider over the live history above
-  the context base, injects a pending feature follow-up as the next
-  round's user turn, and announces `context_rebased`), the feature hook
-  that composes onto the same rebuild flow (folds `RoundEnded` — the
-  machine's semantic round classification — instead of scraping wire
-  events: a `ToolEnded(feature_done)` result + round end sets the same
-  intent, a `Cancelled` outcome clears it; a racing user message waits
-  behind the gate instead of preempting it), and the round-state slot
-  write (`RoundState` → the authoritative subscription snapshot). The
-  consumer never
+  the context base, and announces `context_rebased`), and the
+  round-state slot write (`RoundState` → the authoritative subscription
+  snapshot). The consumer never
   mutates a RUNNING round — rebuilds land only at the machine's
   boundary, and the task exits only when the loop dies or the handle
   drops.
@@ -339,11 +315,9 @@ engine rebuilds AND process restarts with no shell handoff (the in-memory buffer
 gone; the store is the only truth). Entries are **never overwritten** (a call id maps to
 exactly one output) and there is no generation wipe: the lifetime follows the tool call's
 visibility in the model's live context — the GC (`Store::gc_buf_entries`, one SQL) runs
-at every rebase / feature boundary and deletes exactly the entries whose calls the
+at every rebase boundary and deletes exactly the entries whose calls the
 archive removed (keep-set = tool calls above the new `context_base`); chat deletion
-cascades. The feature handoff resolves the FULL buffered content into
-`pending_follow_up` BEFORE the boundary GC runs (the scaffold is the next feature's
-opening context and must not dangle behind a dead reference). Entries capped at
+cascades. Entries capped at
 1M chars with an in-buffer drop marker. Per-tool caps merged into this layer: bash 8KB and
 read_file line-length/total caps removed; grep keeps its match-window shaping (500
 chars/line around the match) and the match cap rose to 500.
@@ -407,7 +381,7 @@ carry seq 0 + empty chat_id):
 | `question_required {id, question}` | The model's question — priority control lane, parked until answered (re-delivered on claim) |
 | `chat_history` / `chat_state` | The claim/open snapshots THROUGH the stream (single-point delivery with the events they reconcile against) |
 | `error {code, message}` | App-level error channel (round errors, demotion, gap) |
-| `context_rebased` / `provider_switched` | Feature rebase notice / hot-swap landing notice |
+| `context_rebased` / `provider_switched` | Rebase landing notice (archived history) / hot-swap landing notice |
 | `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills` | Global broadcasts (session-level) |
 
 ### Terminal side channel (`/ws/term`)
@@ -440,7 +414,7 @@ kernel, no lease gate (same-origin trust; a UI affordance for the human).
 - Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 `provider_add`/`provider_remove` 管理，**先写库后改内存**）
 - Saved models: `list_models`, `upsert_model`（**只写 params 保留 meta**）, `update_model_meta`（**只写 meta 保留 params**）, `delete_model` —— 本地模型注册表的唯一家（`(provider_id, model_id)` 主键 + `params`/`meta` 两个写权分离的 JSON 列；provider 删除级联；UI 经 `model_save`/`model_remove`/`model_sync` 管理，models.dev 填充仅在创建/刷新路径写 `meta`）
 - MCP servers: `list_mcp_servers`, `insert_mcp_server`, `delete_mcp_server` —— MCP 启动列表的唯一家（启动时 McpManager 读行连接注册，UI 管理变更 **persist-first + 即时应用**，spawn 失败的行保留、下次启动重试）
-- Buffered outputs: `save_buf_entry`, `load_buf_entry`, `gc_buf_entries` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；GC = rebase/feature 边界删除 base 之下调用的条目；chat 删除级联）
+- Buffered outputs: `save_buf_entry`, `load_buf_entry`, `gc_buf_entries` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；GC = rebase 边界删除 base 之下调用的条目；chat 删除级联）
 - Called from `ServerState` and `Chat`. Async `sqlx::SqlitePool`, WAL mode.
 - Hourly `PRAGMA incremental_vacuum` for maintenance.
 

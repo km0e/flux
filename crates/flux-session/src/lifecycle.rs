@@ -78,7 +78,6 @@ impl ServerState {
             flux_chat::chat::ChatInit {
                 id: chat.id.clone(),
                 history,
-                kind: chat.kind,
                 questions: Arc::clone(&chat.questions),
                 provider,
             },

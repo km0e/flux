@@ -9,7 +9,6 @@
  * setDialogImpls, mirroring the old ChatHost mock pattern.
  *
  * Provides: dialogs, setDialogImpls, resetDialogsForTest, NewChatChoice
- * Depends: core/types.ts (ChatKind)
  */
 
 export interface ChatQuestion {
@@ -17,13 +16,10 @@ export interface ChatQuestion {
   options?: string[];
 }
 
-export type ChatKind = 'classic' | 'feature';
-
-/** The new-chat dialog's resolution: a kind, the browsed workdir, and the
- * REQUIRED provider+model pin (providers carry no default model) — the
- * dialog gates Create on explicit picks. */
+/** The new-chat dialog's resolution: the browsed workdir and the REQUIRED
+ * provider+model pin (providers carry no default model) — the dialog
+ * gates Create on explicit picks. */
 export interface NewChatChoice {
-  kind: ChatKind;
   workdir: string;
   provider: string;
   model: string;
@@ -32,7 +28,7 @@ export interface NewChatChoice {
 export interface DialogImpls {
   /** Destructive-action confirmation (true = confirmed). */
   confirmDelete(chatName: string): Promise<boolean>;
-  /** New-chat flow: kind + workdir picked in one dialog. Null = dismissed. */
+  /** New-chat flow: workdir picked in one dialog. Null = dismissed. */
   pickNewChat(): Promise<NewChatChoice | null>;
   /** The `question` tool's user prompt — options + free-form input;
    * dismissal resolves with a neutral "no answer" string. */

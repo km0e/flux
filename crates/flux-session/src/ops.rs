@@ -10,7 +10,6 @@ use crate::identity::{Session, SessionRef, SharedSessionSink};
 use crate::manager::{CachedChat, ChatInfoOwned, ServerState, new_chat_id};
 use crate::router::RouterHandle;
 use anyhow::{Context, anyhow};
-use flux_core::ChatKind;
 use flux_core::WireEvent;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -593,7 +592,6 @@ impl ServerState {
         session: &SessionRef,
         name: &str,
         workdir: &str,
-        kind: ChatKind,
         pin: flux_chat::ResolvedPin,
     ) -> anyhow::Result<ChatInfoOwned> {
         let id = new_chat_id();
@@ -615,13 +613,6 @@ impl ServerState {
             .insert_chat(&id, name)
             .await
             .with_context(|| format!("failed to insert chat {id} into DB"))?;
-        if let Err(e) = self
-            .store
-            .save_state_entry(&id, "kind", &kind.to_string())
-            .await
-        {
-            tracing::warn!(chat_id = %id, error = %e, "failed to persist chat kind; defaulting to classic");
-        }
         // The workdir pair is ONE semantic unit — the chat boundary and
         // its transient shell cwd — persisted atomically: either both
         // land (creation proceeds) or neither does (one rollback).
@@ -654,7 +645,6 @@ impl ServerState {
             // A new chat's first activity is its creation.
             last_activity_at: created_at.clone(),
             active: true,
-            kind,
             workdir: workdir.clone(),
             provider: pin.id.clone(),
             model: pin.model.clone(),
@@ -667,7 +657,6 @@ impl ServerState {
                 name: name.to_owned(),
                 created_at,
                 last_activity_at: info.last_activity_at.clone(),
-                kind,
                 workdir,
                 provider_id: pin.id.clone(),
                 model: pin.model.clone(),
@@ -1150,7 +1139,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1200,7 +1188,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1346,7 +1333,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 &workdir,
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1385,7 +1371,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1427,7 +1412,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1483,7 +1467,6 @@ mod tests {
                 &sess(&state, "s1").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1520,7 +1503,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1553,7 +1535,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1591,7 +1572,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1654,7 +1634,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1704,7 +1683,6 @@ mod tests {
                 &sa,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1756,7 +1734,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1793,7 +1770,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1853,7 +1829,6 @@ mod tests {
                 &sess(&state, "a").await,
                 "c1",
                 outside.to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),
@@ -1885,7 +1860,6 @@ mod tests {
                 &sa,
                 "c",
                 std::env::temp_dir().to_str().unwrap(),
-                flux_core::ChatKind::Classic,
                 flux_chat::ResolvedPin {
                     provider: Arc::new(crate::test_util::DummyProvider),
                     id: "default".into(),

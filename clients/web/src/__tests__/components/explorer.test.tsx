@@ -34,7 +34,6 @@ describe('Explorer', () => {
           id: 'c1',
           name: 'R',
           createdAt: 1,
-          kind: 'classic',
           active: false,
           workdir: '/proj',
         provider: '',

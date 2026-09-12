@@ -28,6 +28,6 @@ pub use loop_io::{
 };
 pub use ports::{OutputPort, ToolPort};
 pub use provider::{ModelInfo, Provider};
-pub use tool::{BUF_READ_TOOL, FEATURE_DONE_TOOL, QUESTION_TOOL, Tool, ToolCtx, ToolRegistry};
-pub use types::{ChatKind, ChatStateKind, Message, Role, StreamChunk, ToolCall, ToolDefinition};
+pub use tool::{BUF_READ_TOOL, QUESTION_TOOL, Tool, ToolCtx, ToolRegistry};
+pub use types::{ChatStateKind, Message, Role, StreamChunk, ToolCall, ToolDefinition};
 pub use wire::WireEvent;

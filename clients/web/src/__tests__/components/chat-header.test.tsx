@@ -1,6 +1,6 @@
 /**
  * chat-header.test.tsx — the conversation's header row: identity (name,
- * kind badge, workdir) + per-chat usage. The global TopBar carries none
+ * workdir) + per-chat usage. The global TopBar carries none
  * of these (it is app-wide status only) — the identity moved here.
  */
 import { describe, it, expect, beforeEach } from 'vitest';
@@ -18,14 +18,13 @@ describe('ChatHeader', () => {
     expect(container.querySelector('#chat-header')).toBeNull();
   });
 
-  it('carries the chat identity: name, kind badge, workdir', () => {
+  it('carries the chat identity: name, workdir', () => {
     useFlux.setState({
       chats: [
         {
           id: 'c1',
           name: 'Refactor',
           createdAt: 1,
-          kind: 'feature',
           active: false,
           workdir: '/tmp/proj',
           provider: 'default',
@@ -36,14 +35,13 @@ describe('ChatHeader', () => {
     });
     render(<ChatHeader />);
     expect(screen.getByText('Refactor')).toBeTruthy();
-    expect(screen.getByText('Feature')).toBeTruthy();
     expect(screen.getByText('/tmp/proj')).toBeTruthy();
   });
 
   it('shows the per-chat usage when the chat has consumed tokens', () => {
     useFlux.setState({
       chats: [
-        { id: 'c1', name: 'R', createdAt: 1, kind: 'classic', active: false, workdir: '', provider: '', model: '' },
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
       ],
       activeChatId: 'c1',
       usage: { c1: { inTokens: 120, outTokens: 40, cachedTokens: 8, contextTokens: 120 } },
@@ -55,7 +53,7 @@ describe('ChatHeader', () => {
   it("the dock toggle flips dockOpen and tracks it via aria-pressed", () => {
     useFlux.setState({
       chats: [
-        { id: 'c1', name: 'R', createdAt: 1, kind: 'classic', active: false, workdir: '', provider: '', model: '' },
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
       ],
       activeChatId: 'c1',
       dockOpen: false,

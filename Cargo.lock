@@ -678,7 +678,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "flux-context",
  "flux-core",
  "flux-loop",
  "flux-store",
@@ -690,21 +689,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "flux-context"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "flux-core",
- "flux-store",
- "serde",
- "serde_json",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
 ]
 
 [[package]]

@@ -12,7 +12,7 @@
 //! - the **tool executor** consumes facts (`ToolDispatched`,
 //!   `InterruptTools`) and pushes `ToolFinished` back;
 //! - the **chat layer** folds the fact trace (persistence, routing,
-//!   provider triggering, connection replacement, feature orchestration).
+//!   provider triggering, connection replacement, rebuild orchestration).
 //!
 //! Living in flux-core (not flux-loop) is what lets the provider and the
 //! executor stay loop-agnostic: they depend only on this vocabulary.
@@ -43,14 +43,8 @@ pub enum LoopInput {
     StreamHandle(StreamHandle),
     /// Provider stream events (pushed by the connection).
     Stream(StreamEvent),
-    /// Tool executor feedback — exactly one per dispatched call. The
-    /// executor stamps `ends_round` (adapter-configured round-ending tool
-    /// names); the machine knows only the bool.
-    ToolFinished {
-        call: ToolCall,
-        result: String,
-        ends_round: bool,
-    },
+    /// Tool executor feedback — exactly one per dispatched call.
+    ToolFinished { call: ToolCall, result: String },
     /// Control-plane barrier request: the chat layer is rebuilding the
     /// conversation engine (a connection-relevant truth source changed —
     /// provider pin, context base, tool registry; the machine knows
@@ -156,17 +150,16 @@ pub enum LoopFact {
     /// How the round ENDED — the machine's semantic classification of the
     /// terminal transition, emitted once per round right after the
     /// wrap-up facts (transcript, StreamEnd). Consumers fold THIS instead
-    /// of scraping `Wire` events for special cases (the feature hook's
-    /// round-ending-tool detection, cancel-clears-intent) — the
-    /// round-ending tool's identity rides the fact, so no consumer ever
-    /// re-derives it from a transport-shaped event.
+    /// of scraping `Wire` events for special cases (cancel handling) —
+    /// no consumer ever re-derives semantics from a transport-shaped
+    /// event.
     RoundEnded(RoundOutcome),
 }
 
 /// The terminal classification of one round. The machine assigns it at
 /// the single wrap-up point ([`Machine`]'s `end_round`); every caller
-/// path — normal completion, stream failure, user cancel, round-ending
-/// tool — maps onto exactly one variant.
+/// path — normal completion, stream failure, user cancel — maps onto
+/// exactly one variant.
 #[derive(Debug, Clone, PartialEq)]
 pub enum RoundOutcome {
     /// The final stream completed normally (a tool-less stream, or the
@@ -182,11 +175,6 @@ pub enum RoundOutcome {
         message: String,
         code: Option<ErrorCode>,
     },
-    /// A round-ending tool (adapter-configured via the `ends_round` flag
-    /// on [`LoopInput::ToolFinished`]) delivered its result and the round
-    /// wrapped WITHOUT a follow-up stream. Carries the call and its full
-    /// result text — the feature hook's injection payload.
-    ToolEnded { call: ToolCall, result: String },
 }
 
 /// Where a provider connection pushes its stream events. A plain closure

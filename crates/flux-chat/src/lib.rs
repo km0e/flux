@@ -6,8 +6,7 @@
 //! library driven from its select loop). Both are assembled by `spawn`
 //! around the chat entity (`chat`: the kernel's `ToolPort` + persistence
 //! helpers), state tools (`domain`), the overflow buffer (`buf`), the
-//! control handle (`handle`), and the adapter-side tooling (`question`,
-//! `feature`).
+//! control handle (`handle`), and the adapter-side tooling (`question`).
 //!
 //! The control plane — the chat manager (cache/registry), lease/viewer
 //! operations, session identity, the event router, task lifecycle, and
@@ -20,7 +19,6 @@
 pub mod buf;
 pub mod chat;
 pub mod domain;
-mod feature;
 pub mod handle;
 pub mod question;
 pub mod reserved;

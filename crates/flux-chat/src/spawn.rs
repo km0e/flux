@@ -5,7 +5,7 @@
 //! - the **round consumer** (this crate): folds the trace — persistence,
 //!   routing, provider triggering, supervised tool flights (the tool_exec
 //!   library driven from the consumer's select loop), connection
-//!   replacement, feature orchestration.
+//!   replacement.
 //!
 //! The provider instance arrives already resolved (the server registry
 //! selected it at creation/swap/hydration); this layer calls `begin` —
@@ -19,7 +19,7 @@ use crate::question::QuestionTool;
 use crate::round::{RoundControl, RoundDeps, run_round};
 use flux_core::{OutputPort, ToolRegistry};
 use flux_store::Store;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
@@ -34,8 +34,7 @@ pub(crate) struct ChatKit<'a> {
 }
 
 /// Build the per-chat registry: global entries plus the chat-owned tools
-/// bound to this chat (question, buf_read, state tools). A feature chat
-/// also registers `feature_done` (the orchestration hook). Chat-owned
+/// bound to this chat (question, buf_read, state tools). Chat-owned
 /// tools use `register_if_absent` — FIRST registration wins, so a global
 /// entry with the same name would shadow the chat-owned one; that cannot
 /// happen through MCP (assembly-time reserved-name check in
@@ -47,18 +46,10 @@ pub(crate) fn assemble_tools(
     kit: &ChatKit<'_>,
     chat_id: &str,
     store: &Arc<Store>,
-    kind: flux_core::ChatKind,
 ) -> ToolRegistry {
     let registry = ToolRegistry::new();
     for tool in global.entries() {
         registry.register(tool);
-    }
-    if kind == flux_core::ChatKind::Feature {
-        registry.register_if_absent(Arc::new(crate::feature::FeatureDoneTool::new(
-            store.clone(),
-            chat_id.to_string(),
-            state_manager.clone(),
-        )));
     }
     // question — the model asks the user a question mid-round (the
     // approval prompt's ecological successor; content agent-produced).
@@ -109,7 +100,6 @@ pub async fn spawn(
         &kit,
         &init.id,
         &store,
-        init.kind,
     ));
 
     let tool_defs: Arc<[flux_core::ToolDefinition]> =
@@ -139,16 +129,6 @@ pub async fn spawn(
     let loop_task =
         tokio::spawn(flux_loop::Loop::new(flux_loop::Machine::new(), loop_rx, facts_tx).run());
 
-    // The feature chat configures feature_done as the round-ending tool —
-    // the NAME lives only in this adapter config (the consumer stamps
-    // `ends_round` from it); the machine knows only the bool.
-    let feature_mode = init.kind == flux_core::ChatKind::Feature;
-    let round_ending_tools: HashSet<String> = if feature_mode {
-        HashSet::from([flux_core::FEATURE_DONE_TOOL.to_string()])
-    } else {
-        HashSet::new()
-    };
-
     // Peer 2: the round consumer (the fact-trace fold; owns the done flag
     // and the supervised tool flights).
     let done = Arc::new(AtomicBool::new(false));
@@ -156,10 +136,8 @@ pub async fn spawn(
     let deps = RoundDeps {
         chat: chat.clone(),
         wire: Arc::clone(&wire),
-        round_ending_tools,
         state_slot: state_slot.clone(),
         connection,
-        feature_mode,
         // In-place rebuild materials: the consumer re-assembles from
         // these at every fired gate (the global registry's Arc sees MCP
         // mutations; the provider instance is replaced by a carried pin).
@@ -167,7 +145,6 @@ pub async fn spawn(
         global_registry: Arc::clone(&tools),
         descriptions: Arc::clone(&initial_state),
         questions: Arc::clone(&init.questions),
-        kind: init.kind,
         provider: Arc::clone(&init.provider),
     };
     let consumer_task = tokio::spawn(run_round(

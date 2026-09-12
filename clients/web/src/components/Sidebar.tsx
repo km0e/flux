@@ -130,11 +130,6 @@ function ChatRow(props: {
           <>
             <div className="flex items-center gap-1.5">
               <span className="truncate text-sm">{c.name || 'New Chat'}</span>
-              {c.kind === 'feature' && (
-                <Badge tone="accent" title="Feature mode — per-feature context">
-                  Feature
-                </Badge>
-              )}
               {/* wire active = lease held by ANY window (incl. this one) —
                   only flag it when the holder is NOT the selected chat, and
                   never while the row's flag is stale (in-flight switch). */}

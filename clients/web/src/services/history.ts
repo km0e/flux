@@ -79,14 +79,10 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
       case 'user': {
         // Manual rebase affordance (§2.1 of the protocol-hardening ledger):
         // history row ids are the rebase base keys. Gates: the id must be
-        // present (assembled messages carry none), the chat classic
-        // (feature chats rebase automatically at their boundaries — a
-        // manual base below a future boundary would be confusingly
-        // re-archived), and the operator holds the lease (a mutation).
+        // present (assembled messages carry none) and the operator holds
+        // the lease (a mutation).
         const rebaseable =
-          msg.id !== undefined &&
-          useFlux.getState().readonlyChats[chatId] !== true &&
-          useFlux.getState().chats.find((c) => c.id === chatId)?.kind === 'classic';
+          msg.id !== undefined && useFlux.getState().readonlyChats[chatId] !== true;
         const bubble = createMessageBubble({
           role: 'user',
           text: msg.content,

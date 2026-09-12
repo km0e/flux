@@ -164,7 +164,6 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
           name: 'One',
           createdAt: 0,
           active: false,
-          kind: 'classic',
           workdir: '/tmp/p',
           provider: 'p',
           model: 'm',
@@ -178,7 +177,7 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
     document.body.removeChild(wrap);
   });
 
-  async function renderWith(kind: 'classic' | 'feature', readonly = false) {
+  async function renderWith(readonly = false) {
     useFlux.setState({
       chats: [
         {
@@ -186,7 +185,6 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
           name: 'One',
           createdAt: 0,
           active: false,
-          kind,
           workdir: '/tmp/p',
           provider: 'p',
           model: 'm',
@@ -203,21 +201,16 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
     return getPane('test-chat');
   }
 
-  it('classic + lease: user bubbles carry the rebase affordance keyed by row id', async () => {
-    const pane = await renderWith('classic');
+  it('lease: user bubbles carry the rebase affordance keyed by row id', async () => {
+    const pane = await renderWith();
     const buttons = pane.querySelectorAll<HTMLButtonElement>('.msg-rebase');
     expect(buttons.length).toBe(2);
     expect(buttons[0]!.dataset.baseMessageId).toBe('41');
     expect(buttons[1]!.dataset.baseMessageId).toBe('43');
   });
 
-  it('feature chats hide the entry (auto-boundaries own the base)', async () => {
-    const pane = await renderWith('feature');
-    expect(pane.querySelectorAll('.msg-rebase').length).toBe(0);
-  });
-
   it('readonly (lease elsewhere) hides the entry — a viewer cannot mutate', async () => {
-    const pane = await renderWith('classic', true);
+    const pane = await renderWith(true);
     expect(pane.querySelectorAll('.msg-rebase').length).toBe(0);
   });
 
@@ -234,7 +227,7 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
     resetBridgeForTest();
     setBridge({ send: (msg) => sent.push(msg) });
     setDialogImpls({ confirmRebase: async () => true });
-    const pane = await renderWith('classic');
+    const pane = await renderWith();
     const btn = pane.querySelectorAll<HTMLButtonElement>('.msg-rebase')[0]!;
     btn.click();
     await new Promise((r) => setTimeout(r, 0));
@@ -252,7 +245,7 @@ describe('manual rebase entry (§2.1: archive-context-up-to-here)', () => {
     resetBridgeForTest();
     setBridge({ send: () => sent++ });
     setDialogImpls({ confirmRebase: async () => false });
-    const pane = await renderWith('classic');
+    const pane = await renderWith();
     pane.querySelectorAll<HTMLButtonElement>('.msg-rebase')[0]!.click();
     await new Promise((r) => setTimeout(r, 0));
     expect(sent).toBe(0);

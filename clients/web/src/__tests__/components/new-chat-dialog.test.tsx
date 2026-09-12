@@ -88,7 +88,7 @@ describe('NewChatDialog inheritance', () => {
     document.body.innerHTML = '';
   });
 
-  it('seeds kind, provider pin, model, and workdir from the last opened chat', async () => {
+  it('seeds the provider pin, model, and workdir from the last opened chat', async () => {
     vi.mocked(listDir).mockImplementation(async (path?: string) => listingFor(path ?? ''));
     useFlux.setState({
       connectionStatus: 'connected',
@@ -102,7 +102,6 @@ describe('NewChatDialog inheritance', () => {
           name: 'Prev',
           createdAt: 1,
           active: false,
-          kind: 'feature',
           workdir: '/tmp/proj',
           provider: 'alpha',
           model: 'm-a',
@@ -115,10 +114,7 @@ describe('NewChatDialog inheritance', () => {
     await waitFor(() => {
       expect(listCalls()[0]).toBe('/tmp/proj');
     });
-    // Kind + provider pin + model are seeded too (everything but the name).
-    expect(screen.getByRole('radio', { name: /Feature/ }).getAttribute('aria-checked')).toBe(
-      'true',
-    );
+    // The provider pin + model are seeded too (everything but the name).
     expect((screen.getByLabelText(/Provider/) as HTMLSelectElement).value).toBe('alpha');
     expect((screen.getByLabelText(/^Model/) as HTMLInputElement).value).toBe('m-a');
   });
@@ -133,7 +129,6 @@ describe('NewChatDialog inheritance', () => {
           name: 'Prev',
           createdAt: 1,
           active: true,
-          kind: 'classic',
           workdir: '/tmp/proj',
           provider: 'gone',
           model: 'm-x',

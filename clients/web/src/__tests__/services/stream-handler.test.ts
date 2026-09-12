@@ -31,7 +31,6 @@ describe('stream-handler', () => {
         name: 'Test',
         createdAt: Date.now(),
         active: false,
-        kind: 'classic',
         workdir: '/tmp/proj',
         provider: 'default',
         model: 'gpt-4o-mini',

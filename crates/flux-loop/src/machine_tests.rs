@@ -222,7 +222,6 @@ fn tool_round_final_stream_end_carries_follow_up_reason() {
     let step = m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "r".into(),
-        ends_round: false,
     });
     // Tool result wire fact first, then the continuation stream request
     // over the dual-written tool result.
@@ -319,7 +318,6 @@ fn processing_batch_dispatches_one_at_a_time() {
     let step = m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "done".into(),
-        ends_round: false,
     });
     // Result wire fact, then the SECOND tool dispatches (not the
     // continuation stream — the batch is not done).
@@ -341,7 +339,6 @@ fn processing_batch_dispatches_one_at_a_time() {
     let step = m.step(Input::ToolFinished {
         call: call("c2", "t"),
         result: "done2".into(),
-        ends_round: false,
     });
     assert!(matches!(
         &step.facts[1],
@@ -356,7 +353,6 @@ fn processing_tool_executed_dual_writes_and_wraps_up() {
     m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "42".into(),
-        ends_round: false,
     });
     let step = m.step(chunk(StreamChunk::End {
         finish_reason: None,
@@ -401,7 +397,6 @@ fn processing_cancel_interrupts_in_flight_voids_rest_then_ends_round() {
     let step = m.step(Input::ToolFinished {
         call: call("inflight", "slow"),
         result: "partial output".into(),
-        ends_round: false,
     });
     assert_eq!(
         step.facts[0],
@@ -434,7 +429,6 @@ fn cancel_mid_batch_next_round_request_resolves_every_tool_call() {
     m.step(Input::ToolFinished {
         call: call("inflight", "slow"),
         result: "partial".into(),
-        ends_round: false,
     });
     // Idle now; pending = [void]. The next user message carries it.
     let step = m.step(Input::UserMessage("next".into()));
@@ -466,81 +460,6 @@ fn processing_double_cancel_absorbs_once() {
     assert!(*cancelled);
 }
 
-#[test]
-fn ends_round_tool_wraps_without_follow_up_stream() {
-    let mut m = m();
-    enter_processing(&mut m, vec![call("c1", "feature_done")]);
-    let step = m.step(Input::ToolFinished {
-        call: call("c1", "feature_done"),
-        result: "orchestrated".into(),
-        ends_round: true,
-    });
-    // Result wire fact, then wrap-up — NO continuation ModelInputRequested.
-    assert_eq!(
-        step.facts[0],
-        Fact::Wire(WireEvent::ToolResult {
-            id: "c1".into(),
-            name: "feature_done".into(),
-            result: "orchestrated".into(),
-        })
-    );
-    assert!(matches!(&step.facts[1], Fact::TranscriptCommitted(_)));
-    assert_eq!(step.facts[2], stream_end(None));
-    assert_eq!(
-        step.facts[3],
-        Fact::RoundEnded(RoundOutcome::ToolEnded {
-            call: call("c1", "feature_done"),
-            result: "orchestrated".into(),
-        })
-    );
-    assert_eq!(m.state(), &State::Idle);
-}
-
-#[test]
-fn user_cancel_during_ends_round_tool_wins_no_wrap_interrupt() {
-    // feature_done in flight is EXEMPT from user interruption — its result
-    // is the next feature's opening context; a cancel is absorbed and the
-    // exempt tool's completion concludes the round normally.
-    let mut m = m();
-    enter_processing(&mut m, vec![call("c1", "feature_done")]);
-    let step = m.step(Input::Cancel);
-    assert!(step.facts.is_empty(), "exempt: no interrupt fact");
-    let State::ProcessingTools { cancelled, .. } = m.state() else {
-        panic!("still processing");
-    };
-    assert!(*cancelled, "absorbed");
-    // The completion still ends the round — with Cancelled (the user said
-    // stop) — and the caller (chat layer) skips the rebase+inject on it.
-    let step = m.step(Input::ToolFinished {
-        call: call("c1", "feature_done"),
-        result: "orchestrated".into(),
-        ends_round: true,
-    });
-    assert_eq!(step.facts[1], Fact::Wire(WireEvent::Cancelled));
-    assert_eq!(step.facts[3], stream_end(None));
-    assert_eq!(step.facts[4], Fact::RoundEnded(RoundOutcome::Cancelled));
-}
-
-#[test]
-fn feature_done_in_flight_is_exempt_from_interrupt() {
-    // While OTHER tools run alongside, a cancel still interrupts them —
-    // only the feature_done flight itself is exempt.
-    let mut m = m();
-    enter_processing(
-        &mut m,
-        vec![call("c1", "feature_done"), call("c2", "normal")],
-    );
-    let step = m.step(Input::Cancel);
-    // c1 (feature_done) is IN FLIGHT (dispatched first) — exempt, so no
-    // interrupt fact and no batch void (the exempt tool's completion
-    // concludes the round; a second cancel is a no-op).
-    assert!(step.facts.is_empty());
-    let State::ProcessingTools { exec_queue, .. } = m.state() else {
-        panic!("still processing");
-    };
-    assert!(exec_queue.is_empty());
-}
-
 // ── the control-plane gate (Hold / GateReleased) ───────────────────────
 
 #[test]
@@ -570,7 +489,6 @@ fn gate_fires_with_pending_voids_intact() {
     m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "partial".into(),
-        ends_round: false,
     });
     assert_eq!(m.state(), &State::Idle);
     let step = m.step(Input::Hold);
@@ -614,7 +532,6 @@ fn hold_while_processing_tools_arms_too() {
     m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "done".into(),
-        ends_round: false,
     });
     assert!(matches!(m.state(), &State::Streaming { .. }));
     let step = m.step(Input::Stream(StreamEvent::Chunk(StreamChunk::End {
@@ -652,7 +569,6 @@ fn stale_tool_feedback_without_dispatch_is_absorbed() {
     let step = m.step(Input::ToolFinished {
         call: call("ghost", "t"),
         result: "x".into(),
-        ends_round: false,
     });
     assert!(step.facts.is_empty());
     assert_eq!(m.state(), &State::Idle);
@@ -674,7 +590,7 @@ fn assistant_empty() -> Message {
 fn streaming_user_message_queues_and_starts_at_wrap() {
     // A turn sent mid-stream is QUEUED, not dropped: it starts in the same
     // step that wraps the current round, with the boundary REPORTED
-    // (RoundState(Idle) — the feature hook and snapshots read it; the
+    // (RoundState(Idle) — the subscription snapshot reads it; the
     // loop's own transition check cannot emit it because the step
     // re-enters Streaming).
     let mut m = m();
@@ -737,7 +653,6 @@ fn processing_user_message_queues_until_the_round_wraps() {
     let step = m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "done".into(),
-        ends_round: false,
     });
     assert!(
         !step.facts.iter().any(
@@ -794,7 +709,6 @@ fn cancel_during_tool_flight_discards_queued_turns() {
     let step = m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "partial".into(),
-        ends_round: false,
     });
     // The absorbed cancel resolves: Cancelled + wrap — no queued round.
     assert!(step.facts.contains(&Fact::Wire(WireEvent::Cancelled)));

@@ -77,7 +77,6 @@ describe('handlers', () => {
           chat_id: 'c1',
           name: 'One',
           created_at: '2026-01-01T00:00:00Z', last_activity_at: '2026-01-01T00:00:00Z',
-          kind: 'classic',
           workdir: '/tmp/proj',
         provider: 'default',
         model: 'gpt-4o-mini',
@@ -201,7 +200,7 @@ describe('handlers', () => {
       {
         type: 'chats',
         chats: [
-          { chat_id: 'c1', name: 'One', created_at: '2026-01-01T00:00:00Z', last_activity_at: '2026-01-01T00:00:00Z', kind: 'classic', workdir: '/tmp', active: false, provider: 'default', model: 'gpt-4o-mini' },
+          { chat_id: 'c1', name: 'One', created_at: '2026-01-01T00:00:00Z', last_activity_at: '2026-01-01T00:00:00Z', workdir: '/tmp', active: false, provider: 'default', model: 'gpt-4o-mini' },
         ],
       },
       ctx,
@@ -337,7 +336,7 @@ describe('handlers', () => {
     const { ctx } = mockCtx();
     useFlux.setState({
       chats: [
-        { id: 'c1', name: 'One', createdAt: 1, kind: 'classic', active: true, workdir: '/tmp', provider: 'default', model: 'm1' },
+        { id: 'c1', name: 'One', createdAt: 1, active: true, workdir: '/tmp', provider: 'default', model: 'm1' },
       ],
       activeChatId: 'c1',
     });
