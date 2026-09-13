@@ -102,12 +102,14 @@ impl Store {
         // listener binds — so the serving window never sees a whole-db VACUUM.
         Self::ensure_incremental_auto_vacuum(&pool).await?;
 
-        let migrator = sqlx::migrate::Migrator::new(
-            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
-        )
-        .await
-        .context("failed to load migrations")?;
-        migrator
+        // The migrations are EMBEDDED at compile time (sqlx::migrate! bakes
+        // the ./migrations SQL into the binary). The runtime variant —
+        // Migrator::new(Path::new(env!("CARGO_MANIFEST_DIR")).join(...)) —
+        // resolves that build-machine path AT RUNTIME and broke every
+        // artifact outside the build checkout (runner-built release binaries
+        // could not open their store at all).
+        static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!();
+        MIGRATOR
             .run(&pool)
             .await
             .context("failed to apply migrations")?;
