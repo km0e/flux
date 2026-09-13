@@ -23,8 +23,10 @@ if (-not (Test-Path (Join-Path $repo "clients\node_modules"))) {
 Write-Host "==> Deriving the TS contract (buf generate)..."
 # The TS contract is DERIVED, never committed - a clean checkout lacks
 # clients/web/src/gen and vite cannot resolve "../gen/..." without it.
+# buf resolves the protoc-gen-es plugin via PATH: inject the npm-local bin.
+$env:PATH = "$repo\clients\node_modules\.bin;$env:PATH"
 Push-Location $repo
-& (Join-Path $repo "clients\node_modules\.bin\buf.cmd") generate proto
+buf generate proto
 Pop-Location
 
 Write-Host "==> Building web UI (vite)..."

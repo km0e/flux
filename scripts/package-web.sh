@@ -23,9 +23,11 @@ fi
 
 # The TS contract is DERIVED, never committed (see AGENTS.md) — any clean
 # checkout lacks clients/web/src/gen, so derive it here or vite cannot
-# resolve "../gen/..." imports. Uses the npm-local buf: no global install.
+# resolve "../gen/..." imports. buf resolves the protoc-gen-es plugin via
+# PATH: inject the npm-local bin (no global install required anywhere).
 echo "==> Deriving the TS contract (buf generate)..."
-(cd "$repo" && "$repo/clients/node_modules/.bin/buf" generate proto)
+export PATH="$repo/clients/node_modules/.bin:$PATH"
+(cd "$repo" && buf generate proto)
 
 echo "==> Building web UI (vite)..."
 (cd "$repo/clients/web" && npm run build:fast)
