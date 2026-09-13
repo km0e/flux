@@ -1,8 +1,8 @@
 //! Machine table tests — the reducer is the source of truth.
 //!
 //! Every (state, input) pair is exercised through the fact trace it
-//! produces. The loop's own tests (runtime.rs) cover the pump; the tool
-//! executor's mechanics live with the executor (flux-chat).
+//! produces. The loop's own tests (runtime.rs) cover the pump; the
+//! tool-flight mechanics live with the supervisor (flux-chat::tool_exec).
 
 use super::*;
 use flux_core::LoopFact as Fact;
@@ -379,7 +379,7 @@ fn processing_cancel_interrupts_in_flight_voids_rest_then_ends_round() {
     );
     // First dispatch consumed "inflight"; "queued" sits in the exec queue.
     let step = m.step(Input::Cancel);
-    // The interrupt goes to the executor; the queued tool is voided into
+    // The interrupt goes to the flight supervisor; the queued tool is voided into
     // pending (deferred delivery); the round wraps when the in-flight
     // result lands.
     assert_eq!(step.facts, vec![Fact::InterruptTools]);

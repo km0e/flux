@@ -3,8 +3,8 @@
  * terminal sessions.
  *
  * Tabs: one per opened file (multi-file, editor-style) + one per terminal
- * session (created by the strip's "+" or the sidebar button — never
- * auto-spawned; pinned after the file tabs). The file actions (Copy /
+ * session (created by the strip's "+" or the empty state's New-terminal
+ * action — never auto-spawned; pinned after the file tabs). The file actions (Copy /
  * Raw / truncated badge) FLOAT in the strip's right side — the content
  * pane below is chrome-free (no duplicated file name row). The dock is a
  * flex sibling of the chat column inside the body row: widening it PUSHES
@@ -147,7 +147,7 @@ export function RightDock(): React.ReactElement | null {
             onClick={addTerminal}
             className={cn(
               'grid size-7 max-md:size-9 shrink-0 cursor-pointer place-items-center rounded-md text-muted',
-              'transition-colors duration-100 hover:bg-hover hover:text-fg disabled:opacity-40',
+              'transition-colors duration-fast hover:bg-hover hover:text-fg disabled:opacity-40',
             )}
           >
             <Plus size={14} aria-hidden="true" />
@@ -228,7 +228,7 @@ function StripButton(props: {
       onClick={props.onClick}
       className={cn(
         'h-[26px] cursor-pointer rounded-md px-2 text-2xs font-medium whitespace-nowrap',
-        'transition-colors duration-100',
+        'transition-colors duration-fast',
         props.pressed ? 'bg-hover text-fg' : 'text-muted hover:bg-hover hover:text-fg',
       )}
     >
@@ -277,7 +277,7 @@ function DockTab(props: {
     <div
       className={cn(
         'group flex min-w-0 max-w-44 shrink-0 cursor-pointer items-center gap-1.5 rounded-sm px-2 py-1 max-md:py-1.5 max-md:text-sm text-xs',
-        'transition-colors duration-75',
+        'transition-colors duration-fast',
         props.active
           ? 'bg-elev text-fg shadow-sm'
           : 'bg-transparent text-muted hover:bg-hover hover:text-fg',
@@ -300,7 +300,7 @@ function DockTab(props: {
         type="button"
         aria-label={props.closeLabel}
         title={props.closeLabel}
-        className="ml-0.5 hidden size-4 max-md:size-6 shrink-0 cursor-pointer place-items-center rounded-sm text-faint hover:bg-hover hover:text-fg group-hover:grid"
+        className="ml-0.5 hidden size-4 shrink-0 cursor-pointer place-items-center rounded-sm text-faint hover:bg-hover hover:text-fg group-hover:grid touch:grid touch:size-9"
         onClick={(e) => {
           e.stopPropagation();
           props.onClose();

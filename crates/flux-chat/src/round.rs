@@ -20,22 +20,22 @@
 //!   token inline; the flight completion arm pushes exactly one
 //!   `ToolFinished` back into the loop's FIFO;
 //! - **engine rebuild**: the ONE control command. The session layer
-//!   mutates the truth sources (provider pin, context base, the global
-//!   tool registry) and sends `Rebuild`; the consumer arms the machine's
-//!   gate (a live round — and any turns queued behind it, which belong
-//!   to the pre-rebuild context — runs to its wrap-up first), and at the
-//!   fired gate rebuilds the engine IN PLACE: the tool registry from the
-//!   current global truth, the connection re-begin over the live history
-//!   above the context base, the provider instance from the carried pin.
+//!   mutates the truth sources (provider pin, the global tool registry)
+//!   and sends `Rebuild`; the consumer arms the machine's gate (a live
+//!   round — and any turns queued behind it, which belong to the
+//!   pre-rebuild context — runs to its wrap-up first), and at the fired
+//!   gate rebuilds the engine IN PLACE: the tool registry from the
+//!   current global truth, the connection re-begin over the FULL
+//!   persisted transcript, the provider instance from the carried pin.
 //!   The same deterministic assembly every spawn uses — the engine never
 //!   dies for a rebuild, and a live round is never mutated.
 
-use crate::chat::{CONTEXT_BASE_KEY, Chat, ResolvedPin};
+use crate::chat::{Chat, ResolvedPin};
 use crate::question::QuestionTool;
 use crate::spawn::{ChatKit, assemble_tools};
 use crate::tool_exec::{FlightOutput, Flights};
 use flux_core::{
-    ChatStateKind, Connection, LoopFact, LoopInput, OutputPort, Provider, StreamEvent,
+    ChatStateKind, Connection, LoopFact, LoopInput, OutputPort, Provider, Role, StreamEvent,
     ToolDefinition, ToolRegistry, WireEvent,
 };
 use std::collections::HashMap;
@@ -47,8 +47,8 @@ pub(crate) enum RoundCmd {
     /// Rebuild the engine in place at the next machine gate: a live round
     /// — and any turns queued behind it — finishes first; at the fired
     /// gate the consumer re-assembles from the truth sources (the global
-    /// tool registry, the store's live history above the context base)
-    /// and re-begins its connection. `provider` replaces the chat's
+    /// tool registry, the store's full persisted transcript) and
+    /// re-begins its connection. `provider` replaces the chat's
     /// provider instance for this and every later rebuild (the hot-swap
     /// path); `None` keeps the current one.
     Rebuild { provider: Option<ResolvedPin> },
@@ -177,7 +177,22 @@ pub(crate) async fn run_round(
             Item::Fact(fact) => {
                 match fact {
                     LoopFact::TranscriptCommitted(messages) => {
-                        deps.chat.persist_messages(&messages).await;
+                        let ids = deps.chat.persist_messages(&messages).await;
+                        // The turn-acceptance commit is exactly one user
+                        // message — announce its row id so the sender's
+                        // client can name its own live bubble (the fork
+                        // affordance). Announced AFTER the persist lands
+                        // (the same discipline as every wire fact here).
+                        if let ([msg], [id]) = (&messages[..], &ids[..])
+                            && msg.role == Role::User
+                        {
+                            deps.wire
+                                .emit(WireEvent::MessagePersisted {
+                                    id: *id,
+                                    content: msg.content.clone(),
+                                })
+                                .await;
+                        }
                     }
                     LoopFact::Wire(event) => {
                         deps.wire.emit(event).await;
@@ -231,7 +246,7 @@ pub(crate) async fn run_round(
                     LoopFact::GateReleased => {
                         // The gate fired: rebuild the engine IN PLACE from
                         // the truth sources — provider instance, tool
-                        // registry, live history above the context base.
+                        // registry, the full persisted transcript.
                         // The engine never dies for a rebuild; the consumer
                         // keeps folding.
                         apply_rebuild(&mut deps).await;
@@ -255,42 +270,25 @@ enum Item {
 
 /// Rebuild the engine in place at the fired gate. Order matters:
 ///
-/// 1. **base read** — the new connection's prefix is the live history
-///    above the persisted context base (manual rebase path);
+/// 1. **history read** — the new connection begins over the FULL persisted
+///    transcript (a chat's context is its history; forking, not archiving,
+///    is how a conversation restarts from a message);
 /// 2. **re-assembly** — the registry from the CURRENT global truth (the
 ///    same `assemble_tools` the initial spawn runs) and the connection
-///    re-begin over the live history above the context base, on the
-///    chat's current provider instance.
+///    re-begin over that history, on the chat's current provider instance.
 ///
 /// A store failure keeps the current engine materials (the rebuild
 /// retries at the next gate).
 async fn apply_rebuild(deps: &mut RoundDeps) {
-    let base = match deps.chat.store.load_state(&deps.chat.id).await {
-        Ok(state) => state
-            .get(CONTEXT_BASE_KEY)
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0),
+    let history = match deps.chat.store.load_messages(&deps.chat.id).await {
+        // Read-side invariant guard: the re-begin history must be
+        // provider-valid (see crate::history).
+        Ok(history) => crate::validate_history(history),
         Err(e) => {
             tracing::warn!(
                 chat_id = %deps.chat.id,
                 error = %e,
-                "engine rebuild: failed to read the context base; keeping the current connection"
-            );
-            return;
-        }
-    };
-    let history = match deps
-        .chat
-        .store
-        .load_messages_after(&deps.chat.id, base)
-        .await
-    {
-        Ok(history) => history,
-        Err(e) => {
-            tracing::warn!(
-                chat_id = %deps.chat.id,
-                error = %e,
-                "engine rebuild: failed to load the live history; keeping the current connection"
+                "engine rebuild: failed to load the history; keeping the current connection"
             );
             return;
         }
@@ -318,7 +316,6 @@ async fn apply_rebuild(deps: &mut RoundDeps) {
         .begin(&deps.system_prompt, &tool_defs, &history);
     tracing::info!(
         chat_id = %deps.chat.id,
-        base,
         history = history.len(),
         "engine rebuilt in place at the machine gate"
     );

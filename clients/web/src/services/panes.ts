@@ -1,8 +1,9 @@
 /**
  * panes.ts — Per-chat DOM pane management.
  *
- * Provides: getPane, ensurePane, switchToChat, removePane, clearChatPane,
- *           getPaneIds, hideEmptyState, _resetPanesForTest
+ * Provides: getPaneIfExists, getPane, hideEmptyState, clearPaneMessages,
+ *           ensurePane, switchToChat, removePane, clearChatPane,
+ *           getPaneIds, _resetPanesForTest
  * Depends: core/state.ts, lib/dom.ts, services/stream.ts
  * Note: DO NOT delete — Sidebar, MessageList and stream-handler depend on
  * these exports.
@@ -141,6 +142,23 @@ function evictOverflow(): void {
 export function hideEmptyState(chatId: string): void {
   const empty = document.getElementById(`empty-${chatId}`);
   if (empty) empty.style.display = 'none';
+}
+
+/** Wipe a pane's message DOM back to the empty state. Used by the switch
+ * path for a STALE pane (departed mid-round — see stream-handler's
+ * stalePanes): the outdated messages must not flash while the claim's
+ * history snapshot is in flight. The controller is left alone — the
+ * snapshot render owns its disposal. */
+export function clearPaneMessages(chatId: string): void {
+  const pane = getPaneIfExists(chatId);
+  if (!pane) return;
+  for (const child of Array.from(pane.children)) {
+    if (!child.id || !child.id.startsWith('empty-')) {
+      child.remove();
+    }
+  }
+  const empty = document.getElementById(`empty-${chatId}`);
+  if (empty) empty.style.display = '';
 }
 
 /** Get (creating if needed) a chat's pane and hide its empty state. */

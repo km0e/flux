@@ -180,9 +180,13 @@ describe('dispatchMessage', () => {
     });
   });
 
-  it('unregistered type is a no-op', () => {
-    // should not throw
+  it('unregistered type is a full no-op', () => {
+    // Unknown frames (stale clients, vocabulary drift) dispatch to nothing:
+    // no throw, no store write, no control traffic.
+    const before = useFlux.getState().chats.length;
     dispatchMessage({ type: 'unknown_type' } as unknown as ServerMessage, mockCtx(conn));
+    expect(useFlux.getState().chats.length).toBe(before);
+    expect(conn.send).not.toHaveBeenCalled();
   });
 });
 

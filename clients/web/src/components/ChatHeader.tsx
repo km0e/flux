@@ -26,6 +26,14 @@ export function ChatHeader(): React.ReactElement | null {
   const active = useFlux((s) => s.chats.find((c) => c.id === s.activeChatId));
   const usage = useFlux((s) => (cid ? s.usage[cid] : undefined));
   const dockOpen = useFlux((s) => s.dockOpen);
+  // Subscription BEFORE the early return — hooks never sit behind
+  // conditionals.
+  const forkSourceName = useFlux((s) =>
+    active?.forked_from_chat_id
+      ? (s.chats.find((c) => c.id === active.forked_from_chat_id)?.name ??
+        active.forked_from_chat_id)
+      : undefined,
+  );
   if (!cid || !active) return null;
 
   return (
@@ -40,6 +48,19 @@ export function ChatHeader(): React.ReactElement | null {
       >
         {active.name || 'New Chat'}
       </span>
+      {/* Fork provenance — a quiet lineage mark next to the name; the
+          source's name resolves from the local list (a deleted source
+          degrades to the raw id, which the tooltip explains). */}
+      {forkSourceName !== undefined && (
+        <Tooltip content={`Forked from "${forkSourceName}"`} side="bottom">
+          <span
+            className="shrink-0 rounded-sm bg-hover px-1.5 py-px text-2xs text-faint"
+            aria-label="This conversation is a fork"
+          >
+            forked
+          </span>
+        </Tooltip>
+      )}
       {active.workdir && (
         <span
           className="hidden min-w-0 flex-1 truncate font-mono text-2xs text-faint md:block"

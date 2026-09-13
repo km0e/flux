@@ -4,20 +4,20 @@
  * Brand mark → spacer → streaming indicator (click = cancel) → connection
  * (click = reconnect when down) → settings gear (opens the one tabbed
  * settings dialog DIRECTLY — the sections are tabs inside it, no menu) →
- * theme toggle. The CONVERSATION's identity (name, kind, workdir, usage)
+ * theme toggle. The CONVERSATION's identity (name, workdir, usage)
  * lives in ChatHeader — the bar above it never repeats chat state, so the
  * layout is stable and narrow viewports stay calm.
  *
- * Provides: TopBar, useTheme
- * Depends: core/state.ts, core/bridge.ts, core/prefs.ts, components/ui/*,
- *          components/dialogs/SettingsDialog
+ * Provides: TopBar
+ * Depends: core/state.ts, core/bridge.ts, hooks/useTheme.ts,
+ *          components/ui/*, components/dialogs/SettingsDialog
  */
-import { useState } from 'react';
+import { lazy, Suspense, useState } from 'react';
 import { useFlux } from '../core/state';
 import { bridge } from '../core/bridge';
-import { readStoredTheme, storeTheme, type ThemeChoice } from '../core/prefs';
+import type { ThemeChoice } from '../core/prefs';
+import { useTheme } from '../hooks/useTheme';
 import { Button, IconButton, Spinner } from './ui';
-import { SettingsDialog } from './dialogs/SettingsDialog';
 import { Tooltip } from './ui/tooltip';
 import {
   Menu,
@@ -36,12 +36,6 @@ const STATUS_LABEL: Record<string, string> = {
   failed: 'Connection failed',
 };
 
-const NEXT_THEME: Record<ThemeChoice, ThemeChoice> = {
-  auto: 'dark',
-  dark: 'light',
-  light: 'auto',
-};
-
 const THEME_ICON: Record<ThemeChoice, React.ReactNode> = {
   auto: <Monitor size={14} />,
   dark: <Moon size={14} />,
@@ -54,20 +48,14 @@ const THEME_LABEL: Record<ThemeChoice, string> = {
   light: 'Light',
 };
 
-/** Cycle the theme choice; explicit values pin the color-scheme. */
-export function useTheme(): [ThemeChoice, () => void] {
-  const [theme, setTheme] = useState<ThemeChoice>(() => readStoredTheme() ?? 'auto');
-  const cycle = () => {
-    const next = NEXT_THEME[theme];
-    setTheme(next);
-    storeTheme(next);
-    // The inline bootstrap in index.html handled the initial state; explicit
-    // choices pin the attribute, auto clears it (the media query owns it).
-    if (next === 'auto') delete document.documentElement.dataset.theme;
-    else document.documentElement.dataset.theme = next;
-  };
-  return [theme, cycle];
-}
+// The settings chain (dialog + the Providers/MCP/Skills panels, ~30 KB of
+// app code) rides its own chunk and loads on first gear click — the entry
+// stays first-party-only (see vite.config.ts's chunking comment). The
+// module loads exactly once, so the last-visited-section memory (module
+// state inside the dialog) survives close/reopen as before.
+const SettingsDialog = lazy(() =>
+  import('./dialogs/SettingsDialog').then((m) => ({ default: m.SettingsDialog })),
+);
 
 export function TopBar(): React.ReactElement {
   const cid = useFlux((s) => s.activeChatId);
@@ -175,7 +163,17 @@ export function TopBar(): React.ReactElement {
         </IconButton>
       </Tooltip>
 
-      {settingsOpen && <SettingsDialog onClose={() => setSettingsOpen(false)} />}
+      {settingsOpen && (
+        <Suspense
+          fallback={
+            <IconButton label="Settings" className="size-7" aria-busy="true">
+              <Spinner />
+            </IconButton>
+          }
+        >
+          <SettingsDialog onClose={() => setSettingsOpen(false)} />
+        </Suspense>
+      )}
     </div>
   );
 }

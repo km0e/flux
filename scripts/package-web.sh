@@ -6,7 +6,8 @@
 #   is a DIRECTORY (flux-server's static layer serves a directory, not
 #   an archive): <out>/ contains index.html + assets/*.{js,css} (content-hashed).
 #   Default out: clients/web/dist (the in-repo build location run-server.sh
-#   pins via --web-assets-dir). package.sh copies it to dist/web-ui.
+#   pins via --web-assets-dir). The dist release pipeline stages it as
+#   web-ui/ next to the binary inside every archive (include = ["web-ui/"]).
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"

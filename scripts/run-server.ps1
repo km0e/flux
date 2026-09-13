@@ -14,6 +14,8 @@
 #   builds clients/web via package-web.ps1 when the dist is missing (force
 #   with -WebBuild; never build with -NoWebBuild), then pins the repo dist
 #   via --web-assets-dir. Skipped when -WebAssetsDir is given (used as-is).
+#   -WebBuild/-NoWebBuild are SCRIPT options — consumed here, never passed
+#   to the binary.
 $ErrorActionPreference = "Stop"
 $repo = Resolve-Path (Join-Path $PSScriptRoot "..")
 
@@ -22,18 +24,32 @@ $noBuild = $false
 $noWeb = $false
 $webAssets = ""
 
+# Arg extraction: -WebBuild/-NoWebBuild are SCRIPT options — consumed here,
+# never passed to the binary (a leak made flux-server die on an unknown
+# flag). --no-web and --web-assets-dir are SERVER flags the script also
+# inspects; they pass through verbatim in both space and = forms (the = form
+# must be recognized, or the script would append a second --web-assets-dir
+# and clap's last-wins would shadow the user's value).
+$passthrough = @()
 $i = 0
 while ($i -lt $args.Count) {
     $arg = $args[$i]
-    switch ($arg) {
-        { $_ -in @('--web-assets-dir', '-web-assets-dir') } { $webAssets = $args[$i + 1]; $i += 2; continue }
-        { $_ -in @('--web-build', '-web-build') } { $forceBuild = $true; $i++; continue }
-        { $_ -in @('--no-web-build', '-no-web-build') } { $noBuild = $true; $i++; continue }
-        { $_ -in @('--no-web') } { $noWeb = $true; $i++; continue }
-        default { $i++; continue }
+    if ($arg -in @('--web-assets-dir', '-web-assets-dir')) {
+        if ($i + 1 -lt $args.Count) {
+            $webAssets = $args[$i + 1]
+            $passthrough += @($arg, $args[$i + 1]); $i += 2
+        } else { $passthrough += $arg; $i++ }
+        continue
     }
+    if ($arg -like '--web-assets-dir=*' -or $arg -like '-web-assets-dir=*') {
+        $webAssets = ($arg -split '=', 2)[1]
+        $passthrough += $arg; $i++; continue
+    }
+    if ($arg -in @('--web-build', '-web-build')) { $forceBuild = $true; $i++; continue }
+    if ($arg -in @('--no-web-build', '-no-web-build')) { $noBuild = $true; $i++; continue }
+    if ($arg -in @('--no-web', '-no-web')) { $noWeb = $true; $passthrough += $arg; $i++; continue }
+    $passthrough += $arg; $i++
 }
-$passthrough = @($args)
 
 if (-not $noWeb -and -not $webAssets) {
     $distIndex = Join-Path $repo "clients\web\dist\index.html"

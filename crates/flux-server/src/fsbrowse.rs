@@ -46,8 +46,9 @@ pub(crate) struct FsEntry {
 
 /// Budget for `fs_read` previews. Large enough that typical source files
 /// (README, configs, most code) preview WHOLE — the truncation flag only
-/// fires for genuinely huge files — while staying a single WS frame
-/// (~256 KB JSON). The frontend renders the honest "first N of M" hint.
+/// fires for genuinely huge files — while staying a single unary
+/// response (~256 KB JSON). The frontend renders the honest "first N of
+/// M" hint.
 pub(crate) const PREVIEW_BYTES: usize = 256 * 1024;
 
 /// The default start directory for the picker: `$HOME` (where projects

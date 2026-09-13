@@ -1,134 +1,115 @@
 # Flux
 
-A general-purpose coding agent framework in Rust with a browser chat UI frontend.
+> English version: [README-en.md](README-en.md)
 
-## Features
+一个通用编码 Agent 框架：Rust 编写的本地服务器 + 浏览器 Web UI 前端。
 
-- **Built-in tools**: `read_file`, `edit_file`, `glob`, `grep`, `list_directory`, `rust_init`, `rust_verify`, `bash` — plus per-chat `question` (ask the user), `state_get`/`state_set`, and `buf_read` (paged overflow output). Output limits prevent context overflow: every tool result passes a central 8000-char inline budget — larger outputs are stored whole in a per-chat overflow buffer the model pages through with `buf_read`; grep shapes matches to a window (500 max), glob caps at 500 entries.
-- **Agent Skills**: lazy-loading capability packages (`SKILL.md` directories per the [Agent Skills standard](https://agentskills.io)) — the model discovers them via `skill_list` and loads full instructions on demand via `skill_read` (nothing injected into prompts; project skills in `<workdir>/.flux/skills/`, global in `~/.flux/skills/`, project wins name collisions). The web UI's Skills dialog manages them: install from a local directory or a git URL (optional subpath for multi-skill repos), remove global entries — immediately effective, no restart.
-- **LLM providers**: OpenAI / OpenAI-compatible endpoints — pure endpoints (id · url · api key) managed from the web UI's Providers dialog and stored in the server database (there is no config file).
-- **Streaming**: real-time text + reasoning deltas over WebSocket — reception and rendering are decoupled by one animation frame (deltas append to a raw buffer; a coalesced rAF render folds them in, at most one incremental render per frame). Committed paragraphs render once and are appended append-only, code blocks type in stably and highlight exactly once, and a pi-web style stick-to-bottom state machine keeps the follow smooth without yanking the reader back.
-- **MCP client**: launch external MCP servers as child processes and expose their tools. Managed from the web UI's MCP dialog (stored in the server database; changes take effect after a restart — every chat sees exactly the startup tool set).
-- **No approvals (pi-style)**: tools execute directly; argument preprocessing (workdir-boundary expansion, authoritative state injection) is decision-free. Real isolation comes from the OS/container boundary. The built-in `question` tool lets the model ask the user a question mid-round (agent-produced text + options, answered via an inline card in the conversation).
-- **Stream cancellation**: stop generation mid-stream (Stop button or Escape key); sending while a round runs parks the message as an interject (cancel + fresh round).
-- **Chat history**: persistent conversations with full message history across restarts.
-- **Built-in terminal**: interactive shells (e4pty PTY, xterm.js UI) over a dedicated `/ws/term` side channel — multiple per chat, added on demand via the dock's "+" or the sidebar button; kept alive across tab switches and re-attached after a page refresh within the session grace window.
-- **Tabbed right dock**: opened files accumulate as tabs (multi-file, editor-style); file bodies scroll horizontally; `.md` files render through the shared markdown pipeline with a Raw toggle.
-- **Web UI**: a React chat UI served BY DEFAULT by flux-server on the SAME port as the WS endpoint (one listener) — `./scripts/run-server.sh` (builds the UI when missing); `--no-web` runs headless. The page is a viewer/controller connecting back same-origin over WS. Bind beyond localhost only behind a TLS proxy — the server has no auth layer.
+## 功能特性
 
-## Project layout
+- **内置工具**：`read_file`、`edit_file`、`write_file`、`replace_lines`、`list_directory`、`glob`、`grep`、`bash`，以及每 chat 的 `question`（向用户提问）、`state_get`/`state_set`、`buf_read`（溢出输出分页读取）。输出限幅防止上下文溢出：所有工具结果统一经过 8000 字符内联预算——超限输出整体存入每 chat 的溢出缓冲，模型用 `buf_read` 分页读取；grep 按匹配窗口塑形（上限 500 条），glob 上限 500 条。
+- **Agent Skills**：惰性加载的能力包（`SKILL.md` 目录，遵循 [Agent Skills 标准](https://agentskills.io)）——模型经 `skill_list` 发现、按需经 `skill_read` 加载完整指令（不向 prompt 注入任何内容；项目技能在 `<workdir>/.flux/skills/`，全局在 `~/.flux/skills/`，同名时项目覆盖全局）。Web UI 的 Skills 对话框管理它们：从本地目录或 git URL 安装（可选 subpath 支持多技能仓库）、删除全局条目——立即生效，无需重启。
+- **LLM Provider**：OpenAI / OpenAI 兼容端点——纯端点（id · url · api key），由 Web UI 的 Providers 对话框管理、存入服务端数据库（没有配置文件）。**本地模型注册表**按模型保存请求参数（自动从 [models.dev](https://models.dev) 元数据富化）；切换对话的 provider 在轮边界热切换——引擎在全量历史上原地 re-begin，不会中断。
+- **流式输出**：经 gRPC-Web 实时推送文本 + 推理（reasoning）增量——接收与渲染解耦一帧（delta 追加到 raw 缓冲，rAF 合帧渲染，每帧至多一次增量渲染）。已提交段落只渲染一次、append-only 追加，代码块稳定打字、高亮恰好一次；粘滞滚动状态机让跟随平滑，不把正在阅读的用户拽回去。
+- **MCP 客户端**：把外部 MCP 服务器作为子进程拉起并暴露其工具。由 Web UI 的 MCP 对话框管理（存入服务端数据库；**persist-first + 即时应用**——管理器拉起子进程、注册工具，匹配的对话在轮边界重建引擎），并带自愈监督：死掉的子进程按封顶退避自动重生。
+- **无审批**：工具直接执行——没有确认环节。对话的 workdir 边界作为调用上下文（`ToolCtx`）到达工具，路径在边界内解析，工具错误以结果文本返回、模型自行读取并纠正。真正的隔离来自 OS/容器边界。内置 `question` 工具让模型在轮次中向用户提问（agent 产出问题文本 + 选项，经对话内的内联卡作答）。
+- **流取消与插话**：随时停止生成（Stop 按钮或 Esc）；轮次进行中发送消息走**单个 interrupt-send RPC**——服务端把「取消当前轮」与「排队我的消息」融合为一次操作，插话顺序由构造保证。
+- **从任意消息 fork**：非破坏性分支——新对话复制源 transcript 至所选用户轮**之前**，该轮内容预填进 fork 的输入框；源对话原样不动。
+- **对话历史**：跨重启的持久化对话与完整消息历史；30s 会话宽限期让租约在页面刷新后存活。
+- **内置终端**：交互式 shell（e4pty PTY，xterm.js UI），走专用 `/ws/term` 侧信道——每 chat 可开多个，经 dock「+」或空态动作按需创建；跨 tab/对话切换保活，页面刷新后在会话宽限期内重连同一 PTY（256 KiB scrollback 回放）。
+- **Tab 化右坞**：打开的文件以 tab 累积（多文件、编辑器式）；文件正文横向滚动；`.md` 经共享 markdown 管道渲染并带 Raw 切换；终端 tab 恒钉其后。
+- **Web UI**：React 聊天界面，由 flux-server **默认伺服**，与 Connect API 同端口（单一监听器）——`./scripts/run-server.sh`（UI 缺失时自动构建）；`--no-web` 无头运行。仅限本机之外暴露必须经 TLS 反向代理——服务端没有认证层。
+
+## 项目布局
 
 ```
 flux/
-├── crates/                 # Rust workspace (server + kernel + tools)
-├── clients/web/            # Web UI (React 19 + Radix + Tailwind v4 + zustand, Vite)
+├── proto/flux/v1/          # 线协议契约（唯一契约源 → Rust + TS codegen）
+├── crates/                 # Rust workspace（server + 内核 + 工具）
+├── clients/web/            # Web UI（React 19 + Radix + Tailwind v4 + zustand，Vite）
 └── docs/
 ```
 
-## Quick start
+## 快速开始
 
 ```bash
 cargo build --release
-./scripts/run-server.sh             # builds the UI when missing, then serves UI + WS
-# or: cargo run -p flux-server      # WS + the packaged web-ui/ next to the binary,
-                                    # if present (--web-assets-dir pins any build)
+./scripts/run-server.sh             # UI 缺失时自动构建，然后同时伺服 UI + API
+# 或：cargo run -p flux-server      # Connect API + 二进制旁的 web-ui/（如存在），
+                                    # --web-assets-dir 可指定任意构建产物目录
 ```
 
-There is no config file — everything is a CLI flag (`--host`, `--port`,
-`--db-path`, `--preamble`, `--no-web`, `--web-assets-dir`; see
-`flux-server --help`) or managed from the UI into the server database.
+没有配置文件——一切要么是 CLI flag（`--host`、`--port`、`--db-path`、
+`--preamble`、`--no-web`、`--web-assets-dir`；见 `flux-server --help`），
+要么由 UI 管理进服务端数据库。
 
-Open `http://127.0.0.1:8080`, add a provider endpoint in the Providers dialog
-(top bar), then pick a working directory in the new-chat dialog and chat.
+打开 `http://127.0.0.1:8080`，在顶栏的 Providers 对话框添加一个 provider
+端点，然后在新建对话对话框里选择工作目录，开始对话。
 
-## Documentation
+## 文档
 
-| Doc | Question it answers |
+| 文档 | 回答的问题 |
 |-----|---------------------|
-| [`docs/architecture.md`](docs/architecture.md) | How does it work inside? (current architecture, with diagrams) |
-| [`docs/decisions.md`](docs/decisions.md) | Accepted tradeoffs — what we deliberately chose NOT to improve |
-| [`AGENTS.md`](AGENTS.md) | Conventions & context for AI coding agents |
+| [`docs/architecture.md`](docs/architecture.md) | 内部如何工作？（当前架构，含图示；另有英文版） |
+| [`docs/decisions.md`](docs/decisions.md) | 既定取舍——我们刻意选择不改进什么 |
+| [`AGENTS.md`](AGENTS.md) | AI 编码助手的约定与上下文 |
 
-## WebSocket protocol
+## 线协议（Connect / gRPC-Web）
 
-Plain JSON with a `type` field dispatch. Connect to `ws://localhost:{port}`.
+浏览器经 [Connect](https://connectrpc.com)（gRPC-Web）与 UI 同端口通信。
+`proto/flux/v1/*.proto` 是**唯一契约源**——Rust 绑定在构建期生成
+（`flux-proto`），TypeScript 绑定由 `buf generate` 派生（web 包的
+prebuild/pretest 钩子）。
 
-| Direction | Type | Purpose |
-|-----------|------|---------|
-| → | `chat_create {name, workdir, provider, model}` | Create conversation — `provider` and `model` are both REQUIRED (providers are pure endpoints managed from the UI) |
-| → | `chat {chat_id, message}` | Send message (auto-claims when unleased) |
-| → | `chat_claim {chat_id}` | Acquire the chat's lease — history + subscribe + lease in one message; busy → `error{chat_busy}` |
-| → | `chat_open {chat_id}` | Viewer path: subscribe + history (first subscription only; idempotent when already subscribed) |
-| → | `chat_close {chat_id}` | Fully exit: unsubscribe + return the lease (if held) |
-| → | `cancel {chat_id}` | Cancel the active phase (stream or tool flight — tools are interrupted cooperatively, partial results kept) |
-| → | `chat_rebase {chat_id, base_message_id?}` | Rebase the context to live only above `base` (`None` = latest) |
-| → | `question_response {chat_id, id, answer}` | Answer to the model's `question` tool (lease holder only) |
-| → | `chat_list` | Request chat list |
-| → | `chat_delete {chat_id}` | Delete conversation |
-| → | `chat_rename {chat_id, name}` | Rename conversation |
-| → | `chat_provider {chat_id, provider, model}` | Hot-swap the chat's provider/model (lease holder only; lands at the round boundary, announced via `provider_switched`) |
-| → | `session_resume {session_id}` | Replay a stored session id after reconnect — leases survive a grace window; answered by `session_resumed` |
-| → | `ping` | Application-level liveness probe |
-| ← | `pong {}` | Answer to `ping` |
-| ← | `ready {session_id}` | Handshake ack — carries the freshly minted session identity |
-| ← | `text_delta {chat_id, delta}` | Streaming text |
-| ← | `reasoning_delta {chat_id, delta}` | Streaming reasoning |
-| ← | `tool_start {chat_id, id, name, arguments}` | Tool execution start |
-| ← | `tool_result {chat_id, id, result}` | Tool execution result (frontend matches cards by id) |
-| ← | `question_required {chat_id, id, question}` | The `question` tool awaits the user's answer (direct to lease holder; parked until answered) |
-| ← | `chat_history {chat_id, messages}` | Chat history snapshot |
-| ← | `chat_state {chat_id, state}` | Authoritative round-state snapshot (idle/streaming) |
-| ← | `context_rebased {chat_id, base_message_id}` | Context re-based (manual rebase): everything at/below the base was archived |
-| ← | `usage {chat_id, prompt_tokens, completion_tokens, cached_tokens}` | Token usage |
-| ← | `stream_end {chat_id, finish_reason?}` | Assistant turn complete (abnormal `finish_reason` = truncated) |
-| ← | `stream_cancelled {chat_id}` | Round cancelled (user cancel; broadcast to viewers) |
-| ← | `error {chat_id?, code, message}` | Unified error channel (chat-level / connection-level) |
-| ← | `chats {chats}` | Chat list |
-| ← | `chat_created {chat}` | New chat ack |
+| 服务族 | RPC | 用途 |
+|--------|------|---------|
+| EventService | `Subscribe` | 会话级事件流：身份锚（流开 = attach/采纳，首帧 `ready` 携 token + leases），全部对话事件 + keepalive；流断 = detach |
+| ChatService | CreateChat · ListChats · OpenChat · ClaimChat · CloseChat · DeleteChat · RenameChat · SendMessage · CancelRound · ForkChat · SwitchProvider · AnswerQuestion | 对话控制（租约门控；调用者的会话 token 走 `x-flux-session` metadata） |
+| ProviderService / ModelService | ListProviders · GetModels · AddProvider · RemoveProvider / ListModels · SaveModel · RemoveModel · SyncModels | Provider 注册表 + 本地模型注册表（api_key 永不出服务端） |
+| McpService | ListServers · AddServer · RemoveServer | MCP 启动列表（persist-first + 即时应用） |
+| SkillService | ListSkills · AddSkill · RemoveSkill | 全局技能管理 |
+| FileSystemService | FsList · FsRead | workdir 选择器 + 文件 Explorer |
 
-Management and browse frames — `provider_list` / `provider_add` / `provider_remove` /
-`provider_models`, `mcp_list` / `mcp_add` / `mcp_remove`, `fs_list` / `fs_read` — and
-their replies are omitted here for brevity; see `docs/architecture.md` §3.8.
+应用级失败走应答的内联 `error` 字段；传输/基础设施失败走 gRPC status。
+完整语义——身份生命周期、租约/观看者模型、流元素、快照对账——见
+`docs/architecture.md` §3.8。
 
-## Web frontend
+## Web 前端
 
-React 19 + TypeScript on Vite; Radix UI primitives own dialog/menu/tooltip/tabs
-behavior; zustand carries app state; Tailwind CSS v4 drives component styling;
-marked + DOMPurify + highlight.js drive the imperative markdown/streaming pipeline
-(rAF-coalesced, append-only paragraphs — see `docs/architecture.md` §4).
+React 19 + TypeScript on Vite；Radix UI 原语承载 dialog/menu/tooltip/tabs
+行为；zustand 管理应用状态；Tailwind CSS v4 驱动组件样式；marked +
+DOMPurify + highlight.js 驱动命令式 markdown/流式渲染管线（rAF 合帧、
+append-only 段落——见 `docs/architecture.md` §4）。
 
 ```bash
-cd clients && npm install   # npm workspace root
+cd clients && npm install   # npm workspace 根
 cd web
-npm test                    # vitest unit tests
+npm test                    # vitest 单元测试
 npm run build               # tsc --noEmit + vite build → dist/
 ```
 
-## Scripts
+## 脚本
 
-Helper scripts for common development tasks. All scripts have `.sh` (Linux/macOS) and `.ps1` (Windows) versions.
+常用开发任务的辅助脚本。所有脚本均有 `.sh`（Linux/macOS）与 `.ps1`（Windows）成对版本。
 
-| Script | Description |
+| 脚本 | 说明 |
 |--------|-------------|
-| `scripts/build.sh` | Build Rust workspace (release) + the web UI |
-| `scripts/run-server.sh` | Start flux-server via `cargo run --release` (CLI flags pass through). The web UI is served by default — the script builds it when missing (`--no-web` runs headless); the database defaults to `~/.flux/flux.db` (`--db-path` overrides). |
-| `scripts/test.sh` | Full validation: `fmt` → `clippy` → `cargo test` → `tsc` → `vitest` → `vite build` |
-| `scripts/package-web.sh` | Assemble the servable web UI directory (`index.html` + `assets/{bundle.js,bundle.css}`) |
-| `scripts/package.sh` | Build server (host or cross-compile) + web UI → `dist/` |
-| `scripts/fetch-fonts.sh` | Refresh the bundled terminal fonts (JetBrains Mono + Nerd Font patch, OFL-1.1) from their official releases |
+| `scripts/run-server.sh` | 经 `cargo run --release` 启动 flux-server（CLI flag 透传）。Web UI 默认伺服——缺失时脚本自动构建（`--no-web` 无头）；数据库默认 `~/.flux/flux.db`（`--db-path` 覆盖）。 |
+| `scripts/test.sh` | 全量验证：`fmt` → `clippy` → `cargo test` → `tsc` → `vitest` → `vite build` |
+| `scripts/package-web.sh` | 构建 Web UI（Vite）并组装可伺服根目录——`index.html` + 内容哈希 `assets/*`——输出到 `clients/web/dist`（或 `--out DIR`） |
+| `scripts/fetch-fonts.sh` | 从官方发布刷新内置字体（JetBrains Mono + Nerd Font 补丁、IBM Plex Sans，OFL-1.1）。字体文件已提交入库——此脚本仅供升级时手动运行，构建从不联网拉取 |
 
-Common workflows:
+常用工作流：
 
 ```bash
-# Local development
-./scripts/build.sh                          # build everything
-./scripts/run-server.sh                     # start server + UI (web is default-on)
-./scripts/test.sh                           # run all checks
+# 本地开发
+./scripts/run-server.sh                     # 启动服务端 + UI（web 默认开，UI 缺失自动构建）
+./scripts/test.sh                           # 运行全部检查
 
-# Release packaging
-./scripts/package.sh                                    # host target only
-./scripts/package.sh x86_64-unknown-linux-gnu          # single cross-compile
-./scripts/package.sh x86_64-unknown-linux-gnu \        # multiple targets
-                     aarch64-apple-darwin \
-                     x86_64-pc-windows-msvc
+# 发布打包（dist——配置唯一来源 dist-workspace.toml，本地与 CI 读同一份定义）
+cargo install cargo-dist --locked           # 一次
+dist build                                  # 本地产出发布形状产物（宿主目标：归档 + web-ui + checksum）
+dist build --target aarch64-unknown-linux-gnu   # 本地交叉编译（需 cargo-zigbuild；Windows 目标需 cargo-xwin）
+
+# 正式发布
+git tag v0.x.y && git push origin v0.x.y    # release.yml：5 平台原生构建 → GitHub Release
 ```

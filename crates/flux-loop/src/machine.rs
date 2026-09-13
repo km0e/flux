@@ -391,13 +391,13 @@ impl Machine {
         }
     }
 
-    // ── helpers (spec §3) ─────────────────────────────────────────────
+    // ── helpers ─────────────────────────────────────────────
 
     /// Round entry: persist the user message and open the first stream.
     fn start_round_with_user(&mut self, msg: Message) -> Vec<LoopFact> {
         self.pending.push(msg.clone());
-        // Handoff: the request consumes the provider context, exactly like
-        // the old `stream(&pending)` + `pending.clear()` sequence.
+        // Handoff: the request consumes the provider context; what remains
+        // in `pending` (deferred tool-result voids) rides the next request.
         let pending = std::mem::take(&mut self.pending);
         self.state = State::Streaming {
             output: StreamOutput::default(),
@@ -416,8 +416,8 @@ impl Machine {
     /// The active stream handle drops — the connection stops pushing
     /// (residual chunks, if any, are absorbed by Idle). An armed
     /// control-plane gate fires here — but a turn queued BEFORE the gate
-    /// runs first (it belongs to the pre-rebuild context; the rebuild
-    /// lands it inside the archive), so the gate defers to its wrap-up.
+    /// runs first (it belongs to the pre-rebuild context), so the gate
+    /// defers to its wrap-up.
     fn end_round(&mut self, outcome: RoundOutcome) -> Vec<LoopFact> {
         let transcript = std::mem::take(&mut self.transcript);
         self.active_stream = None;
@@ -569,7 +569,8 @@ impl Machine {
     }
 
     /// Write a tool result into BOTH buffers: provider context and the
-    /// persisted transcript (M1 dual-write, at the creation point).
+    /// persisted transcript — one creation point, so the two copies can
+    /// never disagree.
     fn dual_write(&mut self, call_id: &str, content: impl Into<String>) {
         let msg = Message::tool(call_id, content);
         self.pending.push(msg.clone());

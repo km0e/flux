@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+repository.workspace = true
 
 [[bin]]
 name = "flux-server"
@@ -19,17 +20,16 @@ flux-store = { path = "../flux-store" }
 flux-chat = { path = "../flux-chat" }
 flux-session = { path = "../flux-session" }
 flux-loop = { path = "../flux-loop" }
-# P4 spike — generated wire contracts (proto/ is the single source)
+# Generated wire contracts (proto/ is the single contract source)
 flux-proto = { workspace = true }
 # gRPC-Web plane: tonic provides the service plumbing (no transport — the
 # services mount into axum); tonic-web adapts them to the browser's
 # HTTP/1.1 gRPC-Web framing.
-tonic = { version = "0.13", default-features = false, features = [
+tonic = { version = "0.14", default-features = false, features = [
     "codegen",
-    "prost",
     "server",
 ] }
-tonic-web = "0.13"
+tonic-web = "0.14"
 tokio-stream = "0.1"
 # 0.3.1 minimum: the kill path relies on `PtyCtl::kill` (absent in
 # 0.3.0 — there the default impl returns Unsupported at runtime) and the
@@ -66,8 +66,8 @@ tower-http = { version = "0.7", default-features = false, features = [
 ] }
 
 [dev-dependencies]
-sha2 = "0.10"
-base64 = "0.22"
+sha2 = "0.11"
+base64 = "0.23"
 tokio = { workspace = true }
 serde_json = { workspace = true }
 futures = { workspace = true }
@@ -80,3 +80,8 @@ tokio-tungstenite = "0.30"
 tower = { version = "0.5", features = ["util"] }
 # gzip decode assertion in web.rs tests
 flate2 = "1"
+
+# SIGTERM delivery in the graceful-shutdown e2e (tokio::process has no
+# signal API; unix-only — the test is cfg-gated the same way)
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

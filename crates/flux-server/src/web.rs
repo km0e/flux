@@ -1,8 +1,8 @@
-//! Browser UI static site — served by the SAME axum server as the WS
-//! endpoint (one process, one port: `/` + `/assets/*` static, `/ws`
-//! WebSocket upgrade). The page is a viewer/controller that connects back
-//! over the same origin, so the static layer stays a pure leaf — it never
-//! proxies anything.
+//! Browser UI static site — served by the SAME axum server as the
+//! Connect surface (`/flux.v1.*`) and the terminal side channel
+//! (`/ws/term`) — one process, one port. The page is a viewer/controller
+//! that connects back over the same origin, so the static layer stays a
+//! pure leaf — it never proxies anything.
 //!
 //! Header policy split, all crate-native (tower-http):
 //! - Cache-Control is PER-ROUTE policy: hashed assets get `immutable`
@@ -48,11 +48,11 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// `font-src 'self'` — the bundled terminal fonts (styles/fonts.css).
 /// Without it the faces fall under default-src 'none' and every load
 /// errors (found via the terminal: prompts rendered with fallback
-/// metrics). `connect-src 'self' ws: wss:` — the app itself only opens WebSockets
-/// (any host: a reverse-proxied UI may legitimately talk wss elsewhere);
-/// `'self'` additionally permits same-origin fetches — e.g. Chrome
-/// DevTools' `/.well-known/appspecific` probe, which would otherwise
-/// surface a CSP error in the console on every DevTools open.
+/// metrics). `connect-src 'self' ws: wss:` — the app talks same-origin
+/// fetches (the Connect calls) plus one WebSocket (`/ws/term`, which may
+/// legitimately be `wss:` behind a reverse proxy); `'self'` also covers
+/// e.g. Chrome DevTools' `/.well-known/appspecific` probe, which would
+/// otherwise surface a CSP error in the console on every DevTools open.
 pub(crate) const CSP: &str = "default-src 'none'; script-src 'self' 'sha256-yC4B8JEmv+Lsb18mJYR1IQxRZva/4bRpPXJ59/85y9g='; style-src 'self' 'unsafe-inline'; \
                    img-src 'self' https: data:; font-src 'self'; manifest-src 'self'; connect-src 'self' ws: wss:; base-uri 'none'; frame-ancestors 'none'";
 
@@ -62,7 +62,7 @@ const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 
 /// The static-site routes (`/`, `/index.html`, `/manifest.webmanifest`,
 /// `/assets/*`, 404 fallback), ready to merge into the transport router.
-/// ready to merge into the transport router. No startup validation: an
+/// No startup validation: an
 /// incomplete build surfaces at request time — index reads 500 + a warn
 /// log, missing assets 404 — a deliberate tradeoff (see decisions.md
 /// T-06): the server must not refuse to boot over UI assets.
@@ -112,8 +112,8 @@ pub(crate) fn router(root: &Path) -> Router {
         .with_state(root.to_path_buf())
 }
 
-/// Uniform 404 for everything that is not `/ws` or a static file. Security
-/// headers ride the router's layer — see [`router`].
+/// Uniform 404 for everything that is not `/flux.v1.*`, `/ws/term`, or a
+/// static file. Security headers ride the router's layer — see [`router`].
 async fn not_found() -> Response {
     (
         StatusCode::NOT_FOUND,

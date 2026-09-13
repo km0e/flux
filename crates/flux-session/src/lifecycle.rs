@@ -1,25 +1,24 @@
 //! Task lifecycle — lazy spawn, stale replacement, engine rebuild.
 //!
-//! A chat's runtime task is spawned on first message (spec §4.1 lazy
-//! creation) and lives for the chat's lifetime: the conversation engine
-//! (machine + consumer + executor + connection) never dies for a
-//! truth-source change. There is no crash observer: the done flag lets
-//! the next `ensure_task` replace a terminated (crashed/exited) task —
-//! a terminated task is exactly as stale as an exited one.
+//! A chat's runtime task is spawned on first message (lazy creation) and
+//! lives for the chat's lifetime: the conversation engine (machine +
+//! consumer + executor + connection) never dies for a truth-source
+//! change. There is no crash observer: the done flag lets the next
+//! `ensure_task` replace a terminated (crashed/exited) task — a
+//! terminated task is exactly as stale as an exited one.
 //!
-//! The ENGINE REBUILD is the third lifecycle move, and it is now a
-//! MESSAGE, not a lifecycle event: a truth-source change (provider pin,
-//! context base, the global tool registry) persists the change, then
-//! `request_restart` sends `Rebuild` on the live engine's control
-//! channel — the consumer arms the machine's gate (a live round, and any
-//! turns queued behind it, finishes first) and rebuilds the engine IN
-//! PLACE at the fired gate, re-assembling from the truth sources with
-//! the same deterministic assembly every spawn uses. No live engine:
-//! nothing to quiesce — the next lazy spawn reads the fresh truth.
+//! The ENGINE REBUILD is the third lifecycle move, and it is a MESSAGE,
+//! not a lifecycle event: a truth-source change (provider pin, the
+//! global tool registry) persists the change, then `request_restart`
+//! sends `Rebuild` on the live engine's control channel — the consumer
+//! arms the machine's gate (a live round, and any turns queued behind
+//! it, finishes first) and rebuilds the engine IN PLACE at the fired
+//! gate, re-assembling from the truth sources with the same
+//! deterministic assembly every spawn uses. No live engine: nothing to
+//! quiesce — the next lazy spawn reads the fresh truth.
 
 use crate::manager::{CachedChat, ServerState};
 use crate::router::ChannelOutput;
-use flux_chat::CONTEXT_BASE_KEY;
 use flux_core::OutputPort;
 use std::sync::Arc;
 
@@ -43,7 +42,8 @@ impl ServerState {
     /// Spawn the engine from the truth sources. Caller holds the chat
     /// entry via `&mut` from the `manager.chats` write lock (the spawn's
     /// store reads ride the lock — milliseconds, same class as the claim
-    /// snapshot, accepted T-04).
+    /// snapshot; splitting them out two-phase would break the
+    /// assemble-under-lock invariant for a single-user local server).
     async fn spawn_task(
         self: &Arc<Self>,
         chat: &mut CachedChat,
@@ -51,23 +51,17 @@ impl ServerState {
         let output: Arc<dyn OutputPort> = Arc::new(ChannelOutput {
             router: chat.router.clone(),
         });
-        // Rebirth with context: the LIVE context only — everything at or
-        // below the persisted context base is archived (a rebase or a
-        // feature boundary) and never re-sent. The base is the truth
-        // source for what is live. A load failure propagates — an answer
-        // with zero context is worse than a visible error.
-        let base = self
-            .store
-            .load_state(&chat.id)
-            .await?
-            .get(CONTEXT_BASE_KEY)
-            .and_then(|v| v.parse::<i64>().ok())
-            .unwrap_or(0);
-        let history = self.store.load_messages_after(&chat.id, base).await?;
+        // Rebirth with context: the FULL persisted transcript is the live
+        // context (a chat's transcript only grows; forking, not archiving,
+        // is how a conversation restarts from a message). A load failure
+        // propagates — an answer with zero context is worse than a visible
+        // error. The read-side invariant guard keeps the re-begin history
+        // provider-valid (see flux_chat::history).
+        let history = flux_chat::validate_history(self.store.load_messages(&chat.id).await?);
         // The chat's provider instance: the hydrated/resolved pin. An
         // unresolvable pin (registry changed across restarts) is an
         // EXPLICIT error naming the dead pin — never a silent fallback to
-        // some other provider. Recovery: `chat_provider` swap, then send.
+        // some other provider. Recovery: a SwitchProvider swap, then send.
         let provider = chat.provider.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "pinned provider '{}' is no longer registered — switch providers to continue",
@@ -95,13 +89,12 @@ impl ServerState {
     }
 
     /// Request an engine rebuild for one chat. The CALLER mutates the
-    /// truth sources first (persist the pin / the context base; the
-    /// global registry is already current), then calls this: the `Rebuild`
-    /// command rides the live engine's control channel, the machine's
-    /// gate arms (a live round — and queued turns — finish first), and
-    /// the consumer rebuilds the engine IN PLACE at the fired gate. No
-    /// live task: nothing to quiesce — the next lazy spawn reads the
-    /// fresh truth.
+    /// truth sources first (persist the pin; the global registry is
+    /// already current), then calls this: the `Rebuild` command rides the
+    /// live engine's control channel, the machine's gate arms (a live
+    /// round — and queued turns — finish first), and the consumer
+    /// rebuilds the engine IN PLACE at the fired gate. No live task:
+    /// nothing to quiesce — the next lazy spawn reads the fresh truth.
     pub(crate) async fn request_restart(&self, chat_id: &str) {
         let handle = {
             let chats = self.manager.chats.read().await;

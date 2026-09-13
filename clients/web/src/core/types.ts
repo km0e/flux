@@ -1,14 +1,17 @@
 /**
- * types.ts — WebSocket protocol types and domain interfaces.
+ * types.ts — the handler-table's wire vocabulary.
  *
  * ServerMessage and ClientMessage are discriminated unions matching the
- * server's wire format exactly. Keep field names in sync with protocol.rs.
+ * frames core/grpc-connection.ts translates out of / onto the flux.v1
+ * Connect surface. The proto is the single contract source; this file is
+ * the UI-side adapter vocabulary the handler table consumes.
  *
  * Provides: All protocol type definitions
  */
 // ── Server → Client Messages ──
 
-/** Structured error codes — kept in sync with protocol.rs ErrorCode enum. */
+/** Structured error codes — mirrors the generated flux.v1 ErrorCode enum
+ * (the proto is the contract; the translation maps it 1:1). */
 export type ErrorCode =
   | 'provider_connection'
   | 'tool_execution'
@@ -34,6 +37,8 @@ export interface ChatInfo {
   provider: string;
   /** The chat's resolved model string. */
   model: string;
+  /** Fork provenance — the SOURCE conversation (`undefined` = not a fork). */
+  forked_from_chat_id?: string;
 }
 
 /** One registered provider (reply to `provider_list`). Entries are pure
@@ -97,12 +102,17 @@ export interface SavedModelInfo {
 
 /** One registered MCP server (reply to `mcp_list`). Carries the launch
  * triple EXCEPT the env values — only the KEYS leave the server (secrets
- * parity with the provider api_key). Changes take effect at restart. */
+ * parity with the provider api_key). Mutations apply LIVE: persist-first,
+ * then the manager spawns/registers and the chats rebuild at the gate. */
+/** Live state of one MCP server (the self-healing supervisor). */
+export type McpState = 'unspecified' | 'running' | 'backoff' | 'offline';
+
 export interface McpServerSummary {
   id: string;
   command: string;
   args: string[];
   env_keys: string[];
+  state: McpState;
 }
 
 /** One installed skill (reply to `skills_list`, and the broadcast after a
@@ -194,9 +204,10 @@ export type ServerMessage =
   /** Reply to `mcp_list` (and the broadcast after an add/remove): the
    * registered MCP servers (env values redacted — keys only). */
   | { type: 'mcp_servers'; servers: McpServerSummary[] }
-  /** Reply to `mcp_add` / `mcp_remove`: failures ride the inline `error`;
-   * a success is followed by the `mcp_servers` broadcast and takes effect
-   * at the next server RESTART (no hot-apply). */
+  /** Reply to `mcp_add` / `mcp_remove`: failures ride the inline `error`
+   * while the row stays; a success is followed by the `mcp_servers`
+   * broadcast, and the change is already LIVE (spawned + registered,
+   * matching chats rebuilt at the machine gate). */
   | { type: 'mcp_added'; id: string; error?: string }
   | { type: 'mcp_removed'; id: string; error?: string }
   /** Reply to `skills_list` (and the broadcast after a successful
@@ -230,13 +241,18 @@ export type ServerMessage =
   | { type: 'provider_switched'; chat_id: string; provider: string; model: string }
   | { type: 'chat_history'; chat_id: string; messages: HistoryMessage[] }
   | { type: 'chat_state'; chat_id: string; state: 'idle' | 'streaming' }
-  | { type: 'context_rebased'; chat_id: string; base_message_id: number }
+  /** A user message just persisted with this store row id (announced at
+   * turn acceptance). The sender's client matches `content` against its
+   * own un-id'd live user bubbles and attaches the fork affordance — the
+   * id is the ForkChatRequest.fork_point those bubbles were missing. */
+  | { type: 'message_persisted'; chat_id: string; id: number; content: string }
   | FsListing
   | FsContent
-  /** Reply to `session_resume` (D-19): the authoritative identity
-   * (adopted or freshly minted) + the chats the identity still holds. */
-  | { type: 'session_resumed'; session_id: string; leases: string[] }
-  | { type: 'pong' };
+  /** The authoritative identity (adopted from the stored token or freshly
+   * minted) + the chats the identity still holds. Synthesized from the
+   * Subscribe stream's `ready` element — the resume handshake collapsed
+   * into the stream open. */
+  | { type: 'session_resumed'; session_id: string; leases: string[] };
 
 // ── Client → Server Messages ──
 
@@ -261,13 +277,16 @@ export type ClientMessage =
        * clearing the queue. */
       interrupt?: boolean;
     }
-  /** Restart from a message: rebuild the context to live only above
-   * `base_message_id` (absent = the latest). The server echoes the actual
-   * rebase point; `context_rebased` announces it on the stream. */
-  | { type: 'rebase'; chat_id: string; base_message_id?: number }
+  /** Fork a conversation from a message: a NEW chat holding a copy of
+   * the source transcript up to but EXCLUDING `fork_point` (a USER
+   * message row of that chat — the redo turn; the client prefills the
+   * fork's composer with its content, and it re-enters the fork only
+   * when re-sent). The source is untouched; the ack carries the new
+   * chat and the fresh chats broadcast follows. */
+  | { type: 'fork'; chat_id: string; fork_point: number }
   | { type: 'chat_open'; chat_id: string }
   // The operator open path is a single message: claim = history snapshot +
-  // subscription + lease (D-06); open is viewer-only (the chat_busy fallback)
+  // subscription + lease; open is viewer-only (the chat_busy fallback)
   // and stream_gap resubscription.
   | { type: 'chat_claim'; chat_id: string }
   | { type: 'chat_close'; chat_id: string }
@@ -304,7 +323,7 @@ export type ClientMessage =
   | { type: 'model_sync'; provider?: string; model?: string }
   /** Register/remove an MCP server (the launch list lives in the server
    * database; replies are mcp_added/mcp_removed with inline errors).
-   * Takes effect at the next restart — no hot-apply. */
+   * Applied live: persist-first, then spawn + register + engine rebuild. */
   | { type: 'mcp_list' }
   | { type: 'mcp_add'; id: string; command: string; args?: string[]; env?: Record<string, string> }
   | { type: 'mcp_remove'; id: string }
@@ -323,13 +342,8 @@ export type ClientMessage =
   // Filesystem browsing for the workdir picker (any readable
   // directory is a valid chat workdir; the server replies with matching
   // fs_listing / fs_content frames).
-  // Identity continuity (D-19): replay the stored session id on connect —
-  // the server adopts it (leases survive the grace window) and replies with
-  // a session_resumed carrying the authoritative identity.
   | { type: 'fs_list'; path?: string }
-  | { type: 'fs_read'; path: string }
-  | { type: 'session_resume'; session_id: string }
-  | { type: 'ping' };
+  | { type: 'fs_read'; path: string };
 
 // ── Domain types ──
 
@@ -348,7 +362,7 @@ export interface HistoryToolCall {
 }
 
 export interface HistoryMessage {
-  /** The store row id — the rebase base / context_rebased correlation key.
+  /** The store row id — the fork point the affordance buttons carry.
    * Absent on messages assembled outside persistence. */
   id?: number;
   role: string;

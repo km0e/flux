@@ -30,7 +30,7 @@ export function Tooltip(props: {
             className={cn(
               'z-[60] max-w-[340px] rounded-md border border-border bg-elev px-2.5 py-1.5',
               'text-2xs leading-relaxed whitespace-pre-wrap text-fg shadow-[var(--fx-shadow-pop)]',
-              'data-[state=delayed-open]:animate-[fadeIn_120ms_ease-out]',
+              'data-[state=delayed-open]:animate-fade-in',
             )}
           >
             {props.content}

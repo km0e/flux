@@ -190,7 +190,7 @@ describe('integration panels', () => {
 
   it('mcp: preselected preview with live-apply semantics, two-step delete, env line validation', async () => {
     useFlux.setState({
-      mcpServers: [{ id: 'fs', command: 'npx', args: ['-y', '@mcp/fs'], env_keys: ['TOKEN'] }],
+      mcpServers: [{ id: 'fs', command: 'npx', args: ['-y', '@mcp/fs'], env_keys: ['TOKEN'], state: 'running' }],
     });
     render(<McpPanel />);
     expect(fetchMcpServers).toHaveBeenCalled();

@@ -1,12 +1,11 @@
 // The conversation family — chat lifecycle, user turns, and the
 // lease/viewer semantics.
 //
-// Ordering: the history/state snapshots ride the identity's SINK — a
-// single delivery point, never duplicated into these unary responses.
-// During the dual-stack period the sink is the WS connection; once the
-// event plane owns the identity (R3), the sink IS the Subscribe stream
-// (the `chat_history` / `chat_state` stream elements), so snapshot and
-// events are always ordered on one channel by construction.
+// Ordering: the history/state snapshots ride the identity's SINK — the
+// Subscribe stream itself (the `chat_history` / `chat_state` stream
+// elements), a single delivery point never duplicated into these unary
+// responses, so a snapshot and the events it must be reconciled against
+// are always ordered on one channel by construction.
 //
 // Lease semantics (server-enforced): the lease holder sends messages,
 // cancels, answers questions, deletes, renames, switches providers; every
@@ -62,13 +61,17 @@ service ChatService {
   // event; stale cancels are absorbed in every state.
   rpc CancelRound(CancelRoundRequest) returns (CancelRoundResponse);
 
-  // Restart from a message: rebuild the conversation context to live
-  // only above `base_message_id`, archiving everything at/below it.
-  // Absent = rebase to the latest message. The client sends CancelRound
-  // first and waits for the round wrap-up, so the machine is idle when
-  // this lands. The response echoes the ACTUAL rebase point (the
-  // context_rebased stream event carries the same value).
-  rpc RebaseChat(RebaseChatRequest) returns (RebaseChatResponse);
+  // Fork a conversation from a message: a NEW chat is created holding a
+  // copy of the source transcript up to but EXCLUDING `fork_point` (a
+  // USER message row id of that chat — the turn being redone: it
+  // re-enters the fork only when the user re-sends it, whose content the
+  // client prefills into the fork's composer), inheriting the source's
+  // workdir and provider pin. The SOURCE chat is untouched — forking is
+  // a non-destructive read + create, so any viewer may fork (no lease
+  // gate); the new chat's lease goes to the caller. Copied tool calls
+  // keep their call ids, so buffered-output references (buf_read) stay
+  // resolvable in the fork.
+  rpc ForkChat(ForkChatRequest) returns (ForkChatResponse);
 
   // Hot-swap the conversation's provider/model. The swap NEVER interrupts
   // a live round: it applies at the current or next round boundary, where
@@ -78,7 +81,7 @@ service ChatService {
   rpc SwitchProvider(SwitchProviderRequest) returns (SwitchProviderResponse);
 
   // Answer the model's `question` tool (the lease holder only). Stale or
-  // unknown ids are dropped silently — same semantics as the WS frame.
+  // unknown ids are dropped silently — no caller-actionable failure.
   rpc AnswerQuestion(AnswerQuestionRequest) returns (AnswerQuestionResponse);
 }
 
@@ -175,16 +178,22 @@ message CancelRoundRequest {
 
 message CancelRoundResponse {}
 
-message RebaseChatRequest {
+message ForkChatRequest {
+  // The source conversation.
   string chat_id = 1;
-  // Absent = rebase to the latest message (an auto-restart from the
-  // current top).
-  optional int64 base_message_id = 2;
+  // A USER message row id of that chat — the fork copies everything up
+  // to but excluding it (the redo turn rides the composer, not the
+  // copy).
+  int64 fork_point = 2;
 }
 
-message RebaseChatResponse {
-  // The actual rebase point the server landed on.
-  optional int64 base_message_id = 1;
+message ForkChatResponse {
+  // The new conversation (absent when `error` is set).
+  ChatInfo chat = 1;
+  // Validation failures (unknown chat, fork point not a user message of
+  // that chat) ride inline — request-scoped, never a transport status
+  // (D4').
+  optional string error = 2;
 }
 
 message SwitchProviderRequest {

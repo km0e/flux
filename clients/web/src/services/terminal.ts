@@ -16,14 +16,14 @@
  * The socket is SELF-HEALING: every unexpected end (backend restart,
  * network blip, reattach rejection) re-enters a capped-backoff retry
  * chain. A stale term id after a backend restart falls back to a fresh
- * spawn server-side, so retrying always converges once the main WS has
- * re-established the session identity.
+ * spawn server-side, so retrying always converges once the main
+ * session stream has re-established the identity.
  *
  * Frames: binary = raw terminal bytes both ways; text = JSON control
  * frames (hello / resize / exited / close / error).
  *
  * Provides: createTerminal, restoreTerminals, killTerminal, pruneSessions,
- *           terminalSession, fitTerminal, watchResize, TermSession
+ *           terminalSession, applyTerminalTheme, TermSession
  * Depends: core/session.ts, core/state.ts
  */
 import { useFlux } from '../core/state';
@@ -63,7 +63,7 @@ const sessions = new Map<string, TermSession>();
 /** Reconnect backoff: 1s → 2s → 4s → 5s cap. A backend restart empties
  * the terminal registry and kills the PTYs; the reattach-with-stale-id
  * path falls back to a FRESH SPAWN server-side, so retrying always
- * converges once the main WS has re-established the session identity. */
+ * converges once the main session stream has re-established the identity. */
 const RECONNECT_BASE_MS = 1000;
 const RECONNECT_MAX_MS = 5000;
 
@@ -308,7 +308,7 @@ function connect(session: TermSession): void {
   if (session.killed) return;
   const token = readStoredSessionId();
   if (!token) {
-    // No identity yet (the main WS is still re-establishing it) — back
+    // No identity yet (the main stream is still re-establishing it) — back
     // off and retry; the token reappears once the resume lands.
     handleDisconnect(session);
     return;
@@ -397,7 +397,7 @@ function connect(session: TermSession): void {
 
 /** Recompute the fit and propagate the geometry upstream. Safe to call
  * repeatedly (ResizeObserver, tab activation, window resize). */
-export function fitTerminal(tabId: string): void {
+function fitTerminal(tabId: string): void {
   const s = sessions.get(tabId);
   if (!s?.xterm || !s.fit || !s.container?.isConnected) return;
   if (s.container.clientWidth === 0 || s.container.clientHeight === 0) return;
@@ -410,16 +410,6 @@ export function fitTerminal(tabId: string): void {
   } catch {
     // fit on a degenerate box — the next resize retries
   }
-}
-
-/** Observe a mounted host for geometry changes (dock drag, window). */
-export function watchResize(tabId: string, host: HTMLElement): void {
-  const s = sessions.get(tabId);
-  if (!s) return;
-  const ro = new ResizeObserver(() => fitTerminal(tabId));
-  ro.observe(host);
-  // The container-level observer (set at spawn) keeps working elsewhere.
-  void s.resizeObserver;
 }
 
 /** Kill the PTY (server `close` frame), dispose everything, drop the

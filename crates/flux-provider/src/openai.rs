@@ -29,8 +29,8 @@ pub fn default_base_url() -> String {
 
 /// Endpoint-level configuration only — the MODEL is not part of it: every
 /// provider instance is pinned to an explicit model at construction
-/// (`chat_create`/`chat_provider` both require one; there is no default
-/// anywhere in the system).
+/// (chat creation and SwitchProvider both require one; there is no
+/// default anywhere in the system).
 #[derive(Debug, Clone, Deserialize)]
 pub struct OpenAiConfig {
     #[serde(default = "default_base_url")]
@@ -252,7 +252,33 @@ impl Connection for OpenAiSession {
 
         // The POST happens here (awaited) — an open failure surfaces as a
         // returned Err before any handle exists.
-        let source = self.sse.stream(body).await?;
+        //
+        // Transient-failure retry: ONE re-POST on a retryable HTTP status
+        // (429/5xx/408 — see `is_transient_status`). The pending messages
+        // are already in the prefix cache; the retry deliberately re-sends
+        // the SAME body without re-writing them (a second write_pending
+        // would duplicate the round's messages). Nothing has been pushed
+        // to the sink at this point, so the retry is invisible to the
+        // kernel: either a healthy stream opens, or the error surfaces
+        // exactly as it did before (machine/consumer unchanged).
+        let source = match self.sse.stream(body.clone()).await {
+            Ok(source) => source,
+            Err(CoreError::ProviderStatus {
+                status,
+                retry_after_secs,
+                ..
+            }) if crate::sse::is_transient_status(status) => {
+                let delay = Duration::from_secs(retry_after_secs.unwrap_or(1));
+                tracing::warn!(
+                    status,
+                    backoff = ?delay,
+                    "transient provider failure; re-POSTing once"
+                );
+                tokio::time::sleep(delay).await;
+                self.sse.stream(body).await?
+            }
+            Err(e) => return Err(e),
+        };
 
         let (handle, token) = StreamHandle::new();
         tokio::spawn(pump_stream(source, sink, prefix, token));
@@ -823,21 +849,24 @@ impl SseParser {
                     // fragment); every argument fragment follows as a delta.
                     // Fragments arriving before the identity (rare) just
                     // accumulate — the flush batch carries them regardless.
-                    let call_id = tc.id.clone();
-                    let call_name = tc.name.clone();
-                    let args_so_far = tc.arguments.clone();
+                    //
+                    // The accumulated-args clone lives INSIDE the identity
+                    // branch: it fires once per call, never per fragment (a
+                    // per-fragment clone of everything accumulated so far is
+                    // quadratic in the call's argument size — large tool
+                    // payloads stream in hundreds of fragments).
                     if !self.announced[index] {
-                        if let (Some(cid), Some(cname)) = (call_id, call_name) {
+                        if let (Some(cid), Some(cname)) = (tc.id.clone(), tc.name.clone()) {
                             self.announced[index] = true;
                             chunks.push(StreamChunk::ToolCallPreview {
                                 id: cid,
                                 name: Some(cname),
-                                args_delta: (!args_so_far.is_empty())
-                                    .then_some(args_so_far.clone()),
+                                args_delta: (!tc.arguments.is_empty())
+                                    .then(|| tc.arguments.clone()),
                             });
                         }
-                    } else if let Some(cid) = self.pending[index].id.clone()
-                        && !arguments.is_empty()
+                    } else if !arguments.is_empty()
+                        && let Some(cid) = tc.id.clone()
                     {
                         chunks.push(StreamChunk::ToolCallPreview {
                             id: cid,
@@ -1512,5 +1541,200 @@ mod params_tests {
         assert!(!no_params.contains("max_tokens"));
         assert!(no_params.contains(r#""stream":true"#));
         assert!(no_params.contains(r#""tools":[]"#));
+    }
+}
+
+#[cfg(test)]
+mod retry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::{TcpListener, TcpStream};
+
+    /// Drain a request's headers (read to the blank line) so the canned
+    /// response can be written safely.
+    async fn read_request_head(stream: &mut TcpStream) {
+        let mut buf = Vec::new();
+        let mut byte = [0u8; 1];
+        loop {
+            let n = stream.read(&mut byte).await.unwrap();
+            assert!(n > 0, "peer closed before headers ended");
+            buf.extend_from_slice(&byte);
+            if buf.ends_with(b"\r\n\r\n") {
+                return;
+            }
+        }
+    }
+
+    /// A canned upstream: each entry answers one connection with the given
+    /// status line + body. `requests` counts accepted connections.
+    async fn serve_script(
+        listener: TcpListener,
+        script: Vec<(&'static str, String)>,
+        requests: Arc<AtomicU64>,
+    ) {
+        tokio::spawn(async move {
+            for (status_line, body) in script {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                requests.fetch_add(1, Ordering::SeqCst);
+                read_request_head(&mut stream).await;
+                let retry = if status_line.contains("429") {
+                    "Retry-After: 0\r\n"
+                } else {
+                    ""
+                };
+                let head = format!(
+                    "{status_line}\r\nContent-Type: text/event-stream\r\n{retry}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(head.as_bytes()).await.unwrap();
+                stream.write_all(body.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+    }
+
+    /// A provider session pinned to the mock endpoint — the retry lives
+    /// in `Connection::open`, not on SseClient::stream, so the tests drive
+    /// the real open path.
+    fn session_for(addr: std::net::SocketAddr) -> Box<dyn flux_core::Connection> {
+        let provider = OpenAiProvider::new(
+            OpenAiConfig {
+                base_url: format!("http://{addr}"),
+                api_key: Some("test-key".into()),
+            },
+            "test-model".into(),
+            OpenAiParams::default(),
+            reqwest::Client::new(),
+        )
+        .unwrap();
+        provider.begin("sys", &[], &[])
+    }
+
+    fn recording_sink(events: Arc<std::sync::Mutex<Vec<StreamEvent>>>) -> StreamSink {
+        Arc::new(move |event| events.lock().unwrap().push(event))
+    }
+
+    fn minimal_sse() -> String {
+        "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\n\n\
+         data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n\
+         data: [DONE]\n\n"
+            .into()
+    }
+
+    #[tokio::test]
+    async fn transient_429_is_retried_once_and_succeeds() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        serve_script(
+            listener,
+            vec![
+                ("HTTP/1.1 429 Too Many Requests", "slow down".into()),
+                ("HTTP/1.1 200 OK", minimal_sse()),
+            ],
+            Arc::clone(&requests),
+        )
+        .await;
+        let mut client = session_for(addr);
+
+        // Retry-After: 0 keeps the backoff at zero — the test asserts the
+        // re-POST happened, not the wait.
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let handle = client
+            .open(&[], recording_sink(Arc::clone(&events)))
+            .await
+            .expect("retry must succeed");
+        // The pump runs on its own task — give it a beat to push the
+        // deltas before the handle drop cancels it.
+        for _ in 0..100 {
+            if !events.lock().unwrap().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        drop(handle); // settle the pump
+        let events = events.lock().unwrap();
+        let text: String = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Chunk(StreamChunk::Text(t)) => Some(t.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(text, "hi", "the retried stream carries content");
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "exactly two POSTs");
+    }
+
+    #[tokio::test]
+    async fn consecutive_429s_exhaust_the_single_retry() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        serve_script(
+            listener,
+            vec![
+                ("HTTP/1.1 429 Too Many Requests", "a".into()),
+                ("HTTP/1.1 429 Too Many Requests", "b".into()),
+            ],
+            Arc::clone(&requests),
+        )
+        .await;
+        let mut client = session_for(addr);
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = client
+            .open(&[], recording_sink(Arc::clone(&events)))
+            .await
+            .expect_err("retry exhausted");
+        assert!(
+            matches!(err, CoreError::ProviderStatus { status: 429, .. }),
+            "the second failure surfaces as-is: {err}"
+        );
+        assert_eq!(requests.load(Ordering::SeqCst), 2, "exactly two POSTs");
+    }
+
+    #[tokio::test]
+    async fn non_transient_400_is_not_retried() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let requests = Arc::new(AtomicU64::new(0));
+        // A second canned response would answer any retry — the request
+        // count proves none happened.
+        serve_script(
+            listener,
+            vec![("HTTP/1.1 400 Bad Request", "bad".into())],
+            Arc::clone(&requests),
+        )
+        .await;
+        let mut client = session_for(addr);
+
+        let events = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let err = client
+            .open(&[], recording_sink(Arc::clone(&events)))
+            .await
+            .expect_err("400 is deterministic");
+        assert!(matches!(err, CoreError::ProviderStatus { status: 400, .. }));
+        assert_eq!(
+            requests.load(Ordering::SeqCst),
+            1,
+            "no retry on a client error"
+        );
+    }
+
+    #[test]
+    fn transient_classifier() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(
+                crate::sse::is_transient_status(status),
+                "{status} is transient"
+            );
+        }
+        for status in [400, 401, 403, 404, 422] {
+            assert!(
+                !crate::sse::is_transient_status(status),
+                "{status} is deterministic"
+            );
+        }
     }
 }

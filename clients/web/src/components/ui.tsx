@@ -5,7 +5,8 @@
  * (styles/app.css @theme bridge); per-feature ad-hoc control styling is
  * retired — layout utilities may be passed via `className`, never colors.
  *
- * Provides: Button, IconButton, TextField, Badge, Spinner
+ * Provides: Button, IconButton, TextField, SelectField, TextArea, Badge,
+ *           Spinner
  */
 import { forwardRef } from 'react';
 import { cn } from '../lib/cn';
@@ -36,7 +37,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       type={type}
       className={cn(
         'inline-flex items-center justify-center gap-1.5 whitespace-nowrap rounded-sm font-medium',
-        'transition-colors duration-100 cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:pointer-events-none',
+        'transition-colors duration-fast cursor-pointer disabled:opacity-45 disabled:cursor-not-allowed disabled:pointer-events-none',
         // Touch floor: controls clear 40px on mobile (HIG/Material); the
         // desktop heights stay at the control-height tokens.
         size === 'md'
@@ -67,7 +68,7 @@ export const IconButton = forwardRef<HTMLButtonElement, IconButtonProps>(functio
       title={rest.title ?? label}
       className={cn(
         'inline-flex items-center justify-center rounded-sm text-muted',
-        'size-7 max-md:size-10 shrink-0 cursor-pointer transition-colors duration-100 hover:bg-hover hover:text-fg',
+        'size-7 max-md:size-10 shrink-0 cursor-pointer transition-colors duration-fast hover:bg-hover hover:text-fg',
         className,
       )}
       {...rest}
@@ -82,7 +83,7 @@ export const TextField = forwardRef<HTMLInputElement, React.InputHTMLAttributes<
         ref={ref}
         className={cn(
           'h-[var(--fx-control-h)] w-full rounded-sm border border-border bg-inset px-2.5 text-sm text-fg',
-          'placeholder:text-faint transition-colors duration-100',
+          'placeholder:text-faint transition-colors duration-fast',
           'focus:border-accent focus:outline-none',
           className,
         )}
@@ -91,6 +92,48 @@ export const TextField = forwardRef<HTMLInputElement, React.InputHTMLAttributes<
     );
   },
 );
+
+/** The native select, styled to match TextField (one focus language, one
+ * control radius). The chevron rides the UA's default — a custom arrow
+ * would need an appearance reset + background SVG for no visual gain. */
+export const SelectField = forwardRef<
+  HTMLSelectElement,
+  React.SelectHTMLAttributes<HTMLSelectElement>
+>(function SelectField({ className, ...rest }, ref) {
+  return (
+    <select
+      ref={ref}
+      className={cn(
+        'h-[var(--fx-control-h)] w-full cursor-pointer rounded-sm border border-border bg-inset px-2.5 text-sm text-fg',
+        'transition-colors duration-fast focus:border-accent focus:outline-none',
+        className,
+      )}
+      {...rest}
+    />
+  );
+});
+
+/** Multiline input, styled to match TextField (the same focus/border
+ * rules; mono by default — the content is machine voice: commands, args,
+ * launch lines). */
+export const TextArea = forwardRef<
+  HTMLTextAreaElement,
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>
+>(function TextArea({ className, rows = 4, ...rest }, ref) {
+  return (
+    <textarea
+      ref={ref}
+      rows={rows}
+      className={cn(
+        'min-h-24 w-full resize-y rounded-sm border border-border bg-inset px-3 py-2 font-mono text-sm leading-relaxed text-fg',
+        'placeholder:text-faint transition-colors duration-fast',
+        'focus:border-accent focus:outline-none',
+        className,
+      )}
+      {...rest}
+    />
+  );
+});
 
 export type BadgeTone = 'default' | 'warn' | 'accent';
 

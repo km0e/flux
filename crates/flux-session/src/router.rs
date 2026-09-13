@@ -7,7 +7,7 @@
 //! drop surface — the transport's bounded content queue). A slow viewer's
 //! sink reports `send_raw == false`, the router marks it dropped and sends
 //! an `error{stream_gap}` notice on the sink's control channel instead of
-//! stalling anyone (spec §4.2). The model's `question` prompts also go via
+//! stalling anyone. The model's `question` prompts also go via
 //! `send_control` straight to the lease holder so an answer request can
 //! never be starved by a full content queue; it parks until answered and
 //! is re-delivered to each new lease holder.
@@ -19,9 +19,9 @@ use flux_core::ErrorCode;
 use flux_core::{OutputPort, WireEvent};
 use flux_proto::flux::v1::subscribe_response::Kind;
 use flux_proto::flux::v1::{
-    ContextRebased, ErrorEvent, ProviderSwitched, QuestionPrompt, QuestionRequired, ReasoningDelta,
-    StreamCancelled, StreamEnd, SubscribeResponse, TextDelta, ToolCallPreview, ToolResult,
-    ToolStart, Usage,
+    ErrorEvent, MessagePersisted, ProviderSwitched, QuestionPrompt, QuestionRequired,
+    ReasoningDelta, StreamCancelled, StreamEnd, SubscribeResponse, TextDelta, ToolCallPreview,
+    ToolResult, ToolStart, Usage,
 };
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -31,18 +31,18 @@ use tracing::warn;
 /// Router control channel depth — the task's output backpressure surface.
 const CONTROL_QUEUE: usize = 1024;
 
-/// P1 delta batching: flush accumulated stream deltas within this interval so
+/// Delta batching: flush accumulated stream deltas within this interval so
 /// a slow/trickling provider still shows text promptly (bounds first-token
 /// latency added by aggregation).
 const BATCH_FLUSH: std::time::Duration = std::time::Duration::from_millis(25);
-/// P1 delta batching: flush once this many deltas accumulate even if the
+/// Delta batching: flush once this many deltas accumulate even if the
 /// interval hasn't elapsed (frame-count bound under heavy input; also guards
 /// against the select randomly starving the timer under a saturated channel).
 const BATCH_MAX: usize = 32;
-/// P1 delta batching: char-size bound per batched frame. BATCH_MAX counts
+/// Delta batching: char-size bound per batched frame. BATCH_MAX counts
 /// frames — an upstream that sends large SSE chunks would otherwise turn a
-/// single WS frame into a multi-KB render spike on the client (the frontend
-/// folds each frame into the DOM).
+/// single stream element into a multi-KB render spike on the client (the
+/// frontend folds each element into the DOM).
 const BATCH_MAX_CHARS: usize = 2048;
 
 /// A chat's router handle: the control-channel sender stored in the chat
@@ -184,7 +184,7 @@ pub(crate) struct Router {
     /// are skipped silently until the next boundary event clears them.
     dropped: HashSet<u64>,
     /// Accumulated consecutive `TextDelta`s awaiting a batched flush (see
-    /// P1 delta batching: fewer wire frames, same semantics). `(text, count)`.
+    /// the BATCH_* constants: fewer wire elements, same semantics). `(text, count)`.
     pending_text: Option<(String, usize)>,
     /// Accumulated consecutive `ReasoningDelta`s awaiting a batched flush.
     pending_reasoning: Option<(String, usize)>,
@@ -229,7 +229,7 @@ pub(crate) async fn run_router(mut router: Router) {
 
 impl Router {
     async fn on_event(&mut self, event: WireEvent) {
-        // P1 delta batching: consecutive text/reasoning deltas merge into one
+        // Delta batching: consecutive text/reasoning deltas merge into one
         // frame; a kind switch, a boundary event, BATCH_MAX accumulation, or
         // the interval timer flushes the accumulated batch.
         match event {
@@ -446,10 +446,8 @@ fn utc_stamp(secs: u64) -> String {
 }
 
 /// Map one WireEvent onto the stream element's oneof payload. Total over
-/// the kernel vocabulary — there is no fallible serialization step anymore
-/// (the old serde path could skip events on serialization failure).
-/// ToolResult's `name` is dropped: the wire element pairs results to cards
-/// by call id alone (unchanged from the JSON protocol).
+/// the kernel vocabulary. ToolResult's `name` is dropped: the wire
+/// element pairs results to cards by call id alone.
 fn kind_of(event: &WireEvent) -> Kind {
     match event {
         WireEvent::TextDelta(delta) => Kind::TextDelta(TextDelta {
@@ -508,8 +506,9 @@ fn kind_of(event: &WireEvent) -> Kind {
         WireEvent::StreamEnd { finish_reason } => Kind::StreamEnd(StreamEnd {
             finish_reason: finish_reason.clone(),
         }),
-        WireEvent::ContextRebased { base_message_id } => Kind::ContextRebased(ContextRebased {
-            base_message_id: *base_message_id,
+        WireEvent::MessagePersisted { id, content } => Kind::MessagePersisted(MessagePersisted {
+            id: *id,
+            content: content.clone(),
         }),
         WireEvent::ProviderSwitched { provider, model } => {
             Kind::ProviderSwitched(ProviderSwitched {
@@ -544,9 +543,9 @@ fn gap_element(chat_id: &str) -> SubscribeResponse {
 }
 
 /// The task's OutputPort adapter: forwards WireEvents into the chat's
-/// router. `send().await` on the bounded control channel provides the same
-/// backpressure the old direct-to-WS path had — a full router stalls the
-/// machine loop instead of dropping stream content.
+/// router. `send().await` on the bounded control channel backpressures
+/// the machine loop when the router is saturated — stream content is
+/// never dropped on this seam.
 pub(crate) struct ChannelOutput {
     pub(crate) router: RouterHandle,
 }

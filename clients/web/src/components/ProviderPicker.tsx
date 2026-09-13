@@ -18,7 +18,7 @@ import { useFlux } from '../core/state';
 import { fetchProviders } from '../services/providers';
 import { fetchModels } from '../services/models';
 import { fmtTokens } from '../lib/format';
-import { cn } from '../lib/cn';
+import { SelectField, TextField } from './ui';
 
 export function ProviderPicker(props: {
   providerId: string;
@@ -75,15 +75,10 @@ export function ProviderPicker(props: {
       )}
       <label className="flex flex-col gap-1 text-sm text-muted">
         <span>Provider</span>
-        <select
-          className={cn(
-            'h-[var(--fx-control-h)] cursor-pointer rounded-md border border-border bg-inset px-2.5 text-sm text-fg',
-            // The one focus language: accent border (same as TextField) —
-            // the ring variant made the picker's focus read differently
-            // from every other input in the app.
-            'transition-colors duration-100 focus:border-accent focus:outline-none',
-            !props.providerId && 'text-muted',
-          )}
+        {/* One control language: SelectField owns the select chrome (same
+            focus border as every other input in the app). */}
+        <SelectField
+          className={!props.providerId ? 'text-muted' : undefined}
           value={props.providerId}
           onChange={(e) => props.onChange({ provider: e.target.value, model: '' })}
         >
@@ -96,7 +91,7 @@ export function ProviderPicker(props: {
               {p.id}
             </option>
           ))}
-        </select>
+        </SelectField>
       </label>
       <label className="flex flex-col gap-1 text-sm text-muted">
         <span>
@@ -105,12 +100,9 @@ export function ProviderPicker(props: {
             (required{uncataloged && props.providerId ? ' · catalog in Providers' : ''})
           </span>
         </span>
-        <input
+        <TextField
           type="text"
-          className={cn(
-            'h-[var(--fx-control-h)] rounded-md border border-border bg-inset px-2.5 font-mono text-sm text-fg',
-            'transition-colors duration-100 focus:border-accent focus:outline-none',
-          )}
+          className="font-mono"
           value={props.model}
           placeholder="model id"
           list={`provider-models-${props.providerId || 'default'}`}

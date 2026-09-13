@@ -11,12 +11,10 @@
 //! buffer exists to solve.
 //!
 //! Lifetime: entries are NEVER overwritten (a call id maps to exactly
-//! one output) and never wiped by new activity — they live as long as
-//! their tool call is visible in the model's live context. The store is
-//! the only truth: entries survive engine rebuilds AND process restarts,
-//! and the GC (at a rebase boundary, see
-//! `Store::gc_buf_entries`) deletes the entries whose calls the rebase
-//! archived.
+//! one output) and never wiped by new activity — a chat's transcript only
+//! grows, so an entry lives exactly as long as its chat (FK cascade), and
+//! a fork copies the entries its copied transcript carries. The store is
+//! the only truth: entries survive engine rebuilds AND process restarts.
 
 use async_trait::async_trait;
 use flux_core::BUF_READ_TOOL;
@@ -43,13 +41,26 @@ pub(crate) const BUF_PAGE_CHARS: usize = 6000;
 /// as a `buf_read` miss, which the model recovers from by re-running the
 /// tool.
 pub(crate) async fn store_overflow(store: &Store, chat_id: &str, call_id: &str, content: &str) {
-    let char_count = content.chars().count();
-    let stored = if char_count > BUF_ENTRY_MAX_CHARS {
-        let head: String = content.chars().take(BUF_ENTRY_MAX_CHARS).collect();
-        let dropped = char_count - BUF_ENTRY_MAX_CHARS;
-        format!(
-            "{head}\n\n--- (buffered output capped at {BUF_ENTRY_MAX_CHARS} chars; {dropped} chars dropped) ---"
-        )
+    // Byte-length pre-filter: chars ≤ bytes, so content within the cap in
+    // BYTES is within the cap in chars — the common case skips the O(n)
+    // char walk entirely.
+    let stored = if content.len() > BUF_ENTRY_MAX_CHARS {
+        let char_count = content.chars().count();
+        if char_count > BUF_ENTRY_MAX_CHARS {
+            // One walk to the cap's char boundary, then a memcpy slice —
+            // no per-char collect.
+            let head_end = content
+                .char_indices()
+                .nth(BUF_ENTRY_MAX_CHARS)
+                .map_or(content.len(), |(i, _)| i);
+            let dropped = char_count - BUF_ENTRY_MAX_CHARS;
+            format!(
+                "{}\n\n--- (buffered output capped at {BUF_ENTRY_MAX_CHARS} chars; {dropped} chars dropped) ---",
+                &content[..head_end]
+            )
+        } else {
+            content.to_string()
+        }
     } else {
         content.to_string()
     };
@@ -81,8 +92,7 @@ impl Tool for BufReadTool {
     fn description(&self) -> &str {
         "Read a page of a previously buffered (truncated) tool output. Char-based paging: \
          offset/limit are CHAR offsets, not lines — buffered output may be a single huge line. \
-         Entries are keyed by the tool call id that produced them and persist for the chat; \
-         entries whose tool call was archived out of the context (rebase) are deleted."
+         Entries are keyed by the tool call id that produced them and persist for the chat."
     }
 
     fn schema(&self) -> Value {
@@ -126,14 +136,34 @@ impl Tool for BufReadTool {
             .map_err(|e| CoreError::Tool(format!("buf_read failed: {e}")))?
         else {
             return Err(CoreError::Tool(format!(
-                "unknown buffer reference '{r}' — entries are deleted when their tool call is \
-                 archived out of the context (rebase); re-run the original tool to regenerate"
+                "unknown buffer reference '{r}' — references are per-conversation; \
+                 re-run the original tool to regenerate"
             )));
         };
         let total = content.chars().count();
         let start = offset.min(total);
         let end = (start + limit).min(total);
-        let slice: String = content.chars().skip(start).take(end - start).collect();
+        // Byte window via one bounded walk — the page itself is then a
+        // memcpy. (The old `chars().skip(start)` walked `start` chars PER
+        // READ; sequential paging through a full 1M-char entry no longer
+        // rescans the prefix per page.)
+        let mut start_byte = content.len();
+        let mut end_byte = content.len();
+        if start < total {
+            for (i, (b, _)) in content.char_indices().enumerate() {
+                if i == start {
+                    start_byte = b;
+                    if end == total {
+                        break;
+                    }
+                }
+                if i == end {
+                    end_byte = b;
+                    break;
+                }
+            }
+        }
+        let slice = &content[start_byte..end_byte];
         let footer = if end < total {
             format!("--- (chars {start}-{end} of {total} — continue with offset: {end}) ---")
         } else {

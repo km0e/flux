@@ -5,13 +5,14 @@
 
 use std::collections::HashMap;
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::time::timeout;
 
 use async_trait::async_trait;
 use flux_core::{CoreError, Tool, ToolCtx};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, ContentBlock};
-use rmcp::service::{RoleClient, RunningService};
+use rmcp::service::RoleClient;
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ClientHandler, Peer};
 use serde::{Deserialize, Serialize};
@@ -60,19 +61,72 @@ impl ClientHandler for NoopClientHandler {
     }
 }
 
-/// RAII guard: holds the MCP connection alive until dropped.
-/// The `service` field is never accessed directly — its `Drop` impl
-/// shuts down the connection.
+/// RAII session handle: Drop cancels the rmcp service token, which ends
+/// the serve loop and drops the transport (killing the child). The death
+/// signal is rmcp's own `RunningService::waiting()` — spawned at connect
+/// and awaited by the self-healing supervisor; `QuitReason::Closed` =
+/// the child died, `Cancelled` = our cancel.
 pub struct McpSession {
-    // Drop guard: holds the MCP connection alive until McpSession is dropped.
-    // The field is never read directly — its Drop impl shuts down the connection.
-    #[allow(dead_code)]
-    service: RunningService<RoleClient, NoopClientHandler>,
+    /// Resolves when the serve loop ends (child death, cancel, or task
+    /// failure). Spawned in [`connect_with_peer`] from
+    /// `RunningService::waiting()` — the one rmcp-native death signal
+    /// (the cancellation token does NOT fire on transport closure).
+    quit:
+        Option<tokio::task::JoinHandle<Result<rmcp::service::QuitReason, tokio::task::JoinError>>>,
+    /// Cancels the serve loop on explicit `cancel()`.
+    token: Option<rmcp::service::RunningServiceCancellationToken>,
+    /// Second token clone dedicated to Drop — `cancel(self)` consumes, so
+    /// explicit cancel and Drop each get their own wrapper.
+    drop_token: Option<rmcp::service::RunningServiceCancellationToken>,
+}
+
+/// Why a session's serve loop ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum McpQuit {
+    /// The transport closed — for stdio, the child process died.
+    Closed,
+    /// Our `cancel()` (removal / deliberate teardown).
+    Cancelled,
+    /// Task-level failure (join error).
+    Failed,
 }
 
 impl McpSession {
-    pub(crate) fn new(service: RunningService<RoleClient, NoopClientHandler>) -> Self {
-        Self { service }
+    /// Await the end of the session's serve loop. A second call (the
+    /// watcher was already taken) reports `Failed` — the supervisor
+    /// awaits exactly once per handle.
+    pub async fn quit(&mut self) -> McpQuit {
+        use rmcp::service::QuitReason;
+        let Some(quit) = self.quit.take() else {
+            return McpQuit::Failed;
+        };
+        match quit.await {
+            Ok(Ok(QuitReason::Closed)) => McpQuit::Closed,
+            Ok(Ok(QuitReason::Cancelled)) => McpQuit::Cancelled,
+            Ok(Ok(QuitReason::JoinError(_))) | Ok(Ok(_)) | Ok(Err(_)) | Err(_) => {
+                // `QuitReason` is non_exhaustive; anything new is treated
+                // as a failure (respawn-worthy) rather than a clean cancel.
+                McpQuit::Failed
+            }
+        }
+    }
+
+    /// End the session: cancel the service token — the serve loop exits
+    /// and the transport drops, killing the child.
+    pub fn cancel(&mut self) {
+        if let Some(token) = self.token.take() {
+            token.cancel();
+        }
+    }
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        // RAII: a dropped session kills its child (cancel → serve loop
+        // exits → transport dropped → ChildWithCleanup).
+        if let Some(token) = self.drop_token.take() {
+            token.cancel();
+        }
     }
 }
 
@@ -173,11 +227,21 @@ fn apply_mcp_env(cmd: &mut Command, env: &HashMap<String, String>) {
 
 /// Spawn and connect to a single MCP server.
 ///
-/// Returns the session, peer, and raw tool metadata (without wrapping).
-/// The caller can clone the peer to create per-session tool wrappers.
+/// Returns the session (its `quit()` is the death signal; Drop cancels),
+/// an external cancel capability (a closure over the same inner token —
+/// usable while the session handle lives elsewhere, e.g. owned by a
+/// supervisor), the peer, and raw tool metadata (without wrapping).
 pub async fn connect_with_peer(
     config: &McpServerConfig,
-) -> Result<(McpSession, Peer<RoleClient>, Vec<rmcp::model::Tool>), McpError> {
+) -> Result<
+    (
+        McpSession,
+        Arc<dyn Fn() + Send + Sync>,
+        Peer<RoleClient>,
+        Vec<rmcp::model::Tool>,
+    ),
+    McpError,
+> {
     let mut command = Command::new(&config.command);
     command
         .args(&config.args)
@@ -205,7 +269,33 @@ pub async fn connect_with_peer(
         tracing::info!(tool = %tool.name, "registered MCP tool");
     }
 
-    Ok((McpSession::new(service), peer, tools))
+    // rmcp's own death signal: `waiting()` consumes the service and
+    // resolves when the serve loop ends (transport closed = child died,
+    // cancellation = our teardown). Spawned so the caller stays free to
+    // await it whenever the supervisor is ready.
+    let token = Some(service.cancellation_token());
+    let drop_token = Some(service.cancellation_token());
+    // A third token clone for an EXTERNAL cancel capability (the removal
+    // path) — `cancel(self)` consumes, so each capability owns its own
+    // wrapper over the same inner token.
+    let external = Arc::new(std::sync::Mutex::new(Some(service.cancellation_token())));
+    let external_cancel: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if let Some(token) = external.lock().unwrap().take() {
+            token.cancel();
+        }
+    });
+    let quit = tokio::spawn(async move { service.waiting().await });
+
+    Ok((
+        McpSession {
+            quit: Some(quit),
+            token,
+            drop_token,
+        },
+        external_cancel,
+        peer,
+        tools,
+    ))
 }
 
 #[cfg(test)]

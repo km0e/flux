@@ -6,7 +6,7 @@
  * skills, installs into the global dir (a local directory path or a git
  * URL with an optional subpath), and removes global entries. An install
  * is IMMEDIATELY effective — flux-tools scans fresh on every skill_list
- * call, so there is no restart semantics (unlike MCP servers).
+ * call, so there is no restart semantics.
  *
  * Direct gRPC-Web calls (the SkillService RPCs); the fresh list arrives
  * via the `skills` stream broadcast (the store handler stays

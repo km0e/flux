@@ -27,6 +27,13 @@
 
 .chat-pane.switching-out {
   opacity: 0;
+  /* Out of flow during the fade: the outgoing pane must not squeeze the
+     incoming one to half height for 120ms — a squeezed pane overflows its
+     content and flashes phantom scrollbars (even an empty pane's empty
+     state does). Crossfade overlays instead of reflowing. */
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
 }
 
 .chat-pane > * + * {
@@ -93,10 +100,11 @@
   justify-content: flex-end;
 }
 
-/* Context-rebase affordance (history user bubbles): sits LEFT of the
-   bubble, revealed on hover — touch devices keep it visible (a hover
-   reveal is unreachable there). */
-.msg-rebase {
+/* Fork affordance (user bubbles): sits LEFT of the bubble, revealed on
+   hover — touch devices keep it visible (a hover reveal is unreachable
+   there). A fork is non-destructive (the source is untouched), so the
+   affordance needs no confirm styling. */
+.msg-fork {
   align-self: center;
   display: inline-flex;
   align-items: center;
@@ -117,19 +125,19 @@
     background-color var(--fx-duration-fast);
 }
 
-.message.user:hover .msg-rebase,
-.msg-rebase:focus-visible {
+.message.user:hover .msg-fork,
+.msg-fork:focus-visible {
   opacity: 1;
 }
 
-.msg-rebase:hover {
+.msg-fork:hover {
   color: var(--fx-accent);
   background: var(--fx-accent-soft);
 }
 
 /* Touch: always visible + the 36px tap floor (padding does the work). */
 @media (hover: none) {
-  .msg-rebase {
+  .msg-fork {
     opacity: 1;
     width: 36px;
     height: 36px;
@@ -196,7 +204,7 @@
   background: var(--fx-hover);
 }
 
-/* System events (cancelled / context rebased / provider switched) —
+/* System events (cancelled / provider switched) —
    centered machine microcopy, a voice NEITHER the bubbles nor the tool
    cards use. Deliberately muted, not an error. */
 .message.notice {
@@ -228,15 +236,6 @@
 
 .message .error-icon {
   margin-right: 4px;
-}
-
-/* Approval-wait hint (legacy hook) — the system-line voice, warn tone. */
-.message.approval-wait {
-  color: var(--fx-warn);
-  font-family: var(--fx-font-mono);
-  font-size: var(--fx-text-2xs);
-  text-align: center;
-  padding: 2px 4px;
 }
 
 /* Question-wait context hint (the dialog layer owns the real card). */

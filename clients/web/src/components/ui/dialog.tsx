@@ -22,12 +22,12 @@ export function DialogContent({
 }: React.ComponentPropsWithoutRef<typeof DialogPrimitive.Content>): React.ReactElement {
   return (
     <DialogPrimitive.Portal>
-      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/55 backdrop-blur-[2px] data-[state=open]:animate-[fadeIn_150ms_ease-out]" />
+      <DialogPrimitive.Overlay className="fixed inset-0 z-50 bg-black/55 backdrop-blur-[2px] data-[state=open]:animate-fade-in" />
       <DialogPrimitive.Content
         className={cn(
           'fixed top-1/2 left-1/2 z-50 max-h-[88dvh] w-[min(94vw,640px)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto',
           'rounded-lg border border-border bg-elev p-7 text-fg shadow-[var(--fx-shadow-modal)]',
-          'data-[state=open]:animate-[scaleIn_160ms_var(--fx-ease-out)_both]',
+          'data-[state=open]:animate-scale-in',
           'focus:outline-none',
           className,
         )}

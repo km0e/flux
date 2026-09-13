@@ -333,8 +333,12 @@ export class StreamController {
     log.debug('appendReasoning delta=' + delta.length);
     this.reasoningEver = true;
     this.renderType = 'reasoning';
-    const rs = this.ensureReasoning();
-    if (!this.rawReasoning) rs.el.open = true;
+    this.ensureReasoning();
+    // The block stays COLLAPSED by default — all of them, including the
+    // first of a round. The summary carries the live signal (animated dots
+    // while thinking, "Thought for Ns" after); the content streams into the
+    // collapsed block and is one click away. (An earlier version forced the
+    // first block open; the user preference is uniformly closed.)
     this.rawReasoning += delta;
     this.reasoningSplitter.push(delta);
     this.scheduleRender('reasoning');

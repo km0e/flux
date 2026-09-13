@@ -315,14 +315,17 @@ describe('reasoning block', () => {
     return content;
   }
 
-  it('renders reasoning content on flush (rAF-coalesced)', () => {
+  it('renders reasoning content collapsed on flush (rAF-coalesced)', () => {
     const ctrl = getController('c1');
     ctrl.appendReasoning('hello world');
     ctrl.flushRenderNow();
 
     const rs = getReasoningEntry('c1');
     expect(rs).toBeTruthy();
-    expect(rs!.el.open).toBe(true);
+    // ALL reasoning blocks are born collapsed — including the first of a
+    // round. The live signal is the summary (animated dots); the content is
+    // one click away.
+    expect(rs!.el.open).toBe(false);
     expect(rs!.content.textContent).toContain('hello world');
   });
 

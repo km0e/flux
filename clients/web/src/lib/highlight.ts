@@ -27,7 +27,7 @@ export function preloadHighlighter(): Promise<void> {
   return ready;
 }
 
-// Boot-time prefetch — starts alongside the WS connect, not after it.
+// Boot-time prefetch — starts alongside the session-stream connect, not after it.
 void preloadHighlighter();
 
 /**

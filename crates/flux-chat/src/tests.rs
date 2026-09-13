@@ -26,7 +26,7 @@ struct MockSink {
     cancellations: StdMutex<u32>,
     tool_starts: StdMutex<Vec<(String, String, String)>>,
     tool_results: StdMutex<Vec<(String, String, String)>>,
-    rebase_bases: StdMutex<Vec<i64>>,
+    persisted_ids: StdMutex<Vec<i64>>,
 }
 
 impl MockSink {
@@ -41,7 +41,7 @@ impl MockSink {
             cancellations: StdMutex::new(0),
             tool_starts: StdMutex::new(Vec::new()),
             tool_results: StdMutex::new(Vec::new()),
-            rebase_bases: StdMutex::new(Vec::new()),
+            persisted_ids: StdMutex::new(Vec::new()),
         }
     }
 }
@@ -73,6 +73,10 @@ impl OutputPort for MockSink {
             WireEvent::ProviderSwitched { .. } => {
                 self.events.lock().unwrap().push("provider_switched");
             }
+            WireEvent::MessagePersisted { id, .. } => {
+                self.events.lock().unwrap().push("message_persisted");
+                self.persisted_ids.lock().unwrap().push(id);
+            }
             WireEvent::Cancelled => {
                 self.events.lock().unwrap().push("cancelled");
                 *self.cancellations.lock().unwrap() += 1;
@@ -91,10 +95,6 @@ impl OutputPort for MockSink {
             }
             WireEvent::QuestionRequired { .. } => {
                 self.events.lock().unwrap().push("question_required");
-            }
-            WireEvent::ContextRebased { base_message_id } => {
-                self.events.lock().unwrap().push("context_rebased");
-                self.rebase_bases.lock().unwrap().push(base_message_id);
             }
             // Preview chunks never reach the sink in these scenarios (the
             // scripted providers don't emit them); kept for exhaustiveness.
@@ -609,6 +609,35 @@ async fn partial_stream_text_is_persisted_on_provider_error() {
         .find(|m| m.role == Role::Assistant)
         .expect("partial assistant reply persisted");
     assert_eq!(assistant.content, "partial answer");
+}
+
+/// The turn-acceptance commit announces the user message's row id (the
+/// sender's client names its live bubble with it — the fork affordance).
+/// The announced id must be the id the store actually assigned.
+#[tokio::test]
+async fn user_message_persist_announcement_carries_the_store_row_id() {
+    let (handle, _provider, sink, store) = spawn_scripted(
+        ToolRegistry::default(),
+        vec![vec![
+            Ok(StreamChunk::Text("ok".into())),
+            Ok(StreamChunk::End {
+                finish_reason: Some("stop".into()),
+            }),
+        ]],
+    )
+    .await;
+
+    handle.send_user("name this row".into());
+    wait_for(|| sink.events.lock().unwrap().contains(&"stream_end")).await;
+
+    let announced = sink.persisted_ids.lock().unwrap().clone();
+    assert_eq!(announced.len(), 1, "exactly one user-commit announcement");
+    let stored = store.load_stored_messages("test-chat").await.unwrap();
+    let user_row = stored
+        .iter()
+        .find(|s| s.message.role == Role::User)
+        .expect("user row persisted");
+    assert_eq!(announced[0], user_row.id, "announced id == store row id");
 }
 
 #[tokio::test]

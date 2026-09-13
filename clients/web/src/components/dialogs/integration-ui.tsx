@@ -11,12 +11,16 @@
  * w-[min(94vw,720px)].
  *
  * Provides: DialogHint, NoticeBar, SectionLabel, RowShell, RowTitle,
- *           RowSub, EmptyState, FormField, FormArea, MasterDetail, Rail,
- *           RailButton, NewRailButton, DetailPane
- * Depends: lib/cn.ts
+ *           RowSub, EmptyState, FormField, RemoveControl,
+ *           useRailSelection, MasterDetail, Rail, RailButton,
+ *           NewRailButton, DetailPane
+ * Depends: lib/cn.ts, components/ui.tsx (Button/IconButton/TextField/
+ *          TextArea — the control styling authority)
  */
-import { Plus } from 'lucide-react';
+import { useEffect, useRef, useState } from 'react';
+import { Plus, Trash2 } from 'lucide-react';
 import { cn } from '../../lib/cn';
+import { Button, IconButton } from '../ui';
 
 /** Introductory explanation under the dialog title. The 14px prose is
  * desktop-tuned — on phones it becomes a wall of text, so mobile drops
@@ -96,23 +100,131 @@ export function FormField(props: {
   );
 }
 
-/** Multiline input styled to match TextField (ui.tsx owns single-line
- * inputs; a textarea variant would duplicate its focus/border rules). */
-export function FormArea(
-  props: React.TextareaHTMLAttributes<HTMLTextAreaElement>,
-): React.ReactElement {
+/**
+ * Two-step remove, shared by every row/preview surface (7 call sites
+ * used to hand-roll the identical confirming/error dance): a quiet trash
+ * affordance that flips to Confirm/Keep, the inline error parked beneath
+ * the control, and a reset on failure so a row never sticks in confirm
+ * mode. `onRemove` resolves with the inline error (undefined = success —
+ * the fresh list arrives via the broadcast).
+ */
+export function RemoveControl(props: {
+  label: string;
+  onRemove: () => Promise<string | undefined>;
+}): React.ReactElement {
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  if (!confirming) {
+    return (
+      <span className="flex flex-col items-end gap-0.5">
+        <IconButton
+          label={props.label}
+          title={props.label}
+          className="size-7 hover:text-danger"
+          onClick={() => setConfirming(true)}
+        >
+          <Trash2 size={13} />
+        </IconButton>
+        {error && <span className="max-w-48 text-2xs break-all text-danger">{error}</span>}
+      </span>
+    );
+  }
   return (
-    <textarea
-      rows={4}
-      {...props}
-      className={cn(
-        'min-h-24 w-full resize-y rounded-md border border-border bg-inset px-3 py-2 font-mono text-sm leading-relaxed text-fg',
-        'placeholder:text-faint transition-colors duration-100',
-        'focus:border-accent focus:outline-none',
-        props.className,
-      )}
-    />
+    <span className="flex shrink-0 items-center gap-1">
+      <Button
+        variant="danger"
+        size="sm"
+        onClick={() => {
+          void props.onRemove().then((err) => {
+            if (err) {
+              setError(err);
+              setConfirming(false);
+            }
+          });
+        }}
+      >
+        Confirm
+      </Button>
+      <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
+        Keep
+      </Button>
+    </span>
   );
+}
+
+/**
+ * Selection state for the master-detail rails (Providers / MCP / Skills —
+ * the repair contract used to be a three-copy ref dance): a selection key
+ * or 'new' (the persistent creation row), repaired against the live list
+ * with a fixed priority —
+ *
+ *   1. a freshly-added entry selects itself once its broadcast lands
+ *      (`markPending` at add time),
+ *   2. a vanished selection (removed here or elsewhere) falls to the
+ *      neighbor of the removal (`noteRemoved`), else to 'new',
+ *   3. an untouched panel follows the list (first entry, or the creation
+ *      form when empty).
+ *
+ * `keyOf` must be referentially stable (a module-level function) — it
+ * rides the repair effect's dependency list.
+ */
+export function useRailSelection<T>(
+  items: T[],
+  keyOf: (item: T) => string,
+): {
+  /** The selected key, or 'new'. */
+  selected: string;
+  /** Select an entry or the creation row (marks the panel touched). */
+  choose: (key: string) => void;
+  /** After a successful add: the new entry self-selects on arrival. */
+  markPending: (key: string) => void;
+  /** At removal time: the neighbor-fallback anchor for the repair. */
+  noteRemoved: (key: string) => void;
+} {
+  const [selected, setSelected] = useState('new');
+  const touchedRef = useRef(false);
+  const pendingRef = useRef<string | null>(null);
+  const removedIndexRef = useRef<number | null>(null);
+
+  const choose = (next: string) => {
+    touchedRef.current = true;
+    setSelected(next);
+  };
+  const markPending = (key: string) => {
+    pendingRef.current = key;
+  };
+  const noteRemoved = (key: string) => {
+    removedIndexRef.current = items.findIndex((x) => keyOf(x) === key);
+  };
+
+  useEffect(() => {
+    if (pendingRef.current) {
+      const want = pendingRef.current;
+      if (items.some((x) => keyOf(x) === want)) {
+        touchedRef.current = true;
+        setSelected(want);
+        pendingRef.current = null;
+      }
+      return;
+    }
+    if (touchedRef.current) {
+      if (selected !== 'new' && !items.some((x) => keyOf(x) === selected)) {
+        const idx = removedIndexRef.current;
+        const next =
+          idx !== null && items.length > 0 ? items[Math.min(idx, items.length - 1)] : undefined;
+        setSelected(next ? keyOf(next) : 'new');
+        removedIndexRef.current = null;
+      }
+      return;
+    }
+    if (items.length > 0) {
+      if (selected !== keyOf(items[0])) setSelected(keyOf(items[0]));
+    } else if (selected !== 'new') {
+      setSelected('new');
+    }
+  }, [items, selected, keyOf]);
+
+  return { selected, choose, markPending, noteRemoved };
 }
 
 // ── Master-detail (md+ settings sections) ─────────────────────────────
@@ -168,7 +280,7 @@ export function RailButton(props: {
         aria-label={props.ariaLabel}
         onClick={props.onClick}
         className={cn(
-          'w-full cursor-pointer rounded-sm px-2.5 py-1.5 text-left transition-colors duration-100',
+          'w-full cursor-pointer rounded-sm px-2.5 py-1.5 text-left transition-colors duration-fast',
           props.selected ? 'bg-elev text-fg shadow-sm' : 'text-muted hover:bg-hover hover:text-fg',
         )}
       >
@@ -197,7 +309,7 @@ export function NewRailButton(props: {
         aria-current={props.selected || undefined}
         onClick={props.onClick}
         className={cn(
-          'flex w-full cursor-pointer items-center gap-1.5 rounded-sm border border-dashed px-2.5 py-1.5 text-left text-sm transition-colors duration-100',
+          'flex w-full cursor-pointer items-center gap-1.5 rounded-sm border border-dashed px-2.5 py-1.5 text-left text-sm transition-colors duration-fast',
           props.selected
             ? 'border-accent/60 bg-elev text-fg shadow-sm'
             : 'border-border text-muted hover:border-border-strong hover:text-fg',

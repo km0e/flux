@@ -65,15 +65,18 @@ pub enum WireEvent {
     /// carries the provider's end signal when the stream reported one —
     /// `"length"` / `"content_filter"` mean the answer was cut short.
     StreamEnd { finish_reason: Option<String> },
-    /// The conversation context was rebuilt at `base_message_id` — a
-    /// restart-from-a-message (rebase). Messages at/below the base are
-    /// archived: the provider prefix was reset to only the live context
-    /// above it, and the new base is persisted. The client inserts a
-    /// neutral notice (the archive is still viewable/browsable).
-    ContextRebased { base_message_id: i64 },
+    /// A USER message was just persisted with the store row `id`. Emitted by
+    /// the round consumer at turn acceptance (the only commit whose batch is
+    /// exactly one user message), so the sender's client can name its OWN
+    /// live bubble without waiting for the next history snapshot — the fork
+    /// affordance needs exactly this id (the row id is the fork point).
+    /// `content` rides along for the client's bubble match (its un-id'd live
+    /// user bubbles are matched by exact text; a cancelled turn never
+    /// persisted, so its bubble correctly never gains an id).
+    MessagePersisted { id: i64, content: String },
     /// The conversation's provider was hot-swapped — every subsequent round
     /// runs on the new provider/model. The new session was rebuilt over the
-    /// live context (the persisted history above the context base), so the
+    /// persisted history (the full transcript — there is no archive), so the
     /// conversation continues seamlessly. Broadcast to all viewers.
     ProviderSwitched { provider: String, model: String },
 }

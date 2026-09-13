@@ -15,7 +15,8 @@
 #   builds clients/web via package-web.sh when the dist is missing (force a
 #   rebuild with --web-build; never build with --no-web-build), then pins
 #   the repo dist via --web-assets-dir. Skipped when --web-assets-dir is
-#   given (used as-is).
+#   given (used as-is). --web-build/--no-web-build are SCRIPT options —
+#   consumed here, never passed to the binary.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -26,14 +27,30 @@ force_build=false
 no_build=false
 web_assets=""
 
+# Arg extraction: --web-build/--no-web-build are SCRIPT options — consumed
+# here, never passed to the binary (a leak made flux-server die on an
+# unknown flag). --no-web and --web-assets-dir are SERVER flags the script
+# also inspects; they pass through verbatim in both space and = forms (the
+# = form must be recognized, or the script would append a second
+# --web-assets-dir and clap's last-wins would shadow the user's value).
+passthrough=()
 i=1
 args=("$@")
 while [ $i -le ${#args[@]} ]; do
     arg="${args[$((i-1))]}"
     case "$arg" in
+        --web-assets-dir=*)
+            web_assets="${arg#*=}"
+            passthrough+=("$arg")
+            ;;
         --web-assets-dir)
-            web_assets="${args[$i]:-}"
-            i=$((i+1))
+            if [ "$i" -lt "${#args[@]}" ] && [ -n "${args[$i]:-}" ]; then
+                web_assets="${args[$i]}"
+                passthrough+=("$arg" "${args[$i]}")
+                i=$((i+1))
+            else
+                passthrough+=("$arg")
+            fi
             ;;
         --web-build)
             force_build=true
@@ -43,11 +60,14 @@ while [ $i -le ${#args[@]} ]; do
             ;;
         --no-web)
             no_web=true
+            passthrough+=("$arg")
+            ;;
+        *)
+            passthrough+=("$arg")
             ;;
     esac
     i=$((i+1))
 done
-passthrough=("${args[@]}")
 
 # ── Web UI assets: build when missing, unless disabled or already pinned ──
 if ! $no_web && [ -z "$web_assets" ]; then

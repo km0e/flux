@@ -22,13 +22,13 @@
  *          components/ui, components/dialogs/integration-ui.tsx
  */
 import { useState } from 'react';
-import { RefreshCw, Trash2 } from 'lucide-react';
+import { RefreshCw } from 'lucide-react';
 import { useFlux } from '../../core/state';
 import { removeModel, saveModel, syncModels } from '../../services/models';
 import { fmtTokens } from '../../lib/format';
 import type { ModelParams, SavedModelInfo } from '../../core/types';
-import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
-import { RowSub, SectionLabel } from './integration-ui';
+import { Badge, Button, Spinner, TextField } from '../ui';
+import { RemoveControl, RowSub, SectionLabel } from './integration-ui';
 
 /** Common-value presets ("常见选项") — static frontend constants; the
  * models.dev snapshot refines the defaults per model where it can. */
@@ -83,7 +83,7 @@ function ParamNumberField(props: {
 
 function cnChip(active: boolean): string {
   return (
-    'cursor-pointer rounded-sm border px-1.5 py-0.5 font-mono text-2xs tabular-nums transition-colors duration-100 ' +
+    'cursor-pointer rounded-sm border px-1.5 py-0.5 font-mono text-2xs tabular-nums transition-colors duration-fast ' +
     (active
       ? 'border-accent bg-accent-dim text-accent'
       : 'border-border bg-inset text-muted hover:border-border-strong hover:text-fg')
@@ -175,21 +175,8 @@ function ModelEditForm(props: {
 /** One saved-model row: identity + capability/price badges + edit/remove. */
 function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.ReactElement {
   const [editing, setEditing] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   const meta = props.row.meta;
   const cost = meta.cost;
-
-  const runRemove = () => {
-    void removeModel(props.provider, props.row.model).then((error) => {
-      if (error) {
-        setRemoveError(error);
-        setConfirming(false);
-      } else {
-        useFlux.getState().pushToast('info', `Model "${props.row.model}" removed`);
-      }
-    });
-  };
 
   return (
     <li className="flex flex-col gap-1.5 rounded-md border border-border bg-inset px-2.5 py-2">
@@ -207,24 +194,17 @@ function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.
         <Button variant="ghost" size="sm" onClick={() => setEditing((v) => !v)}>
           {editing ? 'Close' : 'Edit'}
         </Button>
-        {confirming ? (
-          <>
-            <Button variant="danger" size="sm" onClick={runRemove}>
-              Confirm
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </>
-        ) : (
-          <IconButton
-            label={`Remove ${props.row.model}`}
-            className="size-7 hover:text-danger"
-            onClick={() => setConfirming(true)}
-          >
-            <Trash2 size={13} />
-          </IconButton>
-        )}
+        <RemoveControl
+          label={`Remove ${props.row.model}`}
+          onRemove={() =>
+            removeModel(props.provider, props.row.model).then((error) => {
+              if (!error) {
+                useFlux.getState().pushToast('info', `Model "${props.row.model}" removed`);
+              }
+              return error;
+            })
+          }
+        />
       </div>
       <div className="flex flex-wrap items-center gap-1.5">
         {(props.row.params.context_length ?? meta.context_length) !== undefined && (
@@ -247,7 +227,6 @@ function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.
           {cost.cache_read !== undefined && ` · $${cost.cache_read}/M cache`}
         </RowSub>
       )}
-      {removeError && <span className="break-all text-2xs text-danger">{removeError}</span>}
       {editing && (
         <ModelEditForm
           provider={props.provider}

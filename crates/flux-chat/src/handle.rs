@@ -13,9 +13,9 @@ use tokio::task::AbortHandle;
 /// `ChatTask` wraps one; ops drives the conversation through it).
 #[derive(Clone)]
 pub struct ChatHandle {
-    /// The loop's input channel — every user action (messages, cancels,
-    /// rebases) rides the same FIFO, so a cancel always lands in order
-    /// with the messages around it (Model E: the kernel treats a cancel
+    /// The loop's input channel — every user action (messages, cancels)
+    /// rides the same FIFO, so a cancel always lands in order
+    /// with the messages around it (the kernel treats a cancel
     /// as an ordinary queue event). The provider connection and the
     /// supervised tool flights push into the same channel.
     loop_tx: mpsc::UnboundedSender<LoopInput>,
@@ -104,10 +104,9 @@ impl ChatHandle {
     /// control channel: the machine's gate arms (a live round — and any
     /// turns queued behind it — finish first), and at the fired gate the
     /// consumer rebuilds the engine IN PLACE from the truth sources
-    /// (provider instance, tool registry, live history above the context
-    /// base). The
-    /// carried `provider` replaces the chat's provider instance for this
-    /// and every later rebuild (the hot-swap path); `None` keeps the
+    /// (provider instance, tool registry, the full persisted history).
+    /// The carried `provider` replaces the chat's provider instance for
+    /// this and every later rebuild (the hot-swap path); `None` keeps the
     /// current one. Non-blocking; false = the consumer is gone (stale
     /// task; the caller's lazy replacement covers it).
     pub fn rebuild(&self, provider: Option<ResolvedPin>) -> bool {

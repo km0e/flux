@@ -95,7 +95,7 @@ pub(crate) fn kind_name(k: &Kind) -> &'static str {
         Kind::StreamCancelled(_) => "stream_cancelled",
         Kind::ChatState(_) => "chat_state",
         Kind::ChatHistory(_) => "chat_history",
-        Kind::ContextRebased(_) => "context_rebased",
+        Kind::MessagePersisted(_) => "message_persisted",
         Kind::ProviderSwitched(_) => "provider_switched",
         Kind::Chats(_) => "chats",
         Kind::ChatCreated(_) => "chat_created",
@@ -200,6 +200,12 @@ pub(crate) async fn create_chat(
         )
         .await
         .unwrap();
+    // The helper stands for the real client's create → claim flow: the
+    // claim (here, the bare subscription primitive) registers the viewer
+    // slot, so the router's fanout reaches the recorded sink.
+    state
+        .subscribe_chat(&sess(state, sid).await, &info.chat_id)
+        .await;
     let router = state
         .manager
         .chats

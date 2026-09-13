@@ -7,7 +7,7 @@
  * (project) skills (read-only — they live in the user's repository).
  * Installing materializes a validated copy into the global dir and is
  * IMMEDIATELY effective — flux-tools scans fresh on every skill_list
- * call, so there is no restart semantics (unlike MCP servers).
+ * call, so there is no restart semantics.
  *
  * Two install sources, one field: a local directory path or a git URL
  * (detected by the `https?://` / `git@` prefix), with an optional
@@ -25,19 +25,19 @@
  * half-typed source.
  *
  * Presentation shares the integration-ui building blocks with
- * ProvidersPanel / McpPanel — one typography scale and spacing rhythm.
+ * ProvidersPanel / McpPanel — one typography scale, one spacing rhythm,
+ * one two-step-remove control, one rail-selection repair.
  *
  * Provides: SkillsPanel
  * Depends: core/state.ts, services/skills.ts, hooks/useIsMobile.ts,
  *          components/ui/*, components/dialogs/integration-ui.tsx
  */
-import { useEffect, useRef, useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useFlux } from '../../core/state';
 import { addSkill, fetchSkills, removeSkill } from '../../services/skills';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import type { SkillSummary } from '../../core/types';
-import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
+import { Badge, Button, Spinner, TextField } from '../ui';
 import {
   DetailPane,
   DialogHint,
@@ -48,10 +48,12 @@ import {
   NoticeBar,
   Rail,
   RailButton,
+  RemoveControl,
   RowShell,
   RowSub,
   RowTitle,
   SectionLabel,
+  useRailSelection,
 } from './integration-ui';
 
 /** Selection key — names can collide across sources, so the key carries
@@ -120,8 +122,6 @@ function SkillRow(props: {
   skill: SkillSummary;
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   return (
     <RowShell>
       <div className="flex items-center gap-2">
@@ -135,33 +135,12 @@ function SkillRow(props: {
         >
           {props.skill.source}
         </Badge>
-        {props.skill.removable &&
-          (confirming ? (
-            <>
-              <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-                if (error) {
-                  setRemoveError(error);
-                  setConfirming(false);
-                }
-              })}>
-                Confirm
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-                Keep
-              </Button>
-            </>
-          ) : (
-            <IconButton
-              label={`Remove ${props.skill.name}`}
-              className="size-7 hover:text-danger"
-              onClick={() => setConfirming(true)}
-            >
-              <Trash2 size={13} />
-            </IconButton>
-          ))}
+        <span className="flex-1" />
+        {props.skill.removable && (
+          <RemoveControl label={`Remove ${props.skill.name}`} onRemove={props.onRemove} />
+        )}
       </div>
       <RowSub title={props.skill.description}>{props.skill.description}</RowSub>
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </RowShell>
   );
 }
@@ -173,8 +152,6 @@ function SkillPreview(props: {
   skill: SkillSummary;
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4">
       <div className="flex items-center gap-2">
@@ -189,30 +166,9 @@ function SkillPreview(props: {
           {props.skill.source}
         </Badge>
         <span className="flex-1" />
-        {props.skill.removable &&
-          (confirming ? (
-            <>
-              <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-                if (error) {
-                  setRemoveError(error);
-                  setConfirming(false);
-                }
-              })}>
-                Confirm
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-                Keep
-              </Button>
-            </>
-          ) : (
-            <IconButton
-              label={`Remove ${props.skill.name}`}
-              className="size-7 hover:text-danger"
-              onClick={() => setConfirming(true)}
-            >
-              <Trash2 size={13} />
-            </IconButton>
-          ))}
+        {props.skill.removable && (
+          <RemoveControl label={`Remove ${props.skill.name}`} onRemove={props.onRemove} />
+        )}
       </div>
       <RowSub title={props.skill.description}>{props.skill.description}</RowSub>
       {!props.skill.removable && (
@@ -220,7 +176,6 @@ function SkillPreview(props: {
           Read-only — a project skill living in this chat's workdir (.flux/skills).
         </span>
       )}
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </div>
   );
 }
@@ -234,11 +189,7 @@ export function SkillsPanel(): React.ReactElement {
   const skills = useFlux((s) => s.skills);
   const activeChatId = useFlux((s) => s.activeChatId);
   const isMobile = useIsMobile();
-
-  // Selection: a skill key or 'new' (the persistent install row).
-  const [selected, setSelected] = useState<string | 'new'>('new');
-  const touchedRef = useRef(false);
-  const removeIndexRef = useRef<number | null>(null);
+  const { selected, choose, noteRemoved } = useRailSelection(skills, keyOf);
 
   // The install-form draft lives at panel level: switching the selection
   // never loses a half-typed source.
@@ -277,37 +228,12 @@ export function SkillsPanel(): React.ReactElement {
 
   /** Shared by the preview pane and the mobile rows. */
   const remove = (name: string): Promise<string | undefined> => {
-    removeIndexRef.current = skills.findIndex((s) => s.name === name);
+    noteRemoved(name);
     return removeSkill(name).then((error) => {
       if (!error) useFlux.getState().pushToast('info', `Skill "${name}" removed`);
       return error;
     });
   };
-
-  const choose = (next: string | 'new') => {
-    touchedRef.current = true;
-    setSelected(next);
-  };
-
-  // Selection repair — same contract as ProvidersPanel (vanished selection
-  // falls to the next entry; untouched panel follows the list).
-  useEffect(() => {
-    if (touchedRef.current) {
-      if (selected !== 'new' && !skills.some((s) => keyOf(s) === selected)) {
-        const idx = removeIndexRef.current;
-        const next =
-          idx !== null && skills.length > 0 ? skills[Math.min(idx, skills.length - 1)] : undefined;
-        setSelected(next ? keyOf(next) : 'new');
-        removeIndexRef.current = null;
-      }
-      return;
-    }
-    if (skills.length > 0) {
-      if (selected !== keyOf(skills[0])) setSelected(keyOf(skills[0]));
-    } else if (selected !== 'new') {
-      setSelected('new');
-    }
-  }, [skills, selected]);
 
   const selectedSkill = selected === 'new' ? undefined : skills.find((s) => keyOf(s) === selected);
 

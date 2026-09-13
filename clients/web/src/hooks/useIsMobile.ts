@@ -1,14 +1,15 @@
 /**
- * useIsMobile — the app's ONE breakpoint (<768px, the `max-md:` regime)
- * as reactive state. Use for BEHAVIOR that CSS alone can't express (e.g.
- * different placeholder TEXT); layout stays in CSS via `max-md:` utilities.
+ * useIsMobile — the app's ONE breakpoint (<768px, the `max-md:` regime;
+ * CSS drawers match at ≤767.5px — the fractional guard) as reactive
+ * state. Use for BEHAVIOR that CSS alone can't express (e.g. different
+ * placeholder TEXT); layout stays in CSS via `max-md:` utilities.
  *
  * jsdom-safe: without matchMedia it reports false (desktop), so tests and
  * non-browser embeds get the desktop variant.
  */
 import { useEffect, useState } from 'react';
 
-const QUERY = '(max-width: 767px)';
+const QUERY = '(max-width: 767.5px)';
 
 export function useIsMobile(): boolean {
   const [isMobile, setIsMobile] = useState(

@@ -32,6 +32,17 @@ pub enum CoreError {
     #[error("provider error: {0}")]
     Provider(String),
 
+    /// An upstream HTTP failure carrying its status — the retry
+    /// classifier's input (transient statuses trigger the connection's
+    /// single re-POST). `retry_after_secs` is a parsed Retry-After header,
+    /// already clamped; None = no usable header.
+    #[error("provider HTTP {status}: {message}")]
+    ProviderStatus {
+        status: u16,
+        retry_after_secs: Option<u64>,
+        message: String,
+    },
+
     /// A tool execution error.
     #[error("tool error: {0}")]
     Tool(String),
@@ -51,7 +62,9 @@ impl CoreError {
     /// `e.error_code()` instead of keeping a parallel lookup elsewhere.
     pub fn error_code(&self) -> ErrorCode {
         match self {
-            CoreError::Provider(_) => ErrorCode::ProviderConnection,
+            CoreError::Provider(_) | CoreError::ProviderStatus { .. } => {
+                ErrorCode::ProviderConnection
+            }
             CoreError::Tool(_) => ErrorCode::ToolExecution,
             CoreError::InvalidArguments(_) => ErrorCode::InvalidArguments,
             CoreError::Internal(_) => ErrorCode::Internal,
@@ -67,6 +80,16 @@ mod tests {
     fn provider_error_display() {
         let err = CoreError::Provider("rate limited".into());
         assert_eq!(err.to_string(), "provider error: rate limited");
+    }
+
+    #[test]
+    fn provider_status_display() {
+        let err = CoreError::ProviderStatus {
+            status: 429,
+            retry_after_secs: Some(3),
+            message: "slow down".into(),
+        };
+        assert_eq!(err.to_string(), "provider HTTP 429: slow down");
     }
 
     #[test]

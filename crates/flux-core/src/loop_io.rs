@@ -47,7 +47,7 @@ pub enum LoopInput {
     ToolFinished { call: ToolCall, result: String },
     /// Control-plane barrier request: the chat layer is rebuilding the
     /// conversation engine (a connection-relevant truth source changed —
-    /// provider pin, context base, tool registry; the machine knows
+    /// provider pin or the global tool registry; the machine knows
     /// neither). At Idle the gate engages AND drains in the same step —
     /// the step emits [`LoopFact::GateReleased`] directly (nothing is
     /// running, and everything sent before the decision precedes the Hold
@@ -185,10 +185,10 @@ pub type StreamSink = std::sync::Arc<dyn Fn(StreamEvent) + Send + Sync>;
 
 /// A provider connection — one conversation's stateful session (the
 /// prefix cache). Produced by a provider's `begin`; the chat layer drives
-/// it at round boundaries. The connection lives for the engine's lifetime:
-/// a truth-source change (provider pin, tool set, context base) rebuilds
-/// the WHOLE engine (the session layer respawns it), so a connection is
-/// never mutated in place.
+/// it at round boundaries. The connection is never mutated in place: a
+/// truth-source change (provider pin, tool set) rebuilds the engine at
+/// the machine's gate — the round consumer re-begins a fresh connection
+/// over the persisted history there, and the old one drops with the swap.
 #[async_trait::async_trait]
 pub trait Connection: Send {
     async fn open(

@@ -1,7 +1,7 @@
 /**
  * Explorer.tsx — file tree for the active chat's workdir (sidebar Files tab).
  *
- * Built on react-arborist (D-25: a mature React tree with keyboard
+ * Built on react-arborist (a mature React tree with keyboard
  * navigation, virtualization and a11y — Radix has no tree). Nodes are
  * addressed by full path (id IS the path) so the tree and the right-dock
  * preview share one address space. Directories lazy-load their children
@@ -360,7 +360,7 @@ function NodeRenderer(props: NodeRendererProps<FsNode>): React.ReactElement {
       style={style}
       className={cn(
         'group flex h-full cursor-pointer items-center gap-1.5 rounded-sm px-1 pr-2',
-        'text-xs transition-colors duration-75 hover:bg-hover',
+        'text-xs transition-colors duration-fast hover:bg-hover',
         previewing && 'bg-active',
       )}
       title={git ? `${d.id} (${git.word})` : d.id}
@@ -372,7 +372,7 @@ function NodeRenderer(props: NodeRendererProps<FsNode>): React.ReactElement {
     >
       <span
         className={cn(
-          'inline-flex w-3 shrink-0 items-center justify-center text-faint transition-transform duration-150',
+          'inline-flex w-3 shrink-0 items-center justify-center text-faint transition-transform duration-fast',
           node.isOpen && 'rotate-90',
           d.kind === 'file' && 'invisible',
         )}

@@ -48,26 +48,25 @@ pub enum OpenOutcome {
     NotFound,
 }
 
+/// Failure of a fork request — the handler maps NotFound onto a transport
+/// status; everything else rides the response's inline `error` (D4').
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ForkFailure {
+    /// The source conversation does not exist.
+    NotFound,
+    /// The fork point is not a USER message row of the source chat.
+    BadPoint,
+    /// The store rejected the fork (an internal failure surfaced inline —
+    /// the source is untouched either way).
+    Internal(String),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendOutcome {
     Ok,
     /// The request carried an idempotency key (client_msg_id) this chat
     /// already accepted — the turn was absorbed, NOT enqueued again.
     Duplicate,
-    Busy,
-    NotFound,
-}
-
-/// Result of a rebase request — carries the resolved base so the wire
-/// response can echo the ACTUAL rebase point (the context_rebased stream
-/// event carries the same value).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RebaseOutcome {
-    /// Rebased; the resolved base message id.
-    Rebased(i64),
-    /// Nothing to do (no lease holder, or the base failed to
-    /// resolve/persist) — the context is unchanged and nothing echoed.
-    Noop,
     Busy,
     NotFound,
 }
@@ -119,10 +118,11 @@ impl ServerState {
     }
 
     /// Session disconnect: DETACH instead of tearing down. The
-    /// identity — and its leases — survive for the grace window waiting for
-    /// a `session_resume`; only the live connection is dropped (viewer
-    /// entries removed, so a resumed client's re-claim takes the
-    /// fresh-subscribe path and receives history).
+    /// identity — and its leases — survive for the grace window waiting
+    /// for the stream to re-open and adopt the token; only the live
+    /// connection is dropped (viewer entries removed, so a resumed
+    /// client's re-claim takes the fresh-subscribe path and receives
+    /// history).
     ///
     /// Stale-teardown guard: the detach succeeds only when `sink` is still
     /// the identity's current connection — a resume superseded it and owns
@@ -186,9 +186,9 @@ impl ServerState {
 
     /// Look up a live-or-grace-window identity by token WITHOUT attaching
     /// anything — the read-only identity resolution the Connect surface's
-    /// lease-gated RPCs use (the session token rides request metadata) and
-    /// `ResumeSession`'s no-sink variant. Returns the identity handle plus
-    /// the chats whose lease it holds.
+    /// lease-gated RPCs use (the session token rides request metadata)
+    /// and the terminal side channel's auth applies the same rule. Returns
+    /// the identity handle plus the chats whose lease it holds.
     pub async fn session_leases(&self, token: &str) -> Option<(SessionRef, Vec<String>)> {
         let chats = self.manager.chats.read().await;
         let identities = self.manager.identities.read().await;
@@ -296,13 +296,15 @@ impl ServerState {
             // holder identity, so other sessions would learn nothing new;
             // the demoted holder is told in-band instead.
             granted = holder.is_none();
-            // Claim is the single open message — the operator path
-            // no longer needs chat_open. Ordering invariant: the history
+            // Claim is the single open message — the operator path never
+            // needs a separate OpenChat. Ordering invariant: the history
             // snapshot is enqueued FIRST (the sink's content queue is
             // FIFO), then ensure_viewer activates the subscription, so
             // any live frame after it lands behind the history. The store
             // read happens under the chats write lock (milliseconds, same
-            // class as send_message's ensure_task — accepted, T-04).
+            // class as send_message's ensure_task — a two-phase split would
+            // have to re-validate the whole claim transition; not worth it
+            // for a single-user local server).
             match self.store.load_stored_messages(chat_id).await {
                 Ok(stored) => {
                     // R2: the snapshot carries the CURRENT seq (peeked) —
@@ -318,8 +320,7 @@ impl ServerState {
                                     .map(|s| {
                                         let mut m: flux_proto::flux::v1::Message = s.message.into();
                                         // The store row id — the client names
-                                        // messages by it (rebase base,
-                                        // context_rebased correlation).
+                                        // messages by it (the fork point).
                                         m.id = s.id;
                                         m
                                     })
@@ -416,27 +417,34 @@ impl ServerState {
         self.manager.grace()
     }
 
-    /// Return the lease; the subscription (if any) is kept. The client-facing
-    /// exit path was merged into `chat_close` (unsubscribe_chat releases the
-    /// lease automatically) — this method stays as an internal primitive for
-    /// tests and lifecycle logic that manipulate the lease directly.
+    /// Return the lease; the subscription (if any) is kept. The
+    /// client-facing exit path is CloseChat (unsubscribe releases the
+    /// lease automatically) — this method stays as an internal primitive
+    /// for tests and lifecycle logic that manipulate the lease directly.
     pub async fn release_chat(&self, session: &SessionRef, chat_id: &str) {
-        let released = {
-            let mut chats = self.manager.chats.write().await;
-            if let Some(chat) = chats.get_mut(chat_id)
-                && chat.lease_held_by(session)
-            {
-                chat.lease = None;
-                true
-            } else {
-                false
-            }
-        };
         // Lease released → active flips false: broadcast the list (create/
         // delete/rename already broadcast; lease changes need it too, or other
         // windows' sidebars go stale).
-        if released {
+        if self.release_lease_quiet(session, chat_id).await {
             self.broadcast_chats().await;
+        }
+    }
+
+    /// The lease-release half of [`Self::release_chat`] WITHOUT the
+    /// broadcast — for callers that fold the release into a larger
+    /// transition carrying its own `chats` broadcast (the fork: the source
+    /// lease hands over with the navigation, and attach_new_chat's
+    /// broadcast is the one truthful frame). Guards against everything
+    /// but self: a viewer-forker holds no lease; a foreign holder is
+    /// untouched.
+    async fn release_lease_quiet(&self, session: &SessionRef, chat_id: &str) -> bool {
+        let mut chats = self.manager.chats.write().await;
+        match chats.get_mut(chat_id) {
+            Some(chat) if chat.lease_held_by(session) => {
+                chat.lease = None;
+                true
+            }
+            _ => false,
         }
     }
 
@@ -460,11 +468,11 @@ impl ServerState {
     /// the viewer's queue (the claim path has always been atomic; the
     /// open path was split across the transport and could lose frames).
     /// The store read rides the write lock (milliseconds, same class as
-    /// the claim snapshot — accepted, T-04).
+    /// the claim snapshot).
     ///
     /// A repeat open by an already-subscribed viewer skips the history
     /// snapshot (idempotent — history is delivered only with the first
-    /// subscription; a `chat_close` + re-open restarts it) but re-sends
+    /// subscription; a CloseChat + re-open restarts it) but re-sends
     /// the round-state snapshot: it is cheap, and the client converges
     /// its streaming state from authority (reconnects / gap reloads /
     /// multi-window no longer drift).
@@ -499,7 +507,7 @@ impl ServerState {
                     // The open cannot fail here — the client gets the chat
                     // and the history is what failed; log it and deliver an
                     // empty snapshot so the client's render never hangs on a
-                    // missing frame (C5).
+                    // missing frame.
                     tracing::warn!(chat_id, error = %e, "failed to load chat history for open");
                     let mut el = crate::router::element(
                         chat_id,
@@ -579,14 +587,14 @@ impl ServerState {
         }
     }
 
-    /// Create a chat: persist to the store (unchanged S1/M4 guards), insert
-    /// into the cache with a fresh router, and grant the creator the lease
-    /// plus a subscription. The task is NOT spawned — first message spawns
-    /// it lazily (spec §4.1). The provider instance arrives already
-    /// resolved (the server registry selected it at the session's
-    /// `chat_create` dispatch) and is kept in the cache so every later
-    /// task spawn runs on the SAME provider; the id/model labels persist
-    /// explicitly so respawns and the UI never re-derive them.
+    /// Create a chat: persist to the store (the atomicity guards below),
+    /// insert into the cache with a fresh router, and grant the creator
+    /// the lease plus a subscription. The task is NOT spawned — first
+    /// message spawns it lazily. The provider instance arrives already
+    /// resolved (the server registry selected it at the CreateChat
+    /// dispatch) and is kept in the cache so every later task spawn runs
+    /// on the SAME provider; the id/model labels persist explicitly so
+    /// respawns and the UI never re-derive them.
     pub async fn create_chat(
         &self,
         session: &SessionRef,
@@ -637,10 +645,35 @@ impl ServerState {
         if let Err(e) = self.store.save_state_entries(&id, pin_pair).await {
             tracing::warn!(chat_id = %id, error = %e, "failed to persist provider pin");
         }
+        Ok(self
+            .attach_new_chat(session, id, name.to_owned(), created_at, workdir, pin, None)
+            .await)
+    }
+
+    /// Assemble + register a freshly created chat — the create/fork shared
+    /// tail: router spawn, the cache entry carrying the caller's LEASE,
+    /// and the authoritative chats broadcast. The viewer slot is
+    /// deliberately NOT taken here: the caller's immediate claim then
+    /// rides the resumed path (lease kept) and DELIVERS the history
+    /// snapshot — for a fork that snapshot is the whole point (the copied
+    /// transcript); for a create it is an honest empty frame.
+    /// `created_at` (a fork's creation stamp comes from its own row)
+    /// starts the chat's activity clock.
+    #[allow(clippy::too_many_arguments)]
+    async fn attach_new_chat(
+        &self,
+        session: &SessionRef,
+        id: String,
+        name: String,
+        created_at: String,
+        workdir: String,
+        pin: flux_chat::ResolvedPin,
+        forked_from: Option<String>,
+    ) -> ChatInfoOwned {
         let router = RouterHandle::spawn(id.clone(), Arc::clone(&self.manager));
         let info = ChatInfoOwned {
             chat_id: id.clone(),
-            name: name.to_owned(),
+            name: name.clone(),
             created_at: created_at.clone(),
             // A new chat's first activity is its creation.
             last_activity_at: created_at.clone(),
@@ -648,19 +681,21 @@ impl ServerState {
             workdir: workdir.clone(),
             provider: pin.id.clone(),
             model: pin.model.clone(),
+            forked_from_chat: forked_from.clone(),
         };
         {
             let mut chats = self.manager.chats.write().await;
-            let mut entry = CachedChat {
+            let entry = CachedChat {
                 seq: std::sync::atomic::AtomicU64::new(0),
-                id: id.clone(),
-                name: name.to_owned(),
+                id,
+                name,
                 created_at,
                 last_activity_at: info.last_activity_at.clone(),
                 workdir,
                 provider_id: pin.id.clone(),
                 model: pin.model.clone(),
                 provider: Some(pin.provider),
+                forked_from_chat: forked_from,
                 lease: Some(SessionRef::clone(session)),
                 viewers: HashMap::new(),
                 questions: Arc::new(flux_chat::question::QuestionBoard::new()),
@@ -668,17 +703,16 @@ impl ServerState {
                 task: None,
                 recent_msg_ids: std::collections::VecDeque::new(),
             };
-            entry.ensure_viewer(session);
-            chats.insert(id, entry);
+            chats.insert(info.chat_id.clone(), entry);
         }
         self.broadcast_chats().await;
-        Ok(info)
+        info
     }
 
     /// Gate on the lease: empty or self → proceed; another holder → Busy.
     /// Shuts down the router, aborts the running task, removes the record,
-    /// and broadcasts the list to all sessions (M14 fix). The router has
-    /// already exited (FIFO `Shutdown`), so no error frame is broadcast.
+    /// and broadcasts the list to all sessions. The router has already
+    /// exited (FIFO `Shutdown`), so no error frame is broadcast.
     pub async fn delete_chat(&self, session: &SessionRef, chat_id: &str) -> MutateOutcome {
         let task = {
             let mut chats = self.manager.chats.write().await;
@@ -973,71 +1007,92 @@ impl ServerState {
         }
     }
 
-    /// Restart from a message (rebase): rebuild the conversation context
-    /// to live only above `base`. Only the lease holder may rebase (same
-    /// gate as cancel). The base is a truth source, persisted AT REQUEST
-    /// TIME (a crash after the persist realizes the intent on resume —
-    /// the request is durable). `None` (to-latest) resolves against the
-    /// current max: messages a racing round appends AFTER the request
-    /// stay live (they are newer than the request — an explicit semantic
-    /// change from the old apply-time resolution, pinned by tests). The
-    /// engine rebuilds at the next boundary — a live round finishes
-    /// first; the respawn loads the live context above the base. No task
-    /// yet (an empty chat that never sent a message) is a Noop — there is
-    /// nothing to archive or reload. The resolved base rides
-    /// [`RebaseOutcome::Rebased`] so the wire response can echo the
-    /// ACTUAL rebase point.
-    pub async fn rebase_chat(
+    /// The source chat's persisted pin (registry id + model) — the fork
+    /// handler resolves the provider INSTANCE from it BEFORE forking, so
+    /// a dead pin refuses the fork with an inline error (mirroring
+    /// create_chat's pin gate) instead of forking into a chat that cannot
+    /// spawn.
+    pub async fn chat_pin(&self, chat_id: &str) -> Option<(String, String)> {
+        let chats = self.manager.chats.read().await;
+        chats
+            .get(chat_id)
+            .map(|c| (c.provider_id.clone(), c.model.clone()))
+    }
+
+    /// Fork a conversation from a message: a NEW chat holding a copy of
+    /// the source transcript up to but EXCLUDING `fork_point` (a USER
+    /// message row of that chat — the turn being redone; it re-enters the
+    /// fork only when the user re-sends it, whose content the client
+    /// prefills into the fork's composer), inheriting the source's workdir
+    /// and provider pin. The SOURCE chat is untouched — a fork is a
+    /// non-destructive read + create, so ANY viewer may trigger it (no
+    /// lease gate; the source needs no quiescing either, a live round
+    /// keeps running). The new chat's lease goes to the caller; the fresh
+    /// `chats` broadcast carries it to every session, and the engine
+    /// spawns lazily on the fork's first message — over the copied
+    /// transcript (a fork IS the restart-from-a-message mechanism).
+    pub async fn fork_chat(
         &self,
         session: &SessionRef,
-        chat_id: &str,
-        base: Option<i64>,
-    ) -> RebaseOutcome {
-        let resolved = {
+        source_chat_id: &str,
+        fork_point: i64,
+        pin: flux_chat::ResolvedPin,
+    ) -> Result<ChatInfoOwned, ForkFailure> {
+        // Source existence (fast path, cache) + the name the fork carries.
+        // The store's FK on forked_from_chat is the concurrent-deletion
+        // backstop behind this read.
+        let source_name = {
             let chats = self.manager.chats.read().await;
-            let Some(chat) = chats.get(chat_id) else {
-                return RebaseOutcome::NotFound;
+            let Some(chat) = chats.get(source_chat_id) else {
+                return Err(ForkFailure::NotFound);
             };
-            match &chat.lease {
-                Some(owner) if !chat.lease_held_by(session) => return RebaseOutcome::Busy,
-                // No lease holder: nobody is acting on this chat — rebasing
-                // is a mutation, so a passive viewer must not trigger it.
-                None => return RebaseOutcome::Noop,
-                Some(_) => {}
-            }
-            let resolved = match base {
-                Some(b) => b,
-                None => match self.store.max_message_id(chat_id).await {
-                    Ok(m) => m,
+            chat.name.clone()
+        };
+        let new_id = new_chat_id();
+        let data = self
+            .store
+            .fork_chat(
+                source_chat_id,
+                fork_point,
+                &new_id,
+                &format!("{source_name} (fork)"),
+            )
+            .await
+            .map_err(
+                |e| match e.downcast::<flux_store::messages::BadForkPoint>() {
+                    Ok(_) => ForkFailure::BadPoint,
                     Err(e) => {
-                        tracing::warn!(chat_id, error = %e, "failed to resolve the rebase base");
-                        return RebaseOutcome::Noop;
+                        tracing::warn!(
+                            chat_id = %source_chat_id,
+                            fork_point,
+                            error = %e,
+                            "fork failed"
+                        );
+                        ForkFailure::Internal(e.to_string())
                     }
                 },
-            };
-            if let Err(e) = self
-                .store
-                .save_state_entry(chat_id, flux_chat::CONTEXT_BASE_KEY, &resolved.to_string())
-                .await
-            {
-                tracing::warn!(chat_id, error = %e, "failed to persist the rebase base");
-                return RebaseOutcome::Noop;
-            }
-            // The archive removed every tool call at/below the base from
-            // the model's view — their buffered outputs die with them (the
-            // live context above the base is the keep-set, one SQL).
-            if let Err(e) = self.store.gc_buf_entries(chat_id, resolved).await {
-                tracing::warn!(chat_id, error = %e, "failed to gc buf entries at the rebase");
-            }
-            // The mutator announces (the engine rebuild follows within the
-            // quiesce window).
-            chat.router.try_wire(WireEvent::ContextRebased {
-                base_message_id: resolved,
-            });
-            resolved
-        };
-        self.request_restart(chat_id).await;
-        RebaseOutcome::Rebased(resolved)
+            )?;
+        // The forker navigates to the fork: the source lease hands over with
+        // the navigation — released HERE, before attach_new_chat's broadcast,
+        // so that frame is already truthful (source free) and no window
+        // renders the source In-use until the client's own CloseChat lands
+        // (its release broadcast would otherwise race the client's
+        // badge-suppression window with a stale still-leased frame). A
+        // viewer-forker holds no lease and a foreign holder is untouched
+        // (the quiet release's guard); the released subscription stays —
+        // the client's CloseChat still unsubscribes it.
+        self.release_lease_quiet(session, source_chat_id).await;
+        Ok(self
+            .attach_new_chat(
+                session,
+                new_id,
+                format!("{source_name} (fork)"),
+                data.created_at,
+                data.workdir,
+                pin,
+                Some(source_chat_id.to_owned()),
+            )
+            .await)
     }
 
     /// Broadcast the chat list to every registered session (create/delete/
@@ -1380,6 +1435,9 @@ mod tests {
             .await
             .unwrap();
         let s1 = sess(&state, "s1").await;
+        // The claim (the client's first act after create) registers the
+        // viewer slot this test exercises.
+        let _ = state.claim_chat(&s1, &info.chat_id).await;
         state.release_chat(&s1, &info.chat_id).await;
         // Releasing does not kill the subscription: s1 is still among the viewers
         assert!(

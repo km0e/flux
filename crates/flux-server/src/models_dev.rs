@@ -396,4 +396,22 @@ mod tests {
         assert!(o1.reasoning);
         assert!(!o1.temperature);
     }
+
+    /// Live TLS smoke: the workspace's reqwest feature set (rustls +
+    /// system-proxy) must reach models.dev with real roots and — when the
+    /// process runs under proxy env vars — through the proxy. Network-bound;
+    /// excluded from CI, run by hand with `cargo test -p flux-server -- --ignored`.
+    #[tokio::test]
+    #[ignore = "live network: fetches https://models.dev/api.json"]
+    async fn catalog_fetch_succeeds_over_rustls() {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(MODELS_DEV_URL)
+            .send()
+            .await
+            .expect("TLS request failed — rustls handshake or proxy env broken");
+        assert!(resp.status().is_success(), "HTTP {}", resp.status());
+        let body = resp.text().await.expect("catalog body");
+        parse_catalog(&body).expect("catalog parses");
+    }
 }

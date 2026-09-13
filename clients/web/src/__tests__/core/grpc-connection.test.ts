@@ -19,7 +19,7 @@ import {
   ModelsBroadcastSchema,
   type SubscribeResponse,
 } from '../../gen/flux/v1/events_pb';
-import { MessageSchema } from '../../gen/flux/v1/common_pb';
+import { ChatInfoSchema, MessageSchema } from '../../gen/flux/v1/common_pb';
 import {
   elementToFrame,
   reconcileElement,
@@ -449,18 +449,32 @@ describe('ConnectConnection.send (chat control translation)', () => {
     conn.dispose();
   });
 
-  it('rebase translates onto RebaseChat with the base message id', async () => {
+  it('fork translates onto ForkChat and synthesizes chat_created from the ack', async () => {
     const ready = el('', 0n, { case: 'ready', value: create(ReadySchema, { sessionId: 'tok-2' }) });
-    const { conn } = attachedConn([ready]);
-    const rebaseChat = vi.fn(async () => ({ baseMessageId: 7n }));
-    vi.spyOn(grpc.clients, 'chat', 'get').mockReturnValue({ rebaseChat } as never);
+    const { conn, frames } = attachedConn([ready]);
+    const forkChat = vi.fn(async () => ({
+      chat: create(ChatInfoSchema, {
+        chatId: 'f1',
+        name: 'src (fork)',
+        forkedFromChatId: 'c1',
+      }),
+      error: undefined,
+    }));
+    vi.spyOn(grpc.clients, 'chat', 'get').mockReturnValue({ forkChat } as never);
     conn.connect();
     await vi.waitFor(() => expect(sessionStorage.getItem('flux.session.id')).toBe('tok-2'));
-    conn.send({ type: 'rebase', chat_id: 'c1', base_message_id: 7 });
-    await vi.waitFor(() => expect(rebaseChat).toHaveBeenCalledTimes(1));
-    const [req] = rebaseChat.mock.calls[0] as unknown as [{ chatId: string; baseMessageId: bigint }];
+    conn.send({ type: 'fork', chat_id: 'c1', fork_point: 7 });
+    await vi.waitFor(() => expect(forkChat).toHaveBeenCalledTimes(1));
+    const [req] = forkChat.mock.calls[0] as unknown as [{ chatId: string; forkPoint: bigint }];
     expect(req.chatId).toBe('c1');
-    expect(req.baseMessageId).toBe(7n);
+    expect(req.forkPoint).toBe(7n);
+    await vi.waitFor(() => {
+      const created = frames.find((f) => (f as { type: string }).type === 'chat_created') as
+        | { chat: { chat_id: string; forked_from_chat_id?: string } }
+        | undefined;
+      expect(created?.chat.chat_id).toBe('f1');
+      expect(created?.chat.forked_from_chat_id).toBe('c1');
+    });
     conn.dispose();
   });
 

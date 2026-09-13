@@ -1,19 +1,19 @@
 /**
  * QuestionCard.tsx — the agent's `question` tool as an inline conversation
- * card (the web counterpart of the old host QuickPick walkthrough).
+ * card.
  *
  * Rendered INTO the active chat pane by the dialogs impl (the answer context
  * stays visible in the conversation flow). Options render as buttons; the
  * free-form input accepts any answer. The card finishes exactly once.
  *
- * Styling rides Tailwind utilities (D-25 — this is a React component, not
- * the imperative streaming DOM); the pane's `.chat-pane > * + *` rule owns
+ * Styling rides Tailwind utilities (this is a React component, not the
+ * imperative streaming DOM); the pane's `.chat-pane > * + *` rule owns
  * the outer margin.
  *
  * Provides: QuestionCard
  */
 import { useEffect, useRef, useState } from 'react';
-import { Button } from '../ui';
+import { Button, TextField } from '../ui';
 import type { ChatQuestion } from '../../services/dialogs';
 
 export function QuestionCard(props: {
@@ -67,10 +67,11 @@ export function QuestionCard(props: {
         </div>
       )}
       <div className="flex gap-2">
-        <input
+        {/* The one control language: TextField owns the input chrome. */}
+        <TextField
           ref={inputRef}
           type="text"
-          className="h-[var(--fx-control-h)] min-w-0 flex-1 rounded-md border border-border bg-inset px-2.5 text-sm text-fg placeholder:text-faint focus:border-accent focus:outline-none disabled:opacity-45"
+          className="min-w-0 flex-1 disabled:opacity-45"
           placeholder="Other… type your answer"
           value={draft}
           disabled={busy}

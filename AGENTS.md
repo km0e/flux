@@ -6,7 +6,8 @@ This file contains project-specific context for AI coding agents working on Flux
 
 | Doc | Role | Question it answers |
 |-----|------|---------------------|
-| `README.md` | What the project is, quick start | "What is this?" |
+| `README.md` | What the project is, quick start (Chinese) | "What is this?" |
+| `README-en.md` | English README (mirrors `README.md`) | English mirror |
 | `docs/architecture.md` / `architecture-en.md` | The current architecture (the "what"), with Mermaid diagrams | "How does it work inside?" |
 | `docs/decisions.md` / `decisions-en.md` | **Accepted tradeoffs** (`T-xx`) — existing compromises that are explicitly accepted and must not be "fixed" as defects | "What did we deliberately choose NOT to improve?" |
 
@@ -21,7 +22,7 @@ It is built as a Cargo workspace:
 - [`flux-macros`](crates/flux-macros/) — proc-macro for `#[derive(Tool)]`.
 - [`flux-provider`](crates/flux-provider/) — OpenAI-compatible implementation + SSE client, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`).
 - [`flux-context`](crates/flux-context/) — pure scaffold data-production (no driver/trait coupling): the pluggable scaffold information blocks (`blocks.rs` compute engines + frequency bases), `build_scaffold_text` (project profile/tree/git/conventions/decisions), and project introspection (`detector.rs`: language/build/test detection; `collector.rs`: per-source info collectors; `git.rs`: change-frequency measurement; `.flux` project config). The information-collection system's growth point — may split into `flux-project` when it outgrows this layout.
-- [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, skill, and Rust project tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
+- [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, and skill tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
 - [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: spawns external MCP servers (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
 - [`flux-store`](crates/flux-store/) — SQLite persistence layer (chats, messages, state, provider registry).
 - [`flux-loop`](crates/flux-loop/) — conversation kernel: pure state machine (`machine.rs`) + the single pump (`runtime.rs` — machine + two channels, zero I/O); the I/O vocabulary (`LoopInput`/`LoopFact`/`StreamEvent`/`StreamHandle`/`Connection`) and the tool/boundary contracts live in flux-core, the round consumer (which supervises the tool flights) is the flux-chat channel peer.
@@ -37,7 +38,7 @@ Frontend (clients/web,): React 19, zustand, Radix UI (dialog/dropdown-menu/toolt
 
 ```
 flux/
-├── proto/ # P4 spike: the wire-protocol single source of truth (.proto → codegen → flux-proto + web TS)
+├── proto/ # The wire-protocol single contract source (.proto → codegen → flux-proto + web TS)
 ├── crates/
 │ ├── flux-core/ # Contract layer (types / wire / tool / boundary / ports / Provider session factory)
 │ │ └── src/
@@ -58,14 +59,13 @@ flux/
 │ │ ├── lib.rs # Re-exports
 │ │ ├── openai.rs # OpenAI-compatible: prefix/suffix cache, SSE parsing
 │ │ └── sse.rs # SSE client + byte parser
-│ ├── flux-proto/ # P4 spike: generated protobuf/tonic contracts (build-time codegen from proto/)
+│ ├── flux-proto/ # Generated protobuf/tonic contracts (build-time codegen from proto/)
 │ ├── flux-tools/ # Built-in tool implementations
 │ │ └── src/
 │ │ ├── lib.rs # Tool registration
 │ │ ├── fs.rs # read_file, edit_file (str_replace), write_file, replace_lines, list_directory
 │ │ ├── shell.rs # bash
 │ │ ├── search.rs # glob, grep
-│ │ ├── rust.rs # rust_init, rust_verify
 │ │ ├── subprocess.rs # Shared command runner (kill-hygiene: process-group timeout)
 │ │ ├── test_util.rs # Test-only helpers (cfg(test))
 │ ├── flux-mcp/ # MCP client bridge
@@ -104,19 +104,23 @@ flux/
 │ │ ├── spawn.rs # Task assembly (ChatInit incl. questions, loop + peers wiring)
 │ │ ├── round.rs # Round consumer (fact-trace fold; Rebuild cmd → in-place gate rebuild)
 │ │ ├── tool_exec.rs # Supervised tool flights (two-tier interrupt, panic capture) — a library folded by the round consumer, no task/channel
-│ │ ├── buf.rs # Overflow buffer, store-backed (call-id-anchored, never overwritten; GC at rebase)
+│ │ ├── buf.rs # Overflow buffer, store-backed (call-id-anchored, never overwritten; fork copies)
 │ │ ├── reserved.rs # Reserved tool-name check (state_get/state_set/buf_read/question)
 │ │ ├── question.rs # `question` tool: agent-produced prompt to the user (board + tool)
 │ │ └── tests.rs # Data-plane tests (spawn/round/buf/question/domain)
 │ └── flux-server/ # Transport + Session + wiring
 │ ├── src/
 │ │ ├── main.rs # CLI entry (NO config file — flags only), DI assembly, MCP restore (DB rows, skip-with-warn), start transport
-│ │ ├── registry.rs # ProviderRegistry — DB-backed (hydrate at startup; provider_add/remove persist-first), instance building, model probes
-│ │ ├── mcp.rs # MCP launch-list management (persist-first + live apply: connect/register/unregister; McpManager; env values redacted to keys)
-│ │ ├── fsbrowse.rs # Filesystem listing/preview for the UI workdir picker (fs_list/fs_read)
+│ │ ├── registry.rs # ProviderRegistry — DB-backed (hydrate at startup; Add/RemoveProvider persist-first), instance building, model probes
+│ │ ├── mcp.rs # MCP launch-list management (persist-first + live apply: connect/register/unregister; self-healing supervisor; env values redacted to keys)
+│ │ ├── management.rs # Management-plane operations (providers/models/mcp/skills mutations — shared by the RPC shims and the MCP supervisor)
+│ │ ├── models_dev.rs # models.dev catalog fetch + (base_url, model) matching (lazy, TTL cache, best-effort)
+│ │ ├── skills.rs # Skill install/browse/remove (local dir or git URL; global dir only)
+│ │ ├── fsbrowse.rs # Filesystem listing/preview for the UI workdir picker (FsList/FsRead)
 │ │ ├── web.rs # Browser UI static site (ServeDir + CompressionLayer + SetResponseHeaderLayer security headers) on the SAME listener
-│ │ ├── events.rs # The event plane: the Subscribe stream anchors the identity (attach/adopt/detach) + keepalive pump
-│ │ └── transport.rs # Single axum server: /flux.v1.* + /ws/term + static site (configurable host, session reaper)
+│ │ ├── terminal.rs # Terminal side channel /ws/term (PTY actor, auth handshake, scrollback replay, reaper)
+│ │ ├── transport.rs # Single axum server: /flux.v1.* + /ws/term + static site (configurable host, session reaper)
+│ │ └── grpc/ # The Connect surface serialization shims: mod.rs (routes), chats.rs, events.rs (the event plane: Subscribe anchors identity + keepalive pump), fs.rs, management.rs
 │ └── tests/
 │ └── connect_e2e.rs # Connect-protocol E2E (real binary, gRPC-Web framing + the /ws/term WS client)
 ├── clients/ # npm workspace root (flux-clients; workspaces: [web])
@@ -138,16 +142,17 @@ flux/
 │ │ # carries the LOCAL model registry — saved models + models.dev metadata;
 │ │ # desktop master-detail —
 │ │ # rail + preview/form detail; mobile stacked; integration-ui = shared building blocks)
-│ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, types.ts
+│ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
 │ ├── services/ # panes, stream, stream-handler, history, dispatch, handlers,
-│ │ # code-copy, lease, fs, new-chat, dialogs (promise-shaped impls), providers, mcp, terminal
-│ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, highlight, cn (clsx+twMerge), fileIcons
+│ │ # code-copy, lease, forkDraft, fs, new-chat, dialogs (promise-shaped impls), providers, models, mcp, skills, terminal
+│ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, follow, highlight (+hljs-bundle), cn (clsx+twMerge), fileIcons, clipboard, format, id
 │ ├── styles/ # app.css (tailwind entry + @theme bridge + the flux line), tokens.css (--fx-* light-dark),
 │ │ # stream.css (imperative DOM), fonts.css (@font-face for the bundled fonts)
 │ ├── assets/fonts/ # bundled fonts (IBM Plex Sans UI voice + JetBrains Mono machine/terminal voice, OFL-1.1;
 │ │ # scripts/fetch-fonts.sh|.ps1 refreshes them from the official releases)
 │ └── logger.ts # leveled logging, pluggable sink (console default)
-├── scripts/ # .sh + .ps1 pairs: build, test, run-server, package, package-web
+├── scripts/ # .sh + .ps1 pairs: test, run-server, package-web, fetch-fonts (font asset refresh;
+│ # release packaging = dist — dist-workspace.toml + .github/workflows/release.yml)
 └── docs/
 ```
 
@@ -171,6 +176,10 @@ npm run ui-check # headless-browser e2e smoke (e2e/, needs node ≥ 22 + Chrome)
 
 # Full validation suite
 ./scripts/test.sh # fmt → clippy → cargo test → tsc → vitest → build
+
+# Release packaging (dist — single config source: dist-workspace.toml; CI runs
+# the same config tag-driven via .github/workflows/release.yml)
+dist build # local release-shaped artifact (host target: archive + web-ui + checksums)
 ```
 
 ## Architecture
@@ -194,7 +203,7 @@ Three core concepts:
 
 **Key design**: 任务归 ChatManager（session 无关）；对话权 = 每 chat 至多一个 `lease`（发消息/取消/应答 question/删除/改名需租约，他人操作被拒 → `ErrorEvent{chat_busy}` / failed_precondition status）；观看权 = `viewers` 集合（ClaimChat 隐含订阅；OpenChat 为 viewer 降级订阅，可并发）。流断开 = **detach**：租约保留一个宽限期等流重开采纳，过期由 reaper 释放（任务继续跑）。Chat IDs are UUID v4.
 
-**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / context base / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文，落在归档内）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在 base 之上的存活历史上 re-begin 连接。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
+**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在全量持久历史上 re-begin 连接。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
 
 ### Lifecycle
 
@@ -208,7 +217,7 @@ Page opens the session-scoped Subscribe stream → attach（无 token 铸新；
  → ServerState.create_chat: 建记录，租约+订阅授予创建者；任务懒创建
  → 首次发消息: ensure_task 懒 spawn Chat loop → 挂 router → WireEvent 经
  router 映射为 proto 流元素广播给 viewers（含租约持有者；R2 seq 直写 chat_seq）
- → 真相源变更（SwitchProvider / RebaseChat / MCP 增删）: 先持久化 + 公告
+ → 真相源变更（SwitchProvider / MCP 增删）: 先持久化 + 公告
  → Rebuild ctrl 命令 → 引擎在机器门原地重建（活轮次收尾 → 注册表/连接换装）
  → 切走/关闭: CloseChat（完全退出 = 退订 + 还租约）
  → 流断开 = detach：viewer 注册移除、租约保留 30s 宽限期等流重开采纳；
@@ -237,17 +246,18 @@ the contract layer.
   `ProcessingTools` (no approval state — tools execute directly). Facts
   are semantic, past-tense: `Wire(WireEvent)`, `TranscriptCommitted`,
   `ModelInputRequested`, `ToolDispatched`, `InterruptTools`,
-  `RoundState`, `RoundEnded(RoundOutcome)` — the round's semantic
-  terminal classification (Completed / Cancelled / Failed /
-  ToolEnded{call, result}), emitted at the single wrap-up point so
-  consumers fold semantics instead of scraping wire events.
+  `RoundState`, `GateReleased`, `RoundEnded(RoundOutcome)` — the round's
+  semantic terminal classification (Completed / Cancelled / Failed),
+  emitted at the single wrap-up point so consumers fold semantics
+  instead of scraping wire events.
 - **Connection** (`flux-provider`, the `Connection` trait in flux-core) —
   one stateful session per chat (the prefix cache); a single interface:
   `open(pending, sink) -> StreamHandle` pushes parsed stream events into
   the loop's input channel (drop = cancel; stall watchdog and EOF-
-  truncation detection live inside). A connection lives for the engine's
-  lifetime and is NEVER mutated in place — a truth-source change rebuilds
-  the whole engine (the session layer respawns it).
+  truncation detection live inside). A connection is never mutated in
+  place — a truth-source change lands at the machine's gate, where the
+  round consumer re-begins a fresh connection over the persisted
+  history and the old one drops with the swap.
 - **Tool flights** (`flux-chat/src/tool_exec.rs`, a library folded by the
   round consumer) — the consumer's select loop dispatches one flight at a
   time, interrupts with two tiers (cooperative `ToolCtx` token → 5s
@@ -264,8 +274,8 @@ the contract layer.
   the machine's own gate; queued turns run pre-gate, inside the
   pre-rebuild context — and at `GateReleased` rebuilds IN PLACE:
   re-assembles the registry from the current global truth, re-begins
-  the connection on the carried provider over the live history above
-  the context base, and announces `context_rebased`), and the
+  the connection on the carried provider over the full persisted
+  transcript), and the
   round-state slot write (`RoundState` → the authoritative subscription
   snapshot). The consumer never
   mutates a RUNNING round — rebuilds land only at the machine's
@@ -313,10 +323,9 @@ buf_read never overflows recursively; read-through to the store). The reference 
 self-describing and stable — the same call id sits in the transcript — so entries survive
 engine rebuilds AND process restarts with no shell handoff (the in-memory buffer is
 gone; the store is the only truth). Entries are **never overwritten** (a call id maps to
-exactly one output) and there is no generation wipe: the lifetime follows the tool call's
-visibility in the model's live context — the GC (`Store::gc_buf_entries`, one SQL) runs
-at every rebase boundary and deletes exactly the entries whose calls the
-archive removed (keep-set = tool calls above the new `context_base`); chat deletion
+exactly one output) and there is no generation wipe or GC: an entry lives exactly as
+long as its chat (a transcript only grows — there is no archive boundary); a FORK
+copies the entries of the calls its copied transcript carries; chat deletion
 cascades. Entries capped at
 1M chars with an in-buffer drop marker. Per-tool caps merged into this layer: bash 8KB and
 read_file line-length/total caps removed; grep keeps its match-window shaping (500
@@ -354,7 +363,7 @@ gap notices).
 | ChatService | CreateChat | Create (provider+model REQUIRED; inline validation error); creator gets lease+subscription |
 | | ListChats | Global list (deliberately NOT gated) |
 | | OpenChat / ClaimChat / CloseChat | Viewer open (snapshot on the stream) / operator claim — snapshot rides the identity's sink, single-point delivery; a claim ALWAYS grants (another holder's lease is STOLEN, the previous holder demoted in-band via `error{chat_busy}`); close = unsubscribe + release |
-| | SendMessage / CancelRound / RebaseChat / SwitchProvider / AnswerQuestion | User turn (queued; `client_msg_id` idempotency key — a resend is absorbed as `duplicate: true`) / cancel (stale absorbed) / rebase (persist-first; the response echoes the ACTUAL base, same value `context_rebased` carries) / hot-swap (validation rides the inline `error`; applied at the gate) / question answer (stale dropped) |
+| | SendMessage / CancelRound / ForkChat / SwitchProvider / AnswerQuestion | User turn (queued; `client_msg_id` idempotency key — a resend is absorbed as `duplicate: true`) / cancel (stale absorbed) / fork (a NEW chat copying the source transcript up to but EXCLUDING a user message — the redo turn re-enters only when re-sent, whose content the client prefills into the fork's composer; the source is untouched, any viewer may fork, the ack carries the new `ChatInfo`) / hot-swap (validation rides the inline `error`; applied at the gate) / question answer (stale dropped) |
 | | DeleteChat / RenameChat | Lease-gated mutations (statuses) |
 | EventService | Subscribe | THE stream: ready{session_id, leases} → events (below) + keepalives; close = detach |
 | SessionService | — | (deleted: resume collapsed into Subscribe, ping replaced by keepalives) |
@@ -381,7 +390,8 @@ carry seq 0 + empty chat_id):
 | `question_required {id, question}` | The model's question — priority control lane, parked until answered (re-delivered on claim) |
 | `chat_history` / `chat_state` | The claim/open snapshots THROUGH the stream (single-point delivery with the events they reconcile against) |
 | `error {code, message}` | App-level error channel (round errors, demotion, gap) |
-| `context_rebased` / `provider_switched` | Rebase landing notice (archived history) / hot-swap landing notice |
+| `provider_switched` | Hot-swap landing notice |
+| `message_persisted {id, content}` | A user message just persisted (announced at turn acceptance) — the sender's client matches `content` against its own un-id'd live user bubbles and attaches the fork affordance (the id is the ForkChatRequest.fork_point) without waiting for the next history snapshot; a cancelled turn never persisted, so its bubble never gains an id |
 | `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills` | Global broadcasts (session-level) |
 
 ### Terminal side channel (`/ws/term`)
@@ -411,12 +421,12 @@ kernel, no lease gate (same-origin trust; a UI affordance for the human).
 - Chat metadata: `insert_chat`, `list_chats`, `delete_chat`, `rename_chat`
 - Messages: `load_messages`, `append_messages`
 - State: `load_state`, `save_state_entry`
-- Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 `provider_add`/`provider_remove` 管理，**先写库后改内存**）
+- Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 AddProvider/RemoveProvider RPC 管理，**先写库后改内存**）
 - Saved models: `list_models`, `upsert_model`（**只写 params 保留 meta**）, `update_model_meta`（**只写 meta 保留 params**）, `delete_model` —— 本地模型注册表的唯一家（`(provider_id, model_id)` 主键 + `params`/`meta` 两个写权分离的 JSON 列；provider 删除级联；UI 经 `model_save`/`model_remove`/`model_sync` 管理，models.dev 填充仅在创建/刷新路径写 `meta`）
 - MCP servers: `list_mcp_servers`, `insert_mcp_server`, `delete_mcp_server` —— MCP 启动列表的唯一家（启动时 McpManager 读行连接注册，UI 管理变更 **persist-first + 即时应用**，spawn 失败的行保留、下次启动重试）
-- Buffered outputs: `save_buf_entry`, `load_buf_entry`, `gc_buf_entries` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；GC = rebase 边界删除 base 之下调用的条目；chat 删除级联）
+- Buffered outputs: `save_buf_entry`, `load_buf_entry` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；生命周期 = chat 生命周期，fork 复制其副本携带的调用条目；chat 删除级联）
 - Called from `ServerState` and `Chat`. Async `sqlx::SqlitePool`, WAL mode.
-- Hourly `PRAGMA incremental_vacuum` for maintenance.
+- Opens with `auto_vacuum = INCREMENTAL` ensured (a legacy NONE-mode database's one-time rebuild VACUUM runs at open, before the listener binds); hourly conditional `PRAGMA incremental_vacuum` (freelist ≥ 1000 pages) for maintenance — a short normal write transaction, never a whole-db VACUUM while serving.
 
 ### Web frontend architecture (clients/web)
 
@@ -586,7 +596,7 @@ card `.fx-empty-*`) which cannot carry utilities. Control primitives in
 
 | Tool | Purpose |
 |------|---------|
-| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: entry ~501 KB min / ~157 KB gzip (React + Radix + marked + app), highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~134 KB chunk on first Files-tab activation, xterm ~329 KB chunk on first terminal creation, one CSS. `dynamic import` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
+| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads just the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first Files-tab activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
 | Tailwind v4 (@tailwindcss/vite) | Utility CSS generated at build; tokens bridged via `@theme inline` (no config JS). |
 | tsc --noEmit | Type-checks all frontend source (wired into `npm run build`). |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer-capture, scrollIntoView). |
@@ -655,9 +665,11 @@ container/VM.
  surfaces at request time — index 500 + a warn log, missing assets 404. The brand icon ships
  as a verbatim build asset (`public/assets/favicon.svg` → `/assets/favicon.svg`, unhashed
  name + immutable cache — fine for a mark whose content never changes).
- The build emits one CSS (`cssCodeSplit: false`) and code-split JS chunks: entry (~501 KB) + a
+ The build emits one CSS (`cssCodeSplit: false`) and code-split JS chunks: the first-party entry
+ (~149 KB) + four always-loaded vendor groups (react/rpc/radix/markdown, ~196/~116/~96/~70 KB) + a
  highlighter chunk prefetched at bootstrap + the Files-tree chunk (first Files-tab activation)
- + the xterm chunk (~329 KB, first terminal creation).
+ + the Settings-dialog chunk (first gear click) + the xterm chunk (~329 KB, first terminal
+ creation).
 - **No workdir allowlist**: chat creation accepts ANY resolvable directory (no-allowlist trust
  model — the server runs with the starting user's permissions; isolation is the OS/container's
  job). The new-chat dialog browses the filesystem over the Connect surface (`FsList`/`FsRead`,
@@ -673,8 +685,11 @@ container/VM.
  none (WS-only, no CWD-relative repo guess). The web UI is served BY
  DEFAULT (`--no-web` runs headless); `run-server` builds the UI
  when the dist is missing and pins the repo dist via `--web-assets-dir`.
-- Packaging: `scripts/package-web.sh` assembles the servable root; `package.sh` includes it
- as `dist/web-ui`.
+- Packaging: `scripts/package-web.sh` assembles the servable root; the dist pipeline
+ (`dist-workspace.toml` → `.github/workflows/release.yml`, tag-driven) builds each target
+ natively on its runner and stages the root as `web-ui/` next to the binary inside every
+ archive (`include = ["web-ui/"]`, produced per-runner by `.github/build-setup.yml`).
+ Local release-shaped artifacts: `dist build [--target …]`.
 
 ## Working conventions
 

@@ -2,11 +2,11 @@
 //! ports / provider factory / the kernel output vocabulary. Pure types and
 //! traits, zero I/O — every implementation crate depends only on this layer.
 //!
-//! The WebSocket frame vocabulary (`ClientMessage` / `ServerMessage` / …)
-//! deliberately lives in the session layer's `protocol` module: frames are
-//! BUILT by that layer, so the vocabulary lives with its builder. What
-//! stays here is what the kernel itself produces: `WireEvent`, `ErrorCode`,
-//! `ChatStateKind`.
+//! The wire contract (`flux.v1` — the Connect surface's messages and
+//! service shapes) is generated at build time in `flux-proto` from
+//! `proto/flux/v1`; flux-session's router is the ONE place `WireEvent`
+//! maps onto it. What stays here is what the kernel itself produces:
+//! `WireEvent`, `ErrorCode`, `ChatStateKind`.
 
 mod boundary;
 mod error;
@@ -29,5 +29,7 @@ pub use loop_io::{
 pub use ports::{OutputPort, ToolPort};
 pub use provider::{ModelInfo, Provider};
 pub use tool::{BUF_READ_TOOL, QUESTION_TOOL, Tool, ToolCtx, ToolRegistry};
-pub use types::{ChatStateKind, Message, Role, StreamChunk, ToolCall, ToolDefinition};
+pub use types::{
+    ChatStateKind, INTERRUPTED_MARK, Message, Role, StreamChunk, ToolCall, ToolDefinition,
+};
 pub use wire::WireEvent;

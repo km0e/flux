@@ -16,7 +16,7 @@ pub struct ModelInfo {
 /// Stateless provider factory — cheap to clone, shared across connections.
 ///
 /// Call [`begin`](Provider::begin) to create a stateful session (a
-/// [`ProviderPort`] implementor) for a single conversation.
+/// [`Connection`] implementor) for a single conversation.
 ///
 /// The factory is cheap to build per resolution (string assembly — network
 /// state lives in the shared HTTP client it captures), which is what makes

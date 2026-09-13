@@ -37,7 +37,7 @@ function ToastItem(props: { toast: ToastEntry }): React.ReactElement {
       role={toast.kind === 'error' ? 'alert' : 'status'}
       className={cn(
         'pointer-events-auto flex w-[min(92vw,360px)] items-start gap-2 rounded-md border px-3 py-2',
-        'shadow-[var(--fx-shadow-pop)] animate-[scaleIn_140ms_var(--fx-ease-out)_both]',
+        'shadow-[var(--fx-shadow-pop)] animate-scale-in',
         toast.kind === 'error' ? 'border-danger/40 bg-elev' : 'border-border bg-elev',
       )}
     >

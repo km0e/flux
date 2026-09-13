@@ -1,9 +1,8 @@
 /**
- * NewChatDialog.tsx — filesystem browser, one dialog (D-26: the web host is
- * the only host).
+ * NewChatDialog.tsx — filesystem browser, one dialog.
  *
- * Navigate anywhere the server's user can read (`fs_list` over the WS),
- * preview directory contents and file heads (`fs_read`), then create the
+ * Navigate anywhere the server's user can read (`fs_list` over the Connect
+ * surface), preview directory contents and file heads (`fs_read`), then create the
  * chat in the browsed directory. No server-configured project list — the
  * workdir source is the filesystem itself.
  *
@@ -258,7 +257,7 @@ export function NewChatDialog(props: {
                     aria-selected="false"
                     className={cn(
                       'flex h-8 w-full cursor-pointer items-center gap-1.5 rounded-sm px-2.5 pr-2.5 text-left text-sm',
-                      'transition-colors duration-75 hover:bg-hover',
+                      'transition-colors duration-fast hover:bg-hover',
                       dir ? 'text-fg' : 'text-muted hover:text-fg',
                     )}
                     onClick={() => (dir ? openDir(e.name) : openFile(e))}

@@ -344,7 +344,7 @@ impl Stream {
                 Some(ResponseKind::StreamCancelled(_)) => "stream_cancelled",
                 Some(ResponseKind::ChatState(_)) => "chat_state",
                 Some(ResponseKind::ChatHistory(_)) => "chat_history",
-                Some(ResponseKind::ContextRebased(_)) => "context_rebased",
+                Some(ResponseKind::MessagePersisted(_)) => "message_persisted",
                 Some(ResponseKind::ProviderSwitched(_)) => "provider_switched",
                 Some(ResponseKind::Chats(_)) => "chats",
                 Some(ResponseKind::ChatCreated(_)) => "chat_created",
@@ -496,17 +496,33 @@ async fn send_idempotency_key_dedups_resends_over_the_wire() {
     assert!(!send(None).await.expect("send").duplicate);
 }
 
-/// The rebase response echoes the ACTUAL rebase point — the same value
-/// the context_rebased stream event carries.
+/// Forking over the wire: the response carries the NEW chat (named after
+/// the source, with the fork provenance), the fork's transcript holds the
+/// copied user turn, and the source is untouched.
 #[tokio::test]
-async fn rebase_response_echoes_the_actual_base() {
+async fn fork_chat_creates_a_new_chat_from_a_message() {
     let server = Server::start().await;
     let mut s = Stream::open(&server.base, None).await;
     add_default_provider(&server, s.token()).await;
-    let chat_id = create_chat(&server, s.token(), "rebase", "/tmp").await;
+    let chat_id = create_chat(&server, s.token(), "source", "/tmp").await;
 
-    // Persist one turn so a base exists (the provider endpoint is dead,
-    // but the user message lands before the round fails).
+    // Claim BEFORE acting — the same flow the real client runs (create ack
+    // → auto-select → claim): the claim registers the viewer slot, so the
+    // chat's events reach this stream from here on.
+    let _: flux_proto::flux::v1::ClaimChatResponse = unary(
+        &server.base,
+        "/flux.v1.ChatService/ClaimChat",
+        flux_proto::flux::v1::ClaimChatRequest {
+            chat_id: chat_id.clone(),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("claim");
+    s.expect_kind("chat_history").await;
+
+    // Persist one turn so a fork point exists (the provider endpoint is
+    // dead, but the user message lands before the round fails).
     let _: flux_proto::flux::v1::SendMessageResponse = unary(
         &server.base,
         "/flux.v1.ChatService/SendMessage",
@@ -520,30 +536,70 @@ async fn rebase_response_echoes_the_actual_base() {
     )
     .await
     .expect("send");
+    // The persisted announcement carries the fork point (row id).
+    let persisted = s.expect_kind("message_persisted").await;
+    let fork_point = match persisted.kind {
+        Some(ResponseKind::MessagePersisted(m)) => m.id,
+        other => panic!("expected message_persisted, got {other:?}"),
+    };
     // The round fails (dead provider) — drain the error event.
     let _ = s.expect_error(ErrorCode::ProviderConnection).await;
 
-    let resp: flux_proto::flux::v1::RebaseChatResponse = unary(
+    let resp: flux_proto::flux::v1::ForkChatResponse = unary(
         &server.base,
-        "/flux.v1.ChatService/RebaseChat",
-        flux_proto::flux::v1::RebaseChatRequest {
+        "/flux.v1.ChatService/ForkChat",
+        flux_proto::flux::v1::ForkChatRequest {
             chat_id: chat_id.clone(),
-            base_message_id: None,
+            fork_point,
         },
         Some(s.token()),
     )
     .await
-    .expect("rebase");
-    let echoed = resp
-        .base_message_id
-        .expect("the response echoes the actual rebase point");
-    assert!(echoed >= 1, "base covers the seeded message, got {echoed}");
-    // The context_rebased event carries the same value.
-    let el = s.expect_kind("context_rebased").await;
+    .expect("fork");
+    let chat = resp.chat.expect("the fork ack carries the new chat");
+    assert_eq!(chat.name, "source (fork)");
+    assert_eq!(chat.forked_from_chat_id.as_deref(), Some(chat_id.as_str()));
+    assert_ne!(chat.chat_id, chat_id);
+
+    // Claiming the fork delivers the COPIED transcript — EMPTY: the copy
+    // stops before the fork point (the redo turn re-enters the fork only
+    // when re-sent; the client prefills the composer with its content).
+    let _: flux_proto::flux::v1::ClaimChatResponse = unary(
+        &server.base,
+        "/flux.v1.ChatService/ClaimChat",
+        flux_proto::flux::v1::ClaimChatRequest {
+            chat_id: chat.chat_id.clone(),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("claim");
+    let el = s.expect_kind("chat_history").await;
     match el.kind {
-        Some(ResponseKind::ContextRebased(r)) => assert_eq!(r.base_message_id, echoed),
-        other => panic!("expected context_rebased, got {other:?}"),
+        Some(ResponseKind::ChatHistory(h)) => {
+            assert!(
+                h.messages.is_empty(),
+                "the copy excludes the fork point: {:?}",
+                h.messages
+            );
+        }
+        other => panic!("expected chat_history, got {other:?}"),
     }
+
+    // A fork point that is not a user message rides the inline error.
+    let bad: flux_proto::flux::v1::ForkChatResponse = unary(
+        &server.base,
+        "/flux.v1.ChatService/ForkChat",
+        flux_proto::flux::v1::ForkChatRequest {
+            chat_id: chat_id.clone(),
+            fork_point: fork_point + 1,
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("fork (bad point)");
+    assert!(bad.chat.is_none());
+    assert!(bad.error.is_some());
 }
 
 #[tokio::test]
@@ -618,8 +674,22 @@ async fn lease_gates_ops_and_viewers_receive_stream_errors() {
     add_default_provider(&server, a.token()).await;
     let chat_id = create_chat(&server, a.token(), "c", "/tmp").await;
 
-    // Drain a's chats broadcasts (creation fanout) so the later error reads
-    // land precisely.
+    // A claims right after creating (the real client's flow): the claim
+    // registers A's viewer slot, so the chat's events reach A's stream —
+    // and it drains the creation fanout, so the later error reads land
+    // precisely.
+    let _: flux_proto::flux::v1::ClaimChatResponse = unary(
+        &server.base,
+        "/flux.v1.ChatService/ClaimChat",
+        ClaimChatRequest {
+            chat_id: chat_id.clone(),
+        },
+        Some(a.token()),
+    )
+    .await
+    .expect("claim");
+    a.expect_kind("chat_history").await;
+
     // B subscribes as a viewer (OpenChat): the snapshot rides B's STREAM
     // (single-point delivery — history + state, never the unary response).
     let _: flux_proto::flux::v1::OpenChatResponse = unary(
@@ -1046,7 +1116,7 @@ async fn fs_list_and_fs_read_drive_the_workdir_picker() {
 
 #[tokio::test]
 async fn chat_create_requires_an_explicit_provider() {
-    // There is no server default to fall back on: a chat_create without a
+    // There is no server default to fall back on: a CreateChat without a
     // provider pin is rejected inline before any state is made.
     let server = Server::start().await;
     let s = Stream::open(&server.base, None).await;
@@ -1437,7 +1507,7 @@ async fn skills_list_reports_global_and_project_entries() {
     }
 }
 
-// ── cancel + rebase ride the same surface (lean assertions; the deep
+// ── cancel + fork ride the same surface (lean assertions; the deep
 //    round-semantics coverage lives in flux-chat's unit tests) ───────────────
 
 #[tokio::test]
@@ -1727,4 +1797,40 @@ async fn terminal_killed_by_reaper_reports_exited_to_attached_client() {
     assert!(closed, "the reaper kill never closed the socket");
     let _ = term.close(None).await;
     let _ = s.next_response().await; // stream drained before the drop
+}
+
+// ── graceful shutdown (SIGTERM → drain → clean exit) ─────────────────────
+
+/// SIGTERM must exit THROUGH the drain, not via the default terminate:
+/// the handler resolves on the first signal, the listener closes, the
+/// (here empty) drain runs, and main returns Ok — process exit code 0.
+/// Without the handler the default behavior kills the process with the
+/// signal (status.success() == false), so this assertion catches a
+/// regression where the signal handler stops being installed.
+#[cfg(unix)]
+#[tokio::test]
+async fn sigterm_exits_cleanly_through_the_drain() {
+    let mut server = Server::start().await;
+    let pid = server.child.id().expect("server pid") as i32;
+    // tokio::process has no signal API — deliver SIGTERM directly.
+    unsafe {
+        assert_eq!(libc::kill(pid, libc::SIGTERM), 0, "kill failed");
+    }
+    // No live rounds → the drain returns immediately; the ceiling only
+    // guards against a hang regression in the shutdown path.
+    let status = timeout(Duration::from_secs(30), async {
+        loop {
+            match server.child.try_wait() {
+                Ok(Some(status)) => break status,
+                Ok(None) => tokio::time::sleep(Duration::from_millis(50)).await,
+                Err(e) => panic!("wait failed: {e}"),
+            }
+        }
+    })
+    .await
+    .expect("server did not exit within 30s of SIGTERM");
+    assert!(
+        status.success(),
+        "SIGTERM must exit through the drain (code 0), got: {status}"
+    );
 }

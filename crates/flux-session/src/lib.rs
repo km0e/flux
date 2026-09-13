@@ -7,7 +7,7 @@
 //!   cache (hydrated from the store at startup, mutated in place on every
 //!   lease/viewer/swap event), and the session identity registry;
 //! - `ops`: lease/subscription bookkeeping (claim / open / send / cancel /
-//!   rebase / provider switch / question answers) + broadcast + the
+//!   provider switch / question answers) + broadcast + the
 //!   detached-session reaper;
 //! - `identity`: one client identity (`Session`/`SessionRef`) carrying its
 //!   outbound sink — the resume token, the grace window, the routing key;

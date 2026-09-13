@@ -1,5 +1,16 @@
 # e2e — headless browser UI check
 
+Two runners share one skeleton (cargo flux-server + scripted fake provider +
+headless Chrome over raw CDP — no extra dependencies):
+
+- **`ui-check.mjs`** — the regression suite (25 assertions, wired into
+  `npm run ui-check`).
+- **`shots.mjs`** — the screenshot tour (`npm run shots` → `.shots/*.png`,
+  gitignored): empty state, a live tool round, the (lazy-loaded) Settings
+  dialog, and the 390×844 mobile regime, light + dark. Design-review aid,
+  asserts nothing — its settings stop also smoke-tests the lazy dialog
+  chunk against the real built bundle.
+
 Drives the **real** Flux stack end to end in headless Chrome and asserts
 regression-sensitive UI behavior that unit tests (jsdom has no layout) and
 cargo tests (no browser) cannot see:

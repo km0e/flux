@@ -62,7 +62,7 @@ const ANNOUNCE_MAX = 512;
 /**
  * Announce sentences as they complete, scanning only the newly-appended delta
  * (plus a bounded trailing partial) instead of the whole accumulated buffer
- * on every delta (the O(n²) in the old `announceStreamFragment(raw)` call).
+ * on every delta (whole-buffer rescans are O(n²) per delta).
  */
 export function incrementallyAnnounce(delta: string): void {
   announcePending += delta;
@@ -165,7 +165,7 @@ export function handleStreamError(chatId: string, message: string): void {
 
 /** stream_gap — a slow viewer dropped frames. The transcript is already
  * persisted; re-running chat_open re-pulls history and rebuilds the
- * subscription (the resync, D-05). Presented as a clickable notice, not an
+ * subscription (the resync). Presented as a clickable notice, not an
  * error state. */
 export function handleStreamGap(chatId: string): void {
   const pane = ensurePane(chatId);
@@ -192,6 +192,42 @@ export function handleStreamGap(chatId: string): void {
   });
   pane.appendChild(el);
   scrollPaneToBottom(pane, 50);
+}
+
+// ── stale-pane marks (departure-mid-round bookkeeping) ──
+
+/** Chats whose pane DOM went stale because the session unsubscribed while a
+ * round was live (switchLease's chat_close): stream_end for that round is
+ * delivered only to subscribers, so the client's streaming flag goes stale
+ * AND the pane misses everything the round persisted after departure. The
+ * claim's history snapshot MUST re-render such a pane (the safety net's
+ * streaming skip would freeze the outdated content — the reported
+ * "renders a few messages, gets interrupted, never fully loads"), and the
+ * stale DOM must not flash while the snapshot is in flight. */
+const stalePanes = new Set<string>();
+
+/** Departure time: the pane's DOM predates the unsubscribe window. */
+export function markPaneStale(chatId: string): void {
+  stalePanes.add(chatId);
+}
+
+/** Peek — the switch path clears the stale DOM without consuming the mark
+ * (the claim's history render still needs it to override the skip). */
+export function isPaneStale(chatId: string): boolean {
+  return stalePanes.has(chatId);
+}
+
+/** Consume — the claim's history render: true means the pane is stale even
+ * if the streaming flag says otherwise; the safety net must not skip. */
+export function takePaneStale(chatId: string): boolean {
+  const stale = stalePanes.has(chatId);
+  stalePanes.delete(chatId);
+  return stale;
+}
+
+/** Test-only: the marks are module-level state (file-isolated in vitest). */
+export function _resetStalePanesForTest(): void {
+  stalePanes.clear();
 }
 
 // ── R1 interrupt-send (fused cancel + next message) ──

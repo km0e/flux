@@ -19,7 +19,7 @@ version = "0.1.0"
 edition = "2024"
 authors = ["Flux Contributors"]
 license = "MIT"
-repository = "https://github.com/kumudiaorong/flux"
+repository = "https://github.com/km0e/flux"
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }
@@ -38,9 +38,21 @@ tempfile = "3"
 
 # P4 spike — generated wire contracts (proto/ is the single source)
 flux-proto = { path = "crates/flux-proto" }
+# reqwest 0.13 made rustls the default TLS backend (default-tls = ["rustls"]);
+# native-tls was a leftover from the 0.12 era and dragged the whole OpenSSL
+# stack into the tree — fatal for cross-compilation (zigbuild/xwin paths).
+# `rustls` = rustls + aws-lc-rs provider + platform verifier (system roots).
+# `system-proxy` restores env-var/registry proxy detection (default in 0.13,
+# dropped by default-features = false) so `proxy <run>` style launches work.
 reqwest = { version = "0.13.4", default-features = false, features = [
-    "native-tls",
+    "rustls",
+    "system-proxy",
 ] }
 
 # MCP
 rmcp = { version = "3", features = ["client", "transport-child-process"] }
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

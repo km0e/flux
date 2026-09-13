@@ -26,7 +26,7 @@ use tokio::sync::oneshot;
 use tracing::warn;
 
 /// Upper bound on agent-provided options — a picker longer than this is
-/// unusable, and a runaway list would flood the QuickPick.
+/// unusable, and a runaway list would flood the question card.
 const MAX_OPTIONS: usize = 8;
 
 /// Per-chat pending-question registry. The tool registers a oneshot per
@@ -53,8 +53,8 @@ impl QuestionBoard {
     }
 
     /// Resolve the pending question `id` with `answer`. Unknown/stale ids
-    /// (answered twice, or the round died) are logged and dropped —
-    /// exactly the old non-holder/duplicate permission-response semantics.
+    /// (answered twice, or the round died) are logged and dropped — there
+    /// is no caller-actionable failure on that path.
     /// Returns whether the answer REACHED a waiting flight: a registration
     /// whose flight is already gone (cancelled round) reports `false`, so
     /// the ops layer's outcome stays honest.
@@ -114,7 +114,7 @@ struct QuestionArgs {
 }
 
 /// Result the model sees when the user dismisses the prompt (Escape /
-/// closed QuickPick). A neutral outcome — not an error — so the round
+/// closed card). A neutral outcome — not an error — so the round
 /// continues and the model decides what to do without the answer.
 const DISMISSED: &str = "(no answer: the user dismissed the question)";
 

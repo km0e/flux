@@ -58,6 +58,9 @@ impl SseClient {
 
         if !response.status().is_success() {
             let status = response.status();
+            // Retry-After must be read BEFORE the body is consumed (the
+            // bytes stream takes ownership of the response below).
+            let retry_after = parse_retry_after(response.headers().get("retry-after"));
             // Size-cap the error body read (truncated at 4KB) — never pull a
             // huge upstream error response fully into memory or the message.
             let mut buf: Vec<u8> = Vec::new();
@@ -73,13 +76,40 @@ impl SseClient {
             }
             let text = String::from_utf8_lossy(&buf);
             warn!(%status, %text, "upstream error");
-            return Err(CoreError::Provider(format!("HTTP {status}: {text}")));
+            return Err(CoreError::ProviderStatus {
+                status: status.as_u16(),
+                retry_after_secs: retry_after,
+                message: text.into_owned(),
+            });
         }
 
         trace!(status = %response.status(), "upstream connected");
 
         Ok(sse_stream(response.bytes_stream()))
     }
+}
+
+/// Upper bound on a honored Retry-After (seconds). The provider wants a
+/// retry NOW; anything past 10s of politeness is indistinguishable from
+/// “down”, and the caller's own budget is a single retry anyway.
+const MAX_RETRY_AFTER_SECS: u64 = 10;
+
+/// The transient-failure classifier: the statuses a single re-POST may
+/// fix (rate limiting, gateway pressure, server errors). Client errors
+/// (400 context overflow, 401 auth, 404 model) are deterministic — a
+/// retry burns time and returns the same answer.
+pub(crate) fn is_transient_status(status: u16) -> bool {
+    status == 408 || status == 429 || status >= 500
+}
+
+/// Parse a Retry-After header into seconds. Only the delta-seconds form
+/// is honored — HTTP-date is deliberately not (clock skew makes it
+/// unreliable, and a missing/invalid header just degrades to the fixed
+/// backoff). Clamped to [`MAX_RETRY_AFTER_SECS`].
+fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    let raw = value?.to_str().ok()?;
+    let secs: u64 = raw.trim().parse().ok()?;
+    Some(secs.min(MAX_RETRY_AFTER_SECS))
 }
 
 /// Maximum bytes buffered across the SSE line remainder and the in-progress
@@ -92,6 +122,17 @@ const MAX_SSE_BUFFER: usize = 16 * 1024 * 1024;
 /// Parse `text/event-stream` byte chunks into individual `data:` payloads.
 fn sse_stream(
     bytes: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+) -> Pin<Box<dyn Stream<Item = Result<String, CoreError>> + Send>> {
+    sse_stream_with_cap(bytes, MAX_SSE_BUFFER)
+}
+
+/// The cap-parameterized core of [`sse_stream`]. The cap is a parameter so
+/// the bounded-buffer tests can exercise the same rejection paths with a
+/// tiny cap instead of pumping the 16 MiB production constant through the
+/// stream (which alone costs ~20 s of test time).
+fn sse_stream_with_cap(
+    bytes: impl Stream<Item = reqwest::Result<Bytes>> + Send + 'static,
+    cap: usize,
 ) -> Pin<Box<dyn Stream<Item = Result<String, CoreError>> + Send>> {
     let mut remainder: Vec<u8> = Vec::new();
     let mut data_buf = String::new();
@@ -110,9 +151,9 @@ fn sse_stream(
             // Bounded buffering: a stream that never produces a newline (or a
             // payload terminator) within the cap is presumed broken — fail
             // rather than accumulate unbounded memory.
-            if remainder.len() > MAX_SSE_BUFFER {
+            if remainder.len() > cap {
                 yield Err(CoreError::Provider(format!(
-                    "SSE line buffer exceeded {MAX_SSE_BUFFER} bytes without a newline"
+                    "SSE line buffer exceeded {cap} bytes without a newline"
                 )));
                 return;
             }
@@ -135,9 +176,9 @@ fn sse_stream(
                     let data = &line[5..];
                     let data = data.strip_prefix(' ').unwrap_or(data);
                     let add = data.len() + if data_buf.is_empty() { 0 } else { 1 };
-                    if data_buf.len() + add > MAX_SSE_BUFFER {
+                    if data_buf.len() + add > cap {
                         yield Err(CoreError::Provider(format!(
-                            "SSE payload exceeded {MAX_SSE_BUFFER} bytes"
+                            "SSE payload exceeded {cap} bytes"
                         )));
                         return;
                     }
@@ -245,8 +286,11 @@ mod tests {
     async fn unbounded_line_without_newline_is_rejected() {
         // An upstream that never emits a newline must fail once the line
         // buffer exceeds the cap instead of accumulating unbounded memory.
-        let chunks = stream::repeat_with(|| ok(&[b'x'; 8192])).take(MAX_SSE_BUFFER / 8192 + 2);
-        let mut parsed = sse_stream(chunks);
+        // Driven through the cap-parameterized core with a tiny cap — the
+        // production constant (16 MiB) would make this test pump gigabytes.
+        let cap = 16 * 1024;
+        let chunks = stream::repeat_with(|| ok(&[b'x'; 8192])).take(cap / 8192 + 2);
+        let mut parsed = sse_stream_with_cap(chunks, cap);
         let first = parsed.next().await.expect("expected a terminal error");
         assert!(
             matches!(first, Err(CoreError::Provider(_))),
@@ -260,8 +304,9 @@ mod tests {
     async fn unbounded_payload_across_data_lines_is_rejected() {
         // Multiple `data:` lines joined into one payload that never gets a
         // blank-line terminator must also be bounded.
-        let chunks = stream::repeat_with(|| ok(b"data: yyyyyyyy\n")).take(MAX_SSE_BUFFER + 1);
-        let mut parsed = sse_stream(chunks);
+        let cap = 16 * 1024;
+        let chunks = stream::repeat_with(|| ok(b"data: yyyyyyyy\n")).take(cap + 1);
+        let mut parsed = sse_stream_with_cap(chunks, cap);
         let mut saw_err = false;
         while let Some(item) = parsed.next().await {
             if item.is_err() {
@@ -270,5 +315,13 @@ mod tests {
             }
         }
         assert!(saw_err, "unbounded payload must be rejected");
+    }
+
+    #[tokio::test]
+    async fn the_production_cap_is_the_16mib_constant() {
+        // The public entry point must keep wiring the production cap — a
+        // regression to something tiny would reject legitimately huge
+        // single-line payloads (e.g. a megabyte tool result inline).
+        assert_eq!(MAX_SSE_BUFFER, 16 * 1024 * 1024);
     }
 }

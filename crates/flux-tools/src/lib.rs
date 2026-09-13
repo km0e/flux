@@ -4,7 +4,6 @@
 //! - `fs` — file system (read, write, list)
 //! - `search` — pattern matching (grep, glob)
 //! - `shell` — command execution
-//! - `rust` — Rust/Cargo project tooling
 //! - `skills` — Agent Skills packages (skill_list / skill_read, lazy loading)
 //! - `subprocess` — shared kill-hygiene subprocess runner (internal)
 //!
@@ -14,7 +13,6 @@
 //! AGENTS.md).
 
 mod fs;
-mod rust;
 mod search;
 mod shell;
 mod skills;
@@ -24,12 +22,10 @@ mod subprocess;
 pub(crate) mod test_util;
 
 pub use fs::{EditFileTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool, WriteFileTool};
-pub use rust::{RustInitTool, RustVerifyTool};
 pub use search::{GlobTool, GrepTool};
 pub use shell::BashTool;
 pub use skills::{SkillEntry, SkillListTool, SkillReadTool, discover_skills, validate_skill_dir};
 
-use flux_core::CoreError;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use tracing::warn;
@@ -63,21 +59,20 @@ pub(crate) fn format_command_output(
     result.trim_end().to_string()
 }
 
-/// Require a non-empty workdir — the sandbox boundary. Restores the
-/// pre-derive contract where a missing workdir was `InvalidArguments`
-/// instead of silently falling back to the server process's cwd.
-pub(crate) fn require_workdir(wd: &Path) -> Result<(), CoreError> {
-    if wd.as_os_str().is_empty() {
-        return Err(CoreError::InvalidArguments("workdir is required".into()));
-    }
-    Ok(())
-}
-
 /// Walk a directory tree non-recursively (explicit stack to avoid overflow).
 /// Tracks visited paths to prevent infinite loops from symlink cycles.
 /// Permission errors on individual directories are logged and skipped.
 /// Entries whose canonical path falls outside the root (via symlinks) are
 /// silently skipped so the walk cannot escape the workdir.
+///
+/// Per-entry cost is one `DirEntry::file_type()` (free on most filesystems —
+/// readdir's d_type, no extra syscall). Only SYMLINKS pay a `canonicalize`
+/// (realpath = a stat chain over every path component): a non-symlink entry
+/// reached through a canonical parent is lexically inside the root and
+/// cannot escape, so the old per-entry realpath (which dominated grep/glob
+/// on large trees) is gone. Entries the callback receives are identical to
+/// what the old canonicalize-per-entry walk produced: canonical parent +
+/// plain component, or the symlink's resolved target.
 pub(crate) fn walk_dir(
     root: &Path,
     f: &mut dyn FnMut(&Path) -> Result<bool, std::io::Error>,
@@ -87,16 +82,14 @@ pub(crate) fn walk_dir(
         f(&root_real)?;
         return Ok(());
     }
-    let mut dirs: Vec<std::path::PathBuf> = vec![root_real.clone()];
+    let mut dirs: Vec<PathBuf> = vec![root_real.clone()];
     let mut visited: HashSet<PathBuf> = HashSet::new();
     while let Some(dir) = dirs.pop() {
-        // Resolve the canonical path to detect symlink cycles
-        let real = match dir.canonicalize() {
-            Ok(p) => p,
-            Err(_) => continue,
-        };
-        if !visited.insert(real.clone()) {
-            continue; // already visited — skip symlink cycle
+        // Canonical-path dedup at pop time: `dirs` holds canonical paths
+        // only (lexical under a canonical parent == canonical; symlinked
+        // dirs are pushed as their resolved, containment-checked target).
+        if !visited.insert(dir.clone()) {
+            continue; // already visited — skip symlink cycle / duplicate
         }
         let entries = match std::fs::read_dir(&dir) {
             Ok(e) => e,
@@ -106,18 +99,32 @@ pub(crate) fn walk_dir(
             }
         };
         for entry in entries.filter_map(|e| e.ok()) {
-            let path = entry.path();
-            // Symlink containment check
-            let real = match path.canonicalize() {
-                Ok(p) => p,
-                Err(_) => continue,
+            let Ok(ft) = entry.file_type() else {
+                continue; // racing delete / exotic fs — skip
             };
-            if !real.starts_with(&root_real) {
-                continue; // symlink escapes workdir — skip
-            }
-            if real.is_dir() {
-                dirs.push(real);
-            } else if real.is_file() && !f(&real)? {
+            let path = entry.path(); // canonical parent + plain name
+            let (path, ft) = if ft.is_symlink() {
+                // The only component that can move the path outside the
+                // root (or create a cycle): resolve the target, re-check
+                // containment, and classify the TARGET. Dangling links
+                // cannot be classified — skip (matches the old
+                // canonicalize-failure skip).
+                let Ok(real) = path.canonicalize() else {
+                    continue;
+                };
+                if !real.starts_with(&root_real) {
+                    continue; // symlink escapes workdir — skip
+                }
+                let Ok(meta) = real.symlink_metadata() else {
+                    continue; // racing delete — skip
+                };
+                (real, meta.file_type())
+            } else {
+                (path, ft)
+            };
+            if ft.is_dir() {
+                dirs.push(path);
+            } else if ft.is_file() && !f(&path)? {
                 return Ok(());
             }
         }
@@ -130,28 +137,6 @@ mod tests {
     use super::*;
     use std::fs;
     use tempfile::tempdir;
-
-    #[cfg(unix)]
-    #[test]
-    fn resolve_path_rejects_dangling_symlink() {
-        // The boundary-resolution security tests live in flux-core
-        // (boundary module — the function's new home); this one stays as a
-        // flux-tools-visible smoke check of the migration.
-        use std::os::unix::fs::symlink;
-        let dir = tempdir().unwrap();
-        let outside = dir.path().join("outside_target.txt");
-        let link = dir.path().join("link");
-        symlink(&outside, &link).unwrap();
-        let ctx = flux_core::ToolCtx {
-            workdir: dir.path().to_path_buf(),
-            ..Default::default()
-        };
-        let result = ctx.resolve("link");
-        assert!(
-            result.is_err(),
-            "dangling symlink must be denied, got: {result:?}"
-        );
-    }
 
     #[test]
     fn walk_dir_finds_files() {

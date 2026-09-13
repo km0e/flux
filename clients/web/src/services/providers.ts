@@ -2,8 +2,8 @@
  * providers.ts — provider discovery, management + hot-swap client.
  *
  * Direct gRPC-Web calls (the ProviderService RPCs): replies pair natively
- * over HTTP — the old value-matched AckWait correlation is gone. The
- * probe publishes into the store through the SAME handler the broadcast
+ * over HTTP. The probe publishes into the store through the SAME handler
+ * the broadcast
  * frames use, so the pickers keep reading the cache and never probe ad
  * hoc. Inline errors ride the promise; the fresh-registry broadcast
  * arrives on the stream (the `providers` frame handler stays

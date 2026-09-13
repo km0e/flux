@@ -3,7 +3,8 @@
  */
 import { describe, it, expect } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { UsageStats, fmtTokens } from '../../components/UsageStats';
+import { UsageStats } from '../../components/UsageStats';
+import { fmtTokens } from '../../lib/format';
 import type { UsageTotals } from '../../core/state';
 
 const TOTALS: UsageTotals = {

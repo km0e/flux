@@ -15,8 +15,8 @@
     <meta name="theme-color" media="(prefers-color-scheme: light)" content="#f4f6f5" />
     <meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0c1013" />
     <!-- Installable as a standalone web app. No service worker on purpose:
-         the app is bound to its server (WS + all data) — offline caching
-         only risks serving stale hashed assets. -->
+         the app is bound to its server (Connect plane + all data) —
+         offline caching only risks serving stale hashed assets. -->
     <link rel="manifest" href="/manifest.webmanifest" />
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
@@ -36,8 +36,10 @@
       } catch (e) {}
     </script>
   </head>
-  <!-- The WS endpoint is derived from the page origin (same-origin /ws on
-       the port that served this page) — no injected config needed. -->
+  <!-- The chat plane is Connect (gRPC-Web, same-origin HTTP on the port
+       that served this page); the only WebSocket is the /ws/term terminal
+       side channel — both derive from the page origin, no injected config. -->
+  <body>
     <div id="app"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

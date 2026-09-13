@@ -13,42 +13,67 @@
  *
  * Desktop: master-detail — a selection rail (a persistent "+ New server"
  * row above the entries) and a detail pane that either previews the
- * selected entry (launch line, env keys, the restart footnote, remove)
- * or carries the creation form with the full explanation. Mobile keeps
+ * selected entry (launch line, env keys, live state, remove) or carries
+ * the creation form with the full explanation. Mobile keeps
  * the stacked layout (hint, notice, rows with inline actions, form). The
  * form draft lives at panel level, so switching the selection never
  * loses a half-typed entry; after a successful add the new entry is
  * auto-selected once its broadcast lands.
  *
  * Presentation shares the integration-ui building blocks with
- * ProvidersPanel / SkillsPanel — one typography scale and spacing rhythm.
+ * ProvidersPanel / SkillsPanel — one typography scale, one spacing
+ * rhythm, one two-step-remove control, one rail-selection repair.
  *
  * Provides: McpPanel
  * Depends: core/state.ts, services/mcp.ts, hooks/useIsMobile.ts,
  *          components/ui/*, components/dialogs/integration-ui.tsx
  */
-import { useEffect, useRef, useState } from 'react';
-import { Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
 import { useFlux } from '../../core/state';
 import { addMcpServer, fetchMcpServers, removeMcpServer } from '../../services/mcp';
 import { useIsMobile } from '../../hooks/useIsMobile';
-import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
+import { Badge, Button, Spinner, TextArea, TextField } from '../ui';
 import {
   DetailPane,
   DialogHint,
   EmptyState,
-  FormArea,
   FormField,
   MasterDetail,
   NewRailButton,
   NoticeBar,
   Rail,
   RailButton,
+  RemoveControl,
   RowShell,
   RowSub,
   RowTitle,
   SectionLabel,
+  useRailSelection,
 } from './integration-ui';
+
+/** The rail selection key of one server row (stable reference). */
+const keyOf = (s: McpServerSummary): string => s.id;
+
+/** The self-healing supervisor's view of one entry — a colored dot plus
+ * the state word (Backoff/Offline are the interesting ones; Running is
+ * the quiet default). */
+function StateBadge({ state }: { state: McpState }): React.ReactElement {
+  const tone =
+    state === 'running'
+      ? 'bg-success'
+      : state === 'backoff'
+        ? 'bg-warn'
+        : 'bg-faint';
+  const label = state === 'unspecified' ? 'unknown' : state;
+  return (
+    <span className="inline-flex items-center gap-1 text-2xs text-muted" title={`Self-healing state: ${label}`}>
+      <span className={`inline-block size-1.5 rounded-full ${tone}`} aria-hidden />
+      {label}
+    </span>
+  );
+}
+
+import type { McpServerSummary, McpState } from '../../core/types';
 
 /** Parse a "one per line" textarea into a trimmed non-empty list. */
 function parseLines(text: string): string[] {
@@ -109,7 +134,7 @@ function McpForm(props: {
         </FormField>
       </div>
       <FormField label="Arguments" hint="one per line">
-        <FormArea
+        <TextArea
           aria-label="Arguments"
           rows={4}
           placeholder={'-y\n@modelcontextprotocol/server-filesystem\n/path/to/workspace'}
@@ -118,7 +143,7 @@ function McpForm(props: {
         />
       </FormField>
       <FormField label="Environment" hint="KEY=VALUE per line — values stored, never shown back">
-        <FormArea
+        <TextArea
           aria-label="Environment"
           rows={3}
           placeholder="SOME_VAR=value"
@@ -143,46 +168,24 @@ function McpRow(props: {
   command: string;
   args: string[];
   envKeys: string[];
+  state: McpState;
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   const launch = [props.command, ...props.args].join(' ');
   return (
     <RowShell>
       <div className="flex items-center gap-2">
         <RowTitle>{props.id}</RowTitle>
+        <StateBadge state={props.state} />
         {props.envKeys.map((k) => (
           <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
             {k}
           </Badge>
         ))}
-        {confirming ? (
-          <>
-            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-              if (error) {
-                setRemoveError(error);
-                setConfirming(false);
-              }
-            })}>
-              Confirm
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </>
-        ) : (
-          <IconButton
-            label={`Remove ${props.id}`}
-            className="size-7 hover:text-danger"
-            onClick={() => setConfirming(true)}
-          >
-            <Trash2 size={13} />
-          </IconButton>
-        )}
+        <span className="flex-1" />
+        <RemoveControl label={`Remove ${props.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={launch}>{launch}</RowSub>
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </RowShell>
   );
 }
@@ -194,47 +197,23 @@ function McpPreview(props: {
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
   const server = useFlux((s) => s.mcpServers.find((x) => x.id === props.id));
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   if (!server) return <EmptyState>Server removed.</EmptyState>;
   const launch = [server.command, ...server.args].join(' ');
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4">
       <div className="flex items-center gap-2">
         <RowTitle>{server.id}</RowTitle>
+        <StateBadge state={server.state} />
         {server.env_keys.map((k) => (
           <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
             {k}
           </Badge>
         ))}
         <span className="flex-1" />
-        {confirming ? (
-          <>
-            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-              if (error) {
-                setRemoveError(error);
-                setConfirming(false);
-              }
-            })}>
-              Confirm
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </>
-        ) : (
-          <IconButton
-            label={`Remove ${server.id}`}
-            className="size-7 hover:text-danger"
-            onClick={() => setConfirming(true)}
-          >
-            <Trash2 size={13} />
-          </IconButton>
-        )}
+        <RemoveControl label={`Remove ${server.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={launch}>{launch}</RowSub>
       <span className="text-2xs text-faint">Applies live — running conversations pick the tools up when their current round ends.</span>
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </div>
   );
 }
@@ -247,12 +226,7 @@ const HINT =
 export function McpPanel(): React.ReactElement {
   const servers = useFlux((s) => s.mcpServers);
   const isMobile = useIsMobile();
-
-  // Selection: a server id or 'new' (the persistent creation row).
-  const [selected, setSelected] = useState<string | 'new'>('new');
-  const touchedRef = useRef(false);
-  const removeIndexRef = useRef<number | null>(null);
-  const pendingSelectRef = useRef<string | null>(null);
+  const { selected, choose, markPending, noteRemoved } = useRailSelection(servers, keyOf);
 
   // The creation-form draft lives at panel level: switching the selection
   // never loses a half-typed entry.
@@ -279,16 +253,15 @@ export function McpPanel(): React.ReactElement {
     setAdding(true);
     setAddError(null);
     const added = id.trim();
-    pendingSelectRef.current = added;
     void addMcpServer({ id, command, args: parseLines(argsText), env }).then((addErr) => {
       setAdding(false);
       if (addErr) {
-        pendingSelectRef.current = null;
         setAddError(addErr);
         return;
       }
       // Success: the broadcast refreshes the list (and lands the pending
       // selection) — reset the form.
+      markPending(added);
       setId('');
       setCommand('');
       setArgsText('');
@@ -299,49 +272,14 @@ export function McpPanel(): React.ReactElement {
 
   /** Shared by the preview pane and the mobile rows. */
   const remove = (sid: string): Promise<string | undefined> => {
-    removeIndexRef.current = servers.findIndex((s) => s.id === sid);
+    noteRemoved(sid);
     return removeMcpServer(sid).then((error) => {
       if (!error) useFlux.getState().pushToast('info', `MCP server "${sid}" removed — applied to new rounds`);
       return error;
     });
   };
 
-  const choose = (next: string | 'new') => {
-    touchedRef.current = true;
-    setSelected(next);
-  };
-
-  // Selection repair — same contract as ProvidersPanel (pending add
-  // self-select, vanished selection falls to the next entry, untouched
-  // panel follows the list).
-  useEffect(() => {
-    if (pendingSelectRef.current) {
-      const want = pendingSelectRef.current;
-      if (servers.some((s) => s.id === want)) {
-        touchedRef.current = true;
-        setSelected(want);
-        pendingSelectRef.current = null;
-      }
-      return;
-    }
-    if (touchedRef.current) {
-      if (selected !== 'new' && !servers.some((s) => s.id === selected)) {
-        const idx = removeIndexRef.current;
-        const next =
-          idx !== null && servers.length > 0 ? servers[Math.min(idx, servers.length - 1)] : undefined;
-        setSelected(next ? next.id : 'new');
-        removeIndexRef.current = null;
-      }
-      return;
-    }
-    if (servers.length > 0) {
-      if (selected !== servers[0].id) setSelected(servers[0].id);
-    } else if (selected !== 'new') {
-      setSelected('new');
-    }
-  }, [servers, selected]);
-
-  const selectedServer = selected === 'new' ? undefined : servers.find((s) => s.id === selected);
+  const selectedServer = selected === 'new' ? undefined : servers.find((s) => keyOf(s) === selected);
 
   // ── Mobile: the stacked layout (hint, notice, rows, form) ──
   if (isMobile) {
@@ -359,7 +297,7 @@ export function McpPanel(): React.ReactElement {
           ) : (
             <ul aria-label="MCP servers" className="m-0 flex list-none flex-col gap-2 p-0">
               {servers.map((s) => (
-                <McpRow key={s.id} id={s.id} command={s.command} args={s.args} envKeys={s.env_keys} onRemove={() => remove(s.id)} />
+                <McpRow key={s.id} id={s.id} command={s.command} args={s.args} envKeys={s.env_keys} state={s.state} onRemove={() => remove(s.id)} />
               ))}
             </ul>
           )}

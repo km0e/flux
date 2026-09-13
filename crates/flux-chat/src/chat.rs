@@ -21,8 +21,8 @@ use tracing::warn;
 
 /// Shared context the adapter's tool execution works over.
 ///
-/// Cancellation rides the input channel as a plain `Input::Cancel` event
-/// (Model E); this struct only carries what the ports need.
+/// Cancellation rides the input channel as a plain [`LoopInput::Cancel`]
+/// event; this struct only carries what the ports need.
 pub(crate) struct Chat {
     pub(crate) id: String,
     /// Arc so the state tools (registered in this chat's registry) can
@@ -35,13 +35,18 @@ pub(crate) struct Chat {
 impl Chat {
     // ── Persistence helpers ───────────────────────────────────────────
 
-    /// Persist messages to the store. Logs a warning on failure (non-fatal).
-    pub(crate) async fn persist_messages(&self, messages: &[Message]) {
+    /// Persist messages to the store, returning the assigned row ids (empty
+    /// on failure — logged, non-fatal, the ids' consumers just skip).
+    pub(crate) async fn persist_messages(&self, messages: &[Message]) -> Vec<i64> {
         if messages.is_empty() {
-            return;
+            return Vec::new();
         }
-        if let Err(e) = self.store.append_messages(&self.id, messages).await {
-            warn!(chat_id = %self.id, error = %e, "failed to persist messages");
+        match self.store.append_messages(&self.id, messages).await {
+            Ok(ids) => ids,
+            Err(e) => {
+                warn!(chat_id = %self.id, error = %e, "failed to persist messages");
+                Vec::new()
+            }
         }
     }
 
@@ -49,19 +54,31 @@ impl Chat {
     /// whole (anchored to the producing tool call, readable via `buf_read`)
     /// and replaced by a bounded head plus a reference. One place covers
     /// every tool — bash, grep, read_file, MCP, and anything registered
-    /// later. The reference IS the call id — self-describing, stable across
-    /// rebuilds and restarts (the store persists it), and the GC at a
-    /// rebase boundary deletes exactly the entries whose calls the
-    /// archive removed from the model's view.
+    /// later. The reference IS the call id — self-describing and stable
+    /// across rebuilds and restarts (the store persists it), and a fork
+    /// copies the entries of the calls its copied transcript carries, so
+    /// `buf_read` references stay resolvable in the new chat.
     pub(crate) async fn bounded_output(&self, call_id: &str, result: &str) -> String {
         const INLINE_BUDGET: usize = 8000;
+        // Byte fast path: bytes bound chars — results within the budget in
+        // bytes are within it in chars, so the common case skips the O(n)
+        // char walk entirely (every tool result passes through here).
+        if result.len() <= INLINE_BUDGET {
+            return result.to_string();
+        }
         let total = result.chars().count();
         if total <= INLINE_BUDGET {
             return result.to_string();
         }
         buf::store_overflow(&self.store, &self.id, call_id, result).await;
-        let head: String = result.chars().take(INLINE_BUDGET).collect();
-        let mut out = head;
+        // Head slice at the budget's char boundary — one walk, no per-char
+        // collect.
+        let head_end = result
+            .char_indices()
+            .nth(INLINE_BUDGET)
+            .map_or(result.len(), |(i, _)| i);
+        let mut out = String::with_capacity(head_end + 192);
+        out.push_str(&result[..head_end]);
         out.push_str("\n\n--- output truncated (");
         out.push_str(&total.to_string());
         out.push_str(" chars total) — full output buffered under call \"");
@@ -103,17 +120,10 @@ impl ToolPort for Chat {
             format!("Error: {e}")
         });
         // The overflow reference IS the call id (ToolCtx carries the
-        // kernel-assigned id) — anchored, persisted, GC-aligned.
+        // kernel-assigned id) — anchored, persisted, never overwritten.
         self.bounded_output(&ctx.call_id, &result).await
     }
 }
-
-/// Context-base key: the first message id that belongs to the CURRENT live
-/// context. Messages at/below it are archived (never re-sent). Written by
-/// the session layer at a rebase request; read back on every engine
-/// (re)build — the connection always begins over the live context ABOVE
-/// the base, never the archive.
-pub const CONTEXT_BASE_KEY: &str = "context_base";
 
 // ── ResolvedPin ─────────────────────────────────────────────────────────
 

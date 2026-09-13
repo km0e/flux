@@ -11,8 +11,8 @@
 //!
 //! - **Auth**: the auth frame's `session` must name a resolvable identity
 //!   (live, or detached within the grace window) — the same adoptability
-//!   rule `session_resume` applies; terminals never adopt, they only
-//!   validate.
+//!   rule the Subscribe stream's attach applies; terminals never adopt,
+//!   they only validate.
 //! - **Reattach (session identity reuse)**: on page refresh the socket
 //!   dies but the PTY stays alive. The new socket re-attaches by terminal
 //!   id (`term` param, remembered in the client's sessionStorage); the
@@ -343,8 +343,14 @@ async fn run_pty(
     } = pty;
     info!(term = %term_id, ?shell_pid, "terminal spawned");
 
-    let mut buf = vec![0u8; 8192];
-    let mut scrollback: std::collections::VecDeque<Vec<u8>> = std::collections::VecDeque::new();
+    // Read into a reusable BytesMut: each read freezes the filled prefix
+    // into one shared `Bytes` that serves BOTH the scrollback and the
+    // socket send — a refcount clone, not two per-read copies (terminal
+    // output is the highest-frequency byte path in the server).
+    const READ_BUF: usize = 8192;
+    let mut read_buf = bytes::BytesMut::with_capacity(READ_BUF);
+    let mut scrollback: std::collections::VecDeque<bytes::Bytes> =
+        std::collections::VecDeque::new();
     let mut scrollback_bytes: usize = 0;
     // The terminal's lifecycle ENDS with its shell: on exit the client is
     // told (Exited frame) and the socket is closed (no zombie channel into
@@ -357,6 +363,10 @@ async fn run_pty(
         }
     };
     loop {
+        // Restore the read window: split_to consumed last round's prefix,
+        // so the buffer's len is 0 — without this the next read() would see
+        // an empty slice and misreport EOF.
+        read_buf.resize(READ_BUF, 0);
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
                 None | Some(TermCmd::Kill) => {
@@ -392,12 +402,12 @@ async fn run_pty(
                     // glyph of cosmetic risk at the very top of the replay.
                     for chunk in &scrollback {
                         if let Some(o) = &out {
-                            let _ = o.send(Message::Binary(chunk.clone().into()));
+                            let _ = o.send(Message::Binary(chunk.clone()));
                         }
                     }
                 }
             },
-            n = reader.read(&mut buf) => match n {
+            n = reader.read(read_buf.as_mut()) => match n {
                 Ok(0) | Err(_) => {
                     // EOF — the child (or its last slave holder) is gone.
                     // `select!` may hand THIS arm the win while the exit is
@@ -415,22 +425,20 @@ async fn run_pty(
                     // Capture ALWAYS (attached or not): the buffer is what a
                     // reattach replays, so output written while detached
                     // (a page refresh, a background tab) survives.
-                    scrollback.push_back(buf[..n].to_vec());
+                    let chunk = read_buf.split_to(n).freeze();
+                    scrollback.push_back(chunk.clone());
                     scrollback_bytes += n;
+                    // Trim by whole chunks — `Bytes` is immutable (shared
+                    // with the socket sends), so no partial front-drain.
+                    // The overshoot is bounded by one read chunk (8 KiB).
                     while scrollback_bytes > SCROLLBACK_CAP {
-                        if let Some(oldest) = scrollback.front_mut() {
-                            let take = oldest.len().min(scrollback_bytes - SCROLLBACK_CAP);
-                            oldest.drain(..take);
-                            scrollback_bytes -= take;
-                            if oldest.is_empty() {
-                                scrollback.pop_front();
-                            }
-                        } else {
-                            scrollback_bytes = 0;
+                        match scrollback.pop_front() {
+                            Some(oldest) => scrollback_bytes -= oldest.len(),
+                            None => scrollback_bytes = 0,
                         }
                     }
                     if let Some(o) = &out
-                        && o.send(Message::Binary(buf[..n].to_vec().into())).is_err()
+                        && o.send(Message::Binary(chunk)).is_err()
                     {
                         out = None; // socket gone — detach, keep the PTY
                     }

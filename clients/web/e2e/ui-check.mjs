@@ -18,6 +18,9 @@
  *      subscriptions); scrolling up reveals the button reactively.
  *   4. The streaming pipeline itself — a tool round (SSE → kernel → WS →
  *      imperative DOM) produces a completed tool card with its result.
+ *   5. Fork semantics — the copy EXCLUDES the fork point (the redo turn):
+ *      the forked pane carries no copied messages and its composer opens
+ *      prefilled with the forked message's content.
  *
  * Usage:
  *   npm run ui-check          (from clients/web)
@@ -482,6 +485,66 @@ async function main() {
     'tool round wrap-up',
   );
   check('tool round completes (SSE → kernel → WS → DOM)', true);
+
+  // 4.5 Fork, LIVE path: the user message persisted announcement
+  // (`message_persisted`) must attach the fork affordance to the sender's
+  // own bubble WITHOUT a history reload — clicking it forks a NEW chat
+  // from that message (no confirm: the source is untouched).
+  await waitFor(
+    `!!document.querySelector('.chat-pane .message.user .msg-fork')`,
+    'live fork affordance',
+  );
+  check('live user bubble gains the fork affordance without a reload', true);
+  await evalJs(
+    `document.querySelector('.chat-pane .message.user .msg-fork').click()`,
+  );
+  // The fork ack's chat_created auto-selects the new conversation; its
+  // name carries the fork lineage.
+  await waitFor(
+    `(document.getElementById('chat-header')?.textContent ?? '').includes('(fork)')`,
+    'forked chat header',
+  );
+  check('forking opens the new conversation (source untouched)', true);
+  // The copy EXCLUDES the fork point (it is the redo turn): the forked
+  // pane carries no copied messages and its composer opens prefilled
+  // with the forked message's content.
+  await sleep(300); // the claim snapshot + the composer's draft consume
+  const forkState = JSON.parse(
+    await evalJs(`(() => {
+      const pane = [...document.querySelectorAll('.chat-pane')]
+        .find((p) => p.style.display !== 'none');
+      const ta = document.getElementById('input');
+      return JSON.stringify({
+        empty: !(pane?.textContent ?? '').includes('run the demo tool please'),
+        draft: ta?.value === 'run the demo tool please',
+      });
+    })()`),
+  );
+  check(
+    'fork copy excludes the fork point; composer prefills the redo turn',
+    forkState.empty && forkState.draft,
+    JSON.stringify(forkState),
+  );
+  // The source lease handed over with the navigation: the fork's chats
+  // broadcast already carries the source free — no row flashes In-use.
+  const noInUse = JSON.parse(
+    await evalJs(
+      `JSON.stringify([...document.querySelectorAll('#conversation-list [role="button"]')]
+         .every((row) => !row.textContent.includes('In use')))`,
+    ),
+  );
+  check('no In-use badge after forking (the source lease handed over)', noInUse === true);
+  // Switch BACK to the source conversation — the following overflow checks
+  // exercise the pane that carries the demo tool cards.
+  await evalJs(
+    `[...document.querySelectorAll('#conversation-list [role="button"]')]
+       .find((row) => !row.textContent.includes('(fork)'))
+       ?.click()`,
+  );
+  await waitFor(
+    `!(document.getElementById('chat-header')?.textContent ?? '').includes('(fork)')`,
+    'back on the source chat',
+  );
 
   // 5. THE BUG: overflow the pane — tool cards must not collapse into lines.
   await evalJs(`(() => {

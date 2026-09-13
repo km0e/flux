@@ -109,10 +109,7 @@ where
             "/flux.v1.ChatService/CancelRound",
             post_service(chats.clone()),
         )
-        .route(
-            "/flux.v1.ChatService/RebaseChat",
-            post_service(chats.clone()),
-        )
+        .route("/flux.v1.ChatService/ForkChat", post_service(chats.clone()))
         .route(
             "/flux.v1.ChatService/SwitchProvider",
             post_service(chats.clone()),
@@ -310,11 +307,9 @@ pub(crate) mod test_support {
         // servers — the apply fails into the inline error path.
         let connect: crate::mcp::Connect =
             Arc::new(|_cfg| Box::pin(async { Err(anyhow::anyhow!("no mcp in test")) }));
-        let mcp = Arc::new(crate::mcp::McpManager::new(
-            Arc::new(flux_core::ToolRegistry::default()),
-            connect,
-        ));
-        (state, registry, mcp)
+        let (mcp, _mcp_rx) =
+            crate::mcp::McpManager::new(Arc::new(flux_core::ToolRegistry::default()), connect);
+        (state, registry, Arc::new(mcp))
     }
 }
 
@@ -346,7 +341,7 @@ mod tests {
         assert!(FsListResponse::decode(frames[0]).unwrap().path.is_some());
     }
 
-    // ── C1 server side: unary bursts alongside a held-open stream ───────
+    // ── server side: unary bursts alongside a held-open stream ──────────
 
     #[tokio::test]
     async fn concurrent_unary_bursts_coexist_with_an_open_stream() {

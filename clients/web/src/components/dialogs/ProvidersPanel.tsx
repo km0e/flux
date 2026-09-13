@@ -21,20 +21,21 @@
  * lands.
  *
  * Presentation shares the integration-ui building blocks with McpPanel /
- * SkillsPanel — one typography scale and spacing rhythm.
+ * SkillsPanel — one typography scale, one spacing rhythm, one
+ * two-step-remove control, one rail-selection repair.
  *
  * Provides: ProvidersPanel
  * Depends: core/state.ts, services/providers.ts, hooks/useIsMobile.ts,
  *          components/ui/*, components/dialogs/integration-ui.tsx
  */
-import { useEffect, useRef, useState } from 'react';
-import { ChevronDown, ChevronRight, CircleX, Download, RefreshCw, Trash2 } from 'lucide-react';
+import { useEffect, useState } from 'react';
+import { ChevronDown, ChevronRight, CircleX, Download, RefreshCw } from 'lucide-react';
 import { useFlux } from '../../core/state';
 import { addProvider, fetchProviders, probeProvider, removeProvider } from '../../services/providers';
 import { fetchModels, saveModel } from '../../services/models';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { fmtTokens } from '../../lib/format';
-import type { ProviderModelInfo } from '../../core/types';
+import type { ProviderModelInfo, ProviderSummary } from '../../core/types';
 import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
 import { SavedModelsSection } from './ModelSection';
 import {
@@ -46,11 +47,16 @@ import {
   NewRailButton,
   Rail,
   RailButton,
+  RemoveControl,
   RowShell,
   RowSub,
   RowTitle,
   SectionLabel,
+  useRailSelection,
 } from './integration-ui';
+
+/** The rail selection key of one provider row (stable reference). */
+const keyOf = (p: ProviderSummary): string => p.id;
 
 /** The creation form — shared verbatim by the desktop detail pane and the
  * mobile stacked layout (one set of field states, one submit). */
@@ -147,7 +153,7 @@ function CatalogBlock(props: {
               ) : (
                 <button
                   type="button"
-                  className="cursor-pointer rounded-sm border border-border px-1.5 py-0.5 text-2xs text-muted transition-colors duration-100 hover:border-border-strong hover:text-fg"
+                  className="cursor-pointer rounded-sm border border-border px-1.5 py-0.5 text-2xs text-muted transition-colors duration-fast hover:border-border-strong hover:text-fg"
                   disabled={props.importing !== null}
                   onClick={() => props.onImport(m.id)}
                   title="Save this model (metadata auto-filled from models.dev)"
@@ -217,8 +223,6 @@ function ProviderRow(props: {
   onImportedAll: () => void;
 }): React.ReactElement {
   const [expanded, setExpanded] = useState(false);
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   const probed = props.catalog !== undefined && !props.probing && !props.probeError;
   const expandable = !!props.catalog?.length;
   return (
@@ -253,29 +257,8 @@ function ProviderRow(props: {
           <RefreshCw size={11} className={props.probing ? 'animate-spin' : undefined} />
           Refresh
         </Button>
-        {confirming ? (
-          <>
-            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-              if (error) {
-                setRemoveError(error);
-                setConfirming(false);
-              }
-            })}>
-              Confirm
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </>
-        ) : (
-          <IconButton
-            label={`Remove ${props.id}`}
-            className="size-7 hover:text-danger"
-            onClick={() => setConfirming(true)}
-          >
-            <Trash2 size={13} />
-          </IconButton>
-        )}
+        <span className="flex-1" />
+        <RemoveControl label={`Remove ${props.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={props.url}>{props.url}</RowSub>
       {props.probeError && <span className="text-2xs break-all text-warn">{props.probeError}</span>}
@@ -305,7 +288,6 @@ function ProviderRow(props: {
           <SavedModelsSection provider={props.id} />
         </div>
       )}
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </RowShell>
   );
 }
@@ -328,8 +310,6 @@ function ProviderPreview(props: {
   const p = useFlux((s) => s.providers.find((x) => x.id === props.id));
   const catalog = useFlux((s) => s.providerModels[props.id]);
   const probeError = useFlux((s) => s.providerProbeErrors[props.id]);
-  const [confirming, setConfirming] = useState(false);
-  const [removeError, setRemoveError] = useState<string | null>(null);
   if (!p) return <EmptyState>Provider removed.</EmptyState>;
   const probed = catalog !== undefined && !props.probing && !probeError;
   return (
@@ -356,29 +336,7 @@ function ProviderPreview(props: {
           <RefreshCw size={11} className={props.probing ? 'animate-spin' : undefined} />
           Refresh
         </Button>
-        {confirming ? (
-          <>
-            <Button variant="danger" size="sm" onClick={() => void props.onRemove().then((error) => {
-              if (error) {
-                setRemoveError(error);
-                setConfirming(false);
-              }
-            })}>
-              Confirm
-            </Button>
-            <Button variant="ghost" size="sm" onClick={() => setConfirming(false)}>
-              Keep
-            </Button>
-          </>
-        ) : (
-          <IconButton
-            label={`Remove ${p.id}`}
-            className="size-7 hover:text-danger"
-            onClick={() => setConfirming(true)}
-          >
-            <Trash2 size={13} />
-          </IconButton>
-        )}
+        <RemoveControl label={`Remove ${p.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={p.url}>{p.url}</RowSub>
       <span className="text-2xs text-faint">API key stored in the server database — never shown back.</span>
@@ -409,7 +367,6 @@ function ProviderPreview(props: {
           />
         </div>
       )}
-      {removeError && <span className="text-2xs break-all text-danger">{removeError}</span>}
     </div>
   );
 }
@@ -427,12 +384,7 @@ export function ProvidersPanel(): React.ReactElement {
   const catalogMap = useFlux((s) => s.providerModels);
   const probeErrors = useFlux((s) => s.providerProbeErrors);
   const isMobile = useIsMobile();
-
-  // Selection: a provider id or 'new' (the persistent creation row).
-  const [selected, setSelected] = useState<string | 'new'>('new');
-  const touchedRef = useRef(false);
-  const removeIndexRef = useRef<number | null>(null);
-  const pendingSelectRef = useRef<string | null>(null);
+  const { selected, choose, markPending, noteRemoved } = useRailSelection(providers, keyOf);
 
   // In-flight catalog probes — panel-owned so the rail rows, the preview
   // and the mobile rows all render the same truth.
@@ -506,16 +458,15 @@ export function ProvidersPanel(): React.ReactElement {
     setAdding(true);
     setAddError(null);
     const added = id.trim();
-    pendingSelectRef.current = added;
     void addProvider({ id, url, api_key: apiKey }).then((error) => {
       setAdding(false);
       if (error) {
-        pendingSelectRef.current = null;
         setAddError(error);
         return;
       }
       // Success: the broadcast refreshes the list (and lands the pending
       // selection) — reset the form.
+      markPending(added);
       setId('');
       setUrl('');
       setApiKey('');
@@ -529,50 +480,14 @@ export function ProvidersPanel(): React.ReactElement {
 
   /** Shared by the preview pane and the mobile rows. */
   const remove = (pid: string): Promise<string | undefined> => {
-    removeIndexRef.current = providers.findIndex((p) => p.id === pid);
+    noteRemoved(pid);
     return removeProvider(pid).then((error) => {
       if (!error) useFlux.getState().pushToast('info', `Provider "${pid}" removed`);
       return error;
     });
   };
 
-  const choose = (next: string | 'new') => {
-    touchedRef.current = true;
-    setSelected(next);
-  };
-
-  // Selection repair, in priority order: a freshly-added entry selects
-  // itself once its broadcast lands; a vanished selection (removed here or
-  // elsewhere) falls to the next entry; an untouched panel follows the
-  // list (first entry, or the creation form when empty).
-  useEffect(() => {
-    if (pendingSelectRef.current) {
-      const want = pendingSelectRef.current;
-      if (providers.some((p) => p.id === want)) {
-        touchedRef.current = true;
-        setSelected(want);
-        pendingSelectRef.current = null;
-      }
-      return;
-    }
-    if (touchedRef.current) {
-      if (selected !== 'new' && !providers.some((p) => p.id === selected)) {
-        const idx = removeIndexRef.current;
-        const next =
-          idx !== null && providers.length > 0 ? providers[Math.min(idx, providers.length - 1)] : undefined;
-        setSelected(next ? next.id : 'new');
-        removeIndexRef.current = null;
-      }
-      return;
-    }
-    if (providers.length > 0) {
-      if (selected !== providers[0].id) setSelected(providers[0].id);
-    } else if (selected !== 'new') {
-      setSelected('new');
-    }
-  }, [providers, selected]);
-
-  const selectedProvider = selected === 'new' ? undefined : providers.find((p) => p.id === selected);
+  const selectedProvider = selected === 'new' ? undefined : providers.find((p) => keyOf(p) === selected);
 
   // ── Mobile: the stacked layout (hint, rows with inline actions, form) ──
   if (isMobile) {

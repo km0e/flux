@@ -2,18 +2,20 @@
  * Sidebar.tsx — left panel: conversations list (+ file explorer tab).
  *
  * Radix primitives own the behavior (DropdownMenu for row actions, Tabs for
- * panels); the row keeps the D-06 wiring: a selection = a lease handover
- * driven by the activeChatId subscription in mount. A client-side filter
- * (name/workdir substring) narrows the list.
+ * panels); a selection = a lease handover driven by the activeChatId
+ * subscription in mount. A client-side filter (name/workdir substring)
+ * narrows the list.
  *
- * Provides: Sidebar, relativeTime
- * Depends: core/state.ts, core/bridge.ts, lib/cn.ts, services/*,
- *          components/ui/*, components/Explorer.tsx
+ * Provides: Sidebar
+ * Depends: core/state.ts, core/bridge.ts, lib/cn.ts, lib/format.ts,
+ *          services/*, components/ui/*, components/Explorer.tsx
  */
 import { lazy, Suspense, useEffect, useRef, useState } from 'react';
+import { MoreHorizontal, Pencil, Plus, Search, Trash2 } from 'lucide-react';
 import { useFlux } from '../core/state';
 import { bridge } from '../core/bridge';
 import { cn } from '../lib/cn';
+import { relativeTime } from '../lib/format';
 import { log } from '../logger';
 import { clearChatPane } from '../services/panes';
 import { dialogs } from '../services/dialogs';
@@ -21,21 +23,50 @@ import { startNewChatFlow } from '../services/new-chat';
 // The Files tree (react-arborist + react-window) is a secondary surface —
 // loaded on first Files-tab activation instead of the initial bundle.
 const Explorer = lazy(() => import('./Explorer'));
-import { Button, Badge, TextField } from './ui';
+import { Button, Badge, TextField, IconButton } from './ui';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
-import { ChatRowMenu } from './ui/dropdown-menu';
-import { Search } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 import type { Chat } from '../core/state';
 
-/** Relative time for the chat list: "now", "5m", "3h", "2d", else a date. */
-export function relativeTime(ts: number): string {
-  const diff = Date.now() - ts;
-  if (diff < 60_000) return 'now';
-  if (diff < 3_600_000) return `${Math.floor(diff / 60_000)}m`;
-  if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)}h`;
-  if (diff < 14 * 86_400_000) return `${Math.floor(diff / 86_400_000)}d`;
-  const d = new Date(ts);
-  return `${d.getMonth() + 1}/${d.getDate()}`;
+/** The chat row's ⋯ menu (Rename/Delete) — a feature composite over the
+ * generic dropdown primitives (ui/dropdown-menu owns only styling); hover
+ * reveals on pointer devices, always visible on touch. */
+function ChatRowMenu(props: {
+  label: string;
+  onRename: () => void;
+  onDelete: () => void;
+}): React.ReactElement {
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <IconButton
+          label={props.label}
+          className={cn(
+            'size-6 max-md:size-9 rounded-md',
+            'opacity-0 touch:opacity-100 group-hover/row:opacity-100 focus-visible:opacity-100',
+            'data-[state=open]:bg-hover data-[state=open]:text-fg data-[state=open]:opacity-100',
+          )}
+        >
+          <MoreHorizontal size={14} />
+        </IconButton>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent>
+        <DropdownMenuItem onSelect={props.onRename}>
+          <Pencil size={12} aria-hidden="true" className="text-muted" />
+          Rename
+        </DropdownMenuItem>
+        <DropdownMenuItem danger onSelect={props.onDelete}>
+          <Trash2 size={12} aria-hidden="true" />
+          Delete
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
 }
 
 /** One conversation row: name + time + workdir line + hover ⋯ menu. */
@@ -80,9 +111,9 @@ function ChatRow(props: {
         // The 2px left rail is the selection marker: every row carries it
         // (transparent when inactive) so the active state never shifts layout.
         'group/row flex cursor-pointer items-center gap-1 border-l-2 px-3 py-2',
-        'transition-colors duration-100 focus:outline-none',
+        'transition-colors duration-fast focus:outline-none',
         active
-          ? 'border-l-[color:var(--fx-accent)] bg-active'
+          ? 'border-l-accent bg-active'
           : cn('border-l-transparent', 'hover:bg-hover'),
       )}
       onClick={() => props.onSelect(c.id)}
@@ -210,13 +241,13 @@ export function Sidebar(): React.ReactElement {
   const onSelect = (id: string) => {
     log.info('sidebar: select ' + id);
     useFlux.setState({ activeChatId: id });
-    // Mobile regime (<768px — the ONE breakpoint, matching app.css) runs
+    // Mobile regime (the ONE breakpoint — app.css matches ≤767.5px) runs
     // the sidebar as an overlay drawer: a selection implies "I'm done
     // navigating" — close it so the conversation shows.
-    if (window.innerWidth < 768) {
+    if (window.innerWidth <= 767.5) {
       useFlux.setState({ sidebarOpen: false });
     }
-    // D-06: no standalone chat_open — an activeChatId change triggers
+    // No standalone chat_open — an activeChatId change triggers
     // switchLease in mount → chat_claim, the single message carrying
     // history snapshot + subscription + lease. When occupied,
     // error{chat_busy} degrades to a read-only pane (handlers.ts sends the
@@ -279,7 +310,8 @@ export function Sidebar(): React.ReactElement {
       <TabsContent value="chats" className="flex min-h-0 flex-1 flex-col">
         <div className="flex flex-col gap-2 border-b border-border p-2">
           <Button id="new-chat-btn" variant="primary" className="w-full max-md:h-10" onClick={onNewChat}>
-            + New chat
+            <Plus size={13} aria-hidden="true" />
+            New chat
           </Button>
           <div className="relative">
             <Search

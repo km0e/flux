@@ -4,25 +4,27 @@
 //! caller's session token rides the request metadata (`x-flux-session`);
 //! unknown/expired tokens are refused at the transport boundary
 //! (unauthenticated). The resolved identity handle is the SAME object the
-//! WS dispatch uses — the lease/viewer machinery is untouched.
+//! Subscribe stream's fanout holds — the lease/viewer machinery never
+//! re-derives it from the token string.
 //!
-//! Behavior lives in flux-session's ops (shared with the WS path verbatim);
-//! these impls resolve the caller and map outcomes onto proto shapes.
+//! Behavior lives in flux-session's ops (shared by every transport
+//! surface); these impls resolve the caller and map outcomes onto proto
+//! shapes.
 
 use crate::registry::ProviderRegistry;
 use flux_proto::flux::v1::chat_service_server::ChatService;
 use flux_proto::flux::v1::{
     AnswerQuestionRequest, AnswerQuestionResponse, CancelRoundRequest, CancelRoundResponse,
     ChatInfo, ClaimChatRequest, ClaimChatResponse, CloseChatRequest, CloseChatResponse,
-    CreateChatRequest, CreateChatResponse, DeleteChatRequest, DeleteChatResponse, ListChatsRequest,
-    ListChatsResponse, OpenChatRequest, OpenChatResponse, RebaseChatRequest, RebaseChatResponse,
+    CreateChatRequest, CreateChatResponse, DeleteChatRequest, DeleteChatResponse, ForkChatRequest,
+    ForkChatResponse, ListChatsRequest, ListChatsResponse, OpenChatRequest, OpenChatResponse,
     RenameChatRequest, RenameChatResponse, SendMessageRequest, SendMessageResponse,
     SwitchProviderRequest, SwitchProviderResponse,
 };
 use flux_session::ServerState;
 use flux_session::SessionRef;
 use flux_session::ops::{
-    CancelOutcome, ClaimOutcome, MutateOutcome, OpenOutcome, QuestionOutcome, RebaseOutcome,
+    CancelOutcome, ClaimOutcome, ForkFailure, MutateOutcome, OpenOutcome, QuestionOutcome,
     SendOutcome, SwitchOutcome,
 };
 use std::sync::Arc;
@@ -68,11 +70,13 @@ fn chat_info(info: &flux_session::manager::ChatInfoOwned) -> ChatInfo {
         workdir: info.workdir.clone(),
         provider: info.provider.clone(),
         model: info.model.clone(),
+        forked_from_chat_id: info.forked_from_chat.clone(),
     }
 }
 
-/// The lease-gate refusals map onto standard statuses (the transport-level
-/// form of the WS path's `error{chat_busy}` / `error{chat_not_found}`).
+/// The lease-gate refusals map onto standard statuses (the
+/// transport-level counterparts of the stream's `error{chat_busy}` /
+/// `error{chat_not_found}` elements).
 fn mutate_status(outcome: MutateOutcome) -> Option<Status> {
     match outcome {
         MutateOutcome::Ok => None,
@@ -253,29 +257,61 @@ impl ChatService for ChatManagement {
         }
     }
 
-    async fn rebase_chat(
+    async fn fork_chat(
         &self,
-        request: Request<RebaseChatRequest>,
-    ) -> Result<tonic::Response<RebaseChatResponse>, Status> {
+        request: Request<ForkChatRequest>,
+    ) -> Result<tonic::Response<ForkChatResponse>, Status> {
         let session = self.caller(&request).await?;
         let req = request.into_inner();
+        // Resolve the source's pin HERE (the registry owns id → instance
+        // selection): a dead pin refuses the fork inline, mirroring
+        // create_chat's pin gate — forking into a chat that cannot spawn
+        // is never the honest outcome.
+        let Some((provider_id, model)) = self.state.chat_pin(&req.chat_id).await else {
+            return Ok(tonic::Response::new(ForkChatResponse {
+                chat: None,
+                error: Some("unknown chat".into()),
+            }));
+        };
+        let pin = match self.registry.instance(&provider_id, &model) {
+            Ok((provider, id, model)) => flux_chat::ResolvedPin {
+                provider,
+                id,
+                model,
+            },
+            Err(e) => {
+                return Ok(tonic::Response::new(ForkChatResponse {
+                    chat: None,
+                    error: Some(format!(
+                        "the source chat's provider pin rejected: {e} — switch the source chat's provider and retry"
+                    )),
+                }));
+            }
+        };
         match self
             .state
-            .rebase_chat(&session, &req.chat_id, req.base_message_id)
+            .fork_chat(&session, &req.chat_id, req.fork_point, pin)
             .await
         {
-            // Echo the ACTUAL rebase point (the context_rebased stream
-            // event carries the same value).
-            RebaseOutcome::Rebased(base) => Ok(tonic::Response::new(RebaseChatResponse {
-                base_message_id: Some(base),
+            Ok(info) => Ok(tonic::Response::new(ForkChatResponse {
+                chat: Some(chat_info(&info)),
+                error: None,
             })),
-            RebaseOutcome::Noop => Ok(tonic::Response::new(RebaseChatResponse {
-                base_message_id: None,
+            Err(ForkFailure::NotFound) => Ok(tonic::Response::new(ForkChatResponse {
+                chat: None,
+                error: Some("unknown chat".into()),
             })),
-            RebaseOutcome::Busy => Err(Status::failed_precondition(
-                "another session holds the chat's lease",
-            )),
-            RebaseOutcome::NotFound => Err(Status::not_found("unknown chat")),
+            Err(ForkFailure::BadPoint) => Ok(tonic::Response::new(ForkChatResponse {
+                chat: None,
+                error: Some(
+                    "the fork point is not a user message of that conversation — fork from one of your own messages"
+                        .into(),
+                ),
+            })),
+            Err(ForkFailure::Internal(e)) => Ok(tonic::Response::new(ForkChatResponse {
+                chat: None,
+                error: Some(e),
+            })),
         }
     }
 
@@ -330,9 +366,8 @@ impl ChatService for ChatManagement {
             .question_response(&session, &req.chat_id, &req.id, req.answer)
             .await
         {
-            // Delivered, and stale answers drop silently — the same
-            // semantics as the WS frame (an unknown question is not an
-            // error the caller can act on).
+            // Delivered, and stale answers drop silently — an unknown
+            // question is not an error the caller can act on.
             QuestionOutcome::Ok | QuestionOutcome::UnknownQuestion => {
                 Ok(tonic::Response::new(AnswerQuestionResponse {}))
             }
@@ -403,8 +438,8 @@ mod tests {
     async fn create_claim_send_round_trip_with_session_metadata() {
         let (state, url) = fixture().await;
 
-        // A live identity: the browser analog is the WS connection (its
-        // token rides the Connect calls as metadata).
+        // A live identity: the browser analog is the Subscribe stream
+        // (its token rides the Connect calls as metadata).
         struct NullSink;
         impl flux_session::SessionSink for NullSink {
             fn send(&self, _: flux_proto::flux::v1::SubscribeResponse) -> bool {

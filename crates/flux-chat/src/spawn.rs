@@ -121,6 +121,10 @@ pub async fn spawn(
 
     // Channels: one input FIFO (every peer), one fact trace (bounded — the
     // loop's backpressure surface), one control channel (ops → consumer).
+    // The two unbounded channels are deliberate: senders never block or
+    // drop — user turns enqueue regardless of round boundaries (also under
+    // an armed rebuild gate) and provider stream chunks must never be
+    // lost; their natural bound is one round's chunks plus queued turns.
     let (loop_tx, loop_rx) = mpsc::unbounded_channel::<flux_core::LoopInput>();
     let (facts_tx, facts_rx) = mpsc::channel::<flux_core::LoopFact>(flux_loop::OUT_CAPACITY);
     let (ctrl_tx, ctrl_rx) = mpsc::unbounded_channel::<crate::round::RoundCmd>();

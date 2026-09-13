@@ -15,8 +15,9 @@ pub const BUF_READ_TOOL: &str = "buf_read";
 
 /// Canonical name of the question tool — the per-chat tool that lets the
 /// model ask the user a question mid-round (the approval prompt's
-/// ecological successor: round-blocking, lease-holder-answered, host
-/// QuickPick — but the content is entirely agent-produced).
+/// ecological successor: round-blocking, lease-holder-answered, rendered
+/// as an inline card in the chat UI — but the content is entirely
+/// agent-produced).
 pub const QUESTION_TOOL: &str = "question";
 
 /// Per-invocation context handed to every tool execution.
@@ -42,7 +43,7 @@ pub struct ToolCtx {
     /// its host prompt with the pending call) read it from here.
     pub call_id: String,
     /// The chat's sandbox boundary — the canonical workdir carried at
-    /// `chat_create`. Empty = not yet filled (kernel-side default); tools
+    /// chat creation. Empty = not yet filled (kernel-side default); tools
     /// that need the boundary fail closed on it via [`ToolCtx::resolve`].
     pub workdir: std::path::PathBuf,
     /// The chat's transient shell cwd — canonical, always inside `workdir`
@@ -145,8 +146,8 @@ impl ToolRegistry {
     /// on collision without touching the existing entry.
     ///
     /// Callers registering external tools (MCP) use this so a name clash
-    /// can never silently replace a built-in tool and inherit its approval
-    /// policy.
+    /// can never silently replace a built-in or chat-owned tool — an
+    /// external entry must never shadow what the kernel assembles itself.
     pub fn register_if_absent(&self, tool: Arc<dyn Tool>) -> bool {
         let name = tool.name().to_string();
         let mut tools = recovered(self.tools.write());

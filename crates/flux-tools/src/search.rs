@@ -12,29 +12,40 @@ const MAX_GREP_LINE_CHARS: usize = 500;
 /// visible: up to 200 chars of leading context, the match, and trailing
 /// content up to the budget. Omitted prefixes/suffixes are marked so the
 /// model knows the line continues.
+///
+/// Byte-window implementation — no whole-line char-vector materialization
+/// (the old version collected `Vec<char>` at 4 bytes/char for EVERY match
+/// on a line; a minified bundle paid megabytes of allocation per match).
+/// The window is computed in byte space at char boundaries, producing
+/// exactly the char-space window the budget defines.
 fn truncate_around_match(line: &str, match_byte: usize, budget: usize) -> String {
     const LEAD: usize = 200;
-    let chars: Vec<char> = line.chars().collect();
-    if chars.len() <= budget {
+    // Fast path: byte length bounds char count, so a short line is whole.
+    if line.len() <= budget {
         return line.to_string();
     }
-    // Byte offset → char index.
-    let mut match_char = 0usize;
-    for (bi, _) in line.char_indices() {
-        if bi >= match_byte {
-            break;
-        }
-        match_char += 1;
-    }
-    let start = match_char.saturating_sub(LEAD);
-    let end = (match_char + (budget - LEAD)).min(chars.len());
+    // Window start: up to LEAD chars before the match (0 if fewer exist).
+    let start = line[..match_byte]
+        .char_indices()
+        .rev()
+        .nth(LEAD - 1)
+        .map_or(0, |(i, _)| i);
+    // Window end: budget-LEAD chars forward from the match start (the whole
+    // tail if fewer remain) — mirrors the char-space window end.
+    let end = line[match_byte..]
+        .char_indices()
+        .nth(budget - LEAD)
+        .map_or(line.len(), |(i, _)| match_byte + i);
     let mut out = String::new();
     if start > 0 {
         out.push('…');
     }
-    out.extend(&chars[start..end]);
-    if end < chars.len() {
-        out.push_str(&format!("…[+{} chars truncated]", chars.len() - end));
+    out.push_str(&line[start..end]);
+    if end < line.len() {
+        out.push_str(&format!(
+            "…[+{} chars truncated]",
+            line[end..].chars().count()
+        ));
     }
     out
 }
@@ -94,7 +105,10 @@ impl GrepTool {
                 }
                 if let Ok(content) = std::fs::read_to_string(file_path) {
                     for (i, line) in content.lines().enumerate() {
-                        if re.is_match(line) {
+                        // Single regex pass per line: `find` both decides
+                        // the match and locates it (the old is_match + find
+                        // pair ran the engine twice on every matching line).
+                        if let Some(m) = re.find(line) {
                             if results.len() >= MAX_GREP_RESULTS {
                                 truncated = true;
                                 return Ok(false);
@@ -112,12 +126,7 @@ impl GrepTool {
                             // whole and never clipped to the line head
                             // (the match may live at the tail of a huge
                             // single-line bundle).
-                            let match_byte = re.find(line).map(|m| m.start());
-                            let text = truncate_around_match(
-                                line,
-                                match_byte.unwrap_or(0),
-                                MAX_GREP_LINE_CHARS,
-                            );
+                            let text = truncate_around_match(line, m.start(), MAX_GREP_LINE_CHARS);
                             results.push(format!("{}:{}: {}", rel.display(), i + 1, text));
                         }
                     }

@@ -56,7 +56,7 @@ pub async fn run(
             Arc::clone(&registry),
             Arc::clone(&mcp),
         ))
-        .with_state((state, registry, mcp, hub) as SharedState);
+        .with_state((state.clone(), registry, mcp, hub) as SharedState);
     if let Some(web_root) = web_root {
         app = app.merge(web::router(&web_root));
     }
@@ -70,7 +70,40 @@ pub async fn run(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
+    .with_graceful_shutdown(shutdown_signal())
     .await
     .context("server stopped")?;
+    // The listener is closed (no new requests can arrive). Give live
+    // rounds a bounded window to land on the machine's round boundary —
+    // cancel → commit → Idle — then force-abort stragglers. Whatever
+    // completed is on disk; the next rebirth resumes clean.
+    state.drain(std::time::Duration::from_secs(10)).await;
+    info!("drain complete; shutting down");
     Ok(())
+}
+
+/// Resolve on the FIRST of SIGINT (ctrl-c) or SIGTERM (unix). The signal
+/// streams are process-global: installing the handler here replaces the
+/// default terminate behavior, which is exactly the point — the process
+/// exits through the drain instead of dying mid-round.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut stream) => {
+                stream.recv().await;
+            }
+            Err(e) => tracing::warn!(error = %e, "failed to install SIGTERM handler; ctrl-c only"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    info!("shutdown signal received");
 }

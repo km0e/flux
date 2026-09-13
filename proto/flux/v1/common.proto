@@ -69,10 +69,9 @@ message Message {
   repeated ToolCall tool_calls = 4;
   optional string tool_call_id = 5;
   // The store row id — present on history snapshots so a client can name
-  // the message (e.g. as RebaseChatRequest.base_message_id or to
-  // correlate a context_rebased notice with a visible bubble). 0 on
-  // messages assembled outside persistence (provider input never carries
-  // it).
+  // the message (e.g. as ForkChatRequest.fork_point, and to attach the
+  // fork affordance to the visible bubble). 0 on messages assembled
+  // outside persistence (provider input never carries it).
   int64 id = 6;
 }
 
@@ -92,6 +91,10 @@ message ChatInfo {
   string provider = 8;
   // The resolved model string.
   string model = 9;
+  // When this chat was forked: the SOURCE conversation's id (its name is
+  // resolvable client-side from the chats list; a deleted source leaves
+  // the raw id). Absent = not a fork.
+  optional string forked_from_chat_id = 10;
 }
 
 // The model's question to the user (the `question` tool). Entirely
@@ -138,6 +141,25 @@ message McpServerSummary {
   string command = 2;
   repeated string args = 3;
   repeated string env_keys = 4;
+  // Live self-healing state: RUNNING = healthy (probed); BACKOFF = the
+  // supervisor is re-connecting after a death (exponential backoff);
+  // OFFLINE = the row is on the launch list but no process is up (a
+  // failed startup connect — retried at the next restart, per the
+  // persist-first contract).
+  McpState state = 5;
+}
+
+// Live state of one MCP server (self-healing supervisor).
+enum McpState {
+  MCP_STATE_UNSPECIFIED = 0;
+  // Healthy — the last liveness probe succeeded.
+  MCP_STATE_RUNNING = 1;
+  // The process died; the supervisor is re-connecting with exponential
+  // backoff (capped at 10 minutes).
+  MCP_STATE_BACKOFF = 2;
+  // No live process: a failed startup connect (the row stays on the
+  // launch list and retries at the next restart).
+  MCP_STATE_OFFLINE = 3;
 }
 
 // Where an installed skill lives.

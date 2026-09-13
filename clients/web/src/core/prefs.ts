@@ -3,7 +3,7 @@
  *
  * Deliberately localStorage (NOT sessionStorage like session.ts): sidebar
  * collapse/width are device-level preferences that survive browser restarts,
- * while the D-19 identity must stay per-tab. All accessors swallow storage
+ * while the session identity must stay per-tab. All accessors swallow storage
  * failures (private mode) so the UI degrades to defaults.
  *
  * Provides: readStoredSidebarOpen, storeSidebarOpen, readStoredSidebarWidth,

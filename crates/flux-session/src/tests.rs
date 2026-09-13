@@ -1,13 +1,14 @@
-//! Control-plane integration tests: the provider pin lifecycle and the
-//! engine-rebuild flows (rebase / hot-swap / feature restart / parked
-//! sends), driven end-to-end through `ServerState`.
+//! Control-plane integration tests: the provider pin lifecycle, the
+//! engine-rebuild flows (hot-swap / parked sends), and the fork flow,
+//! driven end-to-end through `ServerState`.
 
 use crate::manager::ServerState;
-use crate::ops::RebaseOutcome;
+use crate::ops::ClaimOutcome;
+use crate::ops::ForkFailure;
 use crate::ops::SwitchOutcome;
 use crate::test_util::{
-    DummyProvider, RecordingProvider, ScriptItem, ScriptedProvider, kinds, register, sess,
-    wait_for, wait_for_kind,
+    DummyProvider, RecordingProvider, ScriptItem, ScriptedProvider, hang_script, kinds, register,
+    sess, wait_for, wait_for_kind,
 };
 use flux_chat::ResolvedPin;
 use flux_core::{ChatStateKind, CoreError, Provider, Role, StreamChunk, ToolRegistry};
@@ -30,6 +31,23 @@ fn task_idle(state: &ServerState, cid: &str) -> bool {
                 c.task
                     .as_ref()
                     .is_some_and(|t| t.handle.active_state() == ChatStateKind::Idle)
+            })
+        })
+        .unwrap_or(false)
+}
+
+/// Sync condition helper: the chat's live round is in Streaming.
+fn task_streaming(state: &ServerState, cid: &str) -> bool {
+    state
+        .manager
+        .chats
+        .try_read()
+        .ok()
+        .and_then(|chats| {
+            chats.get(cid).map(|c| {
+                c.task
+                    .as_ref()
+                    .is_some_and(|t| t.handle.active_state() == ChatStateKind::Streaming)
             })
         })
         .unwrap_or(false)
@@ -79,6 +97,9 @@ async fn provider_swap_applies_at_boundary_and_persists_pin() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
     assert_eq!(info.provider, "pinned");
     assert_eq!(info.model, "pinned-model");
 
@@ -257,15 +278,16 @@ fn staged_provider(scripts: Vec<crate::test_util::Script>) -> Arc<dyn Provider> 
     Arc::new(ScriptedProvider::staged(scripts))
 }
 
-/// A full rebase cycle: the base persists at request time (durable truth),
-/// the notice announces it, the engine respawns ABOVE the base (the
-/// archived prefix never reaches the provider again), and a follow-up
-/// round runs on the rebuilt context.
+/// A full fork cycle: the fork copies the transcript up to but EXCLUDING
+/// the USER message into a NEW chat (provenance + name), the source is
+/// untouched, and the fork's first round runs over the COPIED context on
+/// the fork's own provider — the redo turn re-enters only as the user's
+/// re-sent message.
 #[tokio::test]
-async fn rebase_persists_base_and_respawns_above_it() {
+async fn fork_copies_the_transcript_and_the_fork_runs_over_it() {
     let begins = Arc::new(StdMutex::new(Vec::new()));
     let (state, store) = instance_state().await;
-    let recorded = register(&state, "a").await;
+    let _recorded = register(&state, "a").await;
     let info = state
         .create_chat(
             &sess(&state, "a").await,
@@ -285,78 +307,175 @@ async fn rebase_persists_base_and_respawns_above_it() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
     // Round 1 on the staged provider (stage 0); the transcript persists
-    // before the wrap-up announces (ids 1, 2).
+    // before the wrap-up announces (ids 1, 2: user + assistant).
     state
         .send_message(&sess(&state, "a").await, &cid, "hi".into())
         .await
         .unwrap();
-    wait_for(|| {
-        recorded
-            .lock()
-            .unwrap()
-            .iter()
-            .any(|el| matches!(&el.kind, Some(Kind::StreamEnd(_))))
-    })
-    .await;
-
-    // Rebase to latest: the notice rides the request, the base persists.
-    assert_eq!(
-        state
-            .rebase_chat(&sess(&state, "a").await, &cid, None)
-            .await,
-        RebaseOutcome::Rebased(2)
-    );
-    let base: i64 = loop {
-        match store
-            .load_state(&cid)
-            .await
-            .unwrap()
-            .get(flux_chat::CONTEXT_BASE_KEY)
-            .and_then(|v| v.parse().ok())
-        {
-            Some(b) => break b,
-            None => tokio::time::sleep(std::time::Duration::from_millis(10)).await,
+    loop {
+        if store.load_stored_messages(&cid).await.unwrap().len() >= 2 {
+            break;
         }
-    };
-    assert_eq!(base, 2, "user + assistant archived (ids 1, 2)");
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
 
-    // The engine respawned (stage 1 is live now). Swap to a recording
-    // provider — its begin records the history the FRESH context loads:
-    // everything archived, the rebuilt context must be EMPTY.
-    state
-        .switch_provider(
+    // Fork at the user message (id 1): the copy stops BEFORE it — the
+    // fork point is the turn being redone, not part of the fork's
+    // history; it re-enters only when the user re-sends it.
+    let fork = state
+        .fork_chat(
             &sess(&state, "a").await,
             &cid,
+            1,
             ResolvedPin {
                 provider: Arc::new(RecordingProvider {
                     opens: Arc::clone(&begins),
                 }),
-                id: "swap".into(),
+                id: "pinned".into(),
                 model: String::new(),
             },
         )
         .await
         .unwrap();
-    wait_for(|| begins.try_lock().map(|b| !b.is_empty()).unwrap_or(false)).await;
-    let history = begins.lock().unwrap()[0].clone();
-    assert!(
-        history.is_empty(),
-        "the respawn must load only the context ABOVE the base, got {history:?}"
-    );
+    let fid = fork.chat_id.clone();
+    assert_ne!(fid, cid);
+    assert_eq!(fork.name, "c (fork)");
 
-    // A follow-up round runs on the rebuilt (empty) context.
+    // The copy: NOTHING — the fork point was the first turn, so the
+    // fork is a branch paused before its first message (fresh row ids
+    // would exist only for copied rows); the SOURCE transcript is
+    // untouched.
+    let copied = store.load_stored_messages(&fid).await.unwrap();
+    assert!(copied.is_empty());
+    assert_eq!(
+        store
+            .load_state(&fid)
+            .await
+            .unwrap()
+            .get("workdir")
+            .cloned(),
+        Some("/tmp".into()),
+        "the fork inherits the source's workdir pair"
+    );
+    let (src_count, forked_from, forked_at): (i64, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT (SELECT COUNT(*) FROM messages WHERE chat_id = ?1), \
+              (SELECT forked_from_chat FROM chats WHERE id = ?2), \
+              (SELECT forked_from_message FROM chats WHERE id = ?2)",
+    )
+    .bind(&cid)
+    .bind(&fid)
+    .fetch_one(&store.pool)
+    .await
+    .unwrap();
+    assert_eq!(src_count, 2, "the source transcript is untouched");
+    assert_eq!(forked_from.as_deref(), Some(cid.as_str()));
+    assert_eq!(forked_at, Some(1));
+
+    // The fork's FIRST round runs over the copied context: the connection
+    // begins over it — empty here (nothing preceded the fork point) — and
+    // the re-sent turn rides as the pending input.
     state
-        .send_message(&sess(&state, "a").await, &cid, "next".into())
+        .send_message(&sess(&state, "a").await, &fid, "next".into())
         .await
         .unwrap();
-    wait_for(|| begins.try_lock().map(|b| b.len() >= 2).unwrap_or(false)).await;
-    let pending = begins.lock().unwrap()[1].clone();
+    wait_for(|| begins.try_lock().map(|b| !b.is_empty()).unwrap_or(false)).await;
+    let pending = begins.lock().unwrap()[0].clone();
     assert_eq!(
         pending,
-        vec![flux_core::Message::user("next")],
-        "the live context carries only messages above the base"
+        Vec::<flux_core::Message>::new(),
+        "the fork's connection begins over the COPIED (empty) transcript"
+    );
+
+    // A fork point that is not a USER message of the source is refused.
+    assert!(matches!(
+        state
+            .fork_chat(
+                &sess(&state, "a").await,
+                &cid,
+                2,
+                ResolvedPin {
+                    provider: Arc::new(DummyProvider),
+                    id: "pinned".into(),
+                    model: String::new(),
+                },
+            )
+            .await,
+        Err(ForkFailure::BadPoint)
+    ));
+    // An unknown source chat is refused.
+    assert!(matches!(
+        state
+            .fork_chat(
+                &sess(&state, "a").await,
+                "nope",
+                1,
+                ResolvedPin {
+                    provider: Arc::new(DummyProvider),
+                    id: "pinned".into(),
+                    model: String::new(),
+                },
+            )
+            .await,
+        Err(ForkFailure::NotFound)
+    ));
+}
+
+/// Forking hands the source lease over with the navigation: the forker
+/// held the source's lease → the fork releases it (the attach broadcast
+/// is the first truthful frame — no window renders the source In-use);
+/// a FOREIGN holder's lease is untouched; a viewer-forker (no lease) is
+/// a no-op.
+#[tokio::test]
+async fn fork_releases_the_callers_source_lease_and_leaves_foreign_ones() {
+    let (state, store) = instance_state().await;
+    let _recorded = register(&state, "a").await;
+    let _recorded_b = register(&state, "b").await;
+    let pin = || ResolvedPin {
+        provider: Arc::new(DummyProvider),
+        id: "pinned".into(),
+        model: String::new(),
+    };
+    let info = state
+        .create_chat(&sess(&state, "a").await, "c", "/tmp", pin())
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+    store
+        .append_messages(&cid, &[flux_core::Message::user("hi")])
+        .await
+        .unwrap();
+
+    // The holder forks: the source lease is released — a fresh claim by
+    // the same session GRANTS again (not AlreadyOwned).
+    let _fork = state
+        .fork_chat(&sess(&state, "a").await, &cid, 1, pin())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.claim_chat(&sess(&state, "a").await, &cid).await,
+        ClaimOutcome::Granted,
+        "the fork released the caller's source lease"
+    );
+    // Re-establish a's lease, then let b STEAL it and fork from there:
+    // the fork must not touch the foreign holder's lease (b keeps it).
+    state.release_chat(&sess(&state, "a").await, &cid).await;
+    assert_eq!(
+        state.claim_chat(&sess(&state, "b").await, &cid).await,
+        ClaimOutcome::Granted
+    );
+    let _fork2 = state
+        .fork_chat(&sess(&state, "a").await, &cid, 1, pin())
+        .await
+        .unwrap();
+    assert_eq!(
+        state.claim_chat(&sess(&state, "b").await, &cid).await,
+        ClaimOutcome::AlreadyOwned,
+        "a foreign holder's lease survives another session's fork"
     );
 }
 
@@ -394,6 +513,9 @@ async fn provider_swap_rebegins_in_place_and_the_engine_stays_alive() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
     // Round 1 runs on the OLD provider.
     state
@@ -486,6 +608,9 @@ async fn a_zero_commit_round_does_not_wedge_the_engine() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
     state
         .send_message(&sess(&state, "a").await, &cid, "m1".into())
@@ -561,6 +686,9 @@ async fn interrupt_send_cancels_the_live_round_and_runs_the_next() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
     // Round 1 goes live (its first delta reached the sink).
     state
@@ -656,6 +784,9 @@ async fn interrupt_send_on_an_idle_engine_equals_a_plain_send() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
     state
         .send_message_interrupting(&sess(&state, "a").await, &cid, "hi".into())
@@ -679,9 +810,9 @@ async fn interrupt_send_on_an_idle_engine_equals_a_plain_send() {
 }
 
 #[tokio::test]
-async fn rebase_gcs_buf_entries_of_archived_calls() {
+async fn fork_copies_buf_entries_of_copied_calls() {
     let (state, store) = instance_state().await;
-    let recorded = register(&state, "a").await;
+    let _recorded = register(&state, "a").await;
     let info = state
         .create_chat(
             &sess(&state, "a").await,
@@ -696,15 +827,31 @@ async fn rebase_gcs_buf_entries_of_archived_calls() {
         .await
         .unwrap();
     let cid = info.chat_id.clone();
+    // The real client claims right after creating — the claim registers
+    // the viewer slot so the router's fanout reaches `recorded`.
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
 
-    // Seed the transcript: user + tool result (call_old) — ids 1, 2 — and
-    // a buffered output for that call, plus one orphan (no call anywhere).
+    // Seed the transcript: user (id 1) + a tool exchange (call_old, ids
+    // 2-3) + a second user turn (id 4), with a buffered output for the
+    // call and one orphan (no call anywhere).
     store
         .append_messages(
             &cid,
             &[
                 flux_core::Message::user("hi"),
+                flux_core::Message {
+                    role: Role::Assistant,
+                    content: String::new(),
+                    reasoning_content: None,
+                    tool_calls: vec![flux_core::ToolCall {
+                        id: "call_old".into(),
+                        name: "bash".into(),
+                        arguments: "{}".into(),
+                    }],
+                    tool_call_id: None,
+                },
                 flux_core::Message::tool("call_old", "old result"),
+                flux_core::Message::user("more"),
             ],
         )
         .await
@@ -715,78 +862,67 @@ async fn rebase_gcs_buf_entries_of_archived_calls() {
         .unwrap();
     store.save_buf_entry(&cid, "orphan", "junk").await.unwrap();
 
-    // Rebase to latest (base = 2): call_old is archived → its entry dies;
-    // the orphan dies with it. Nothing else exists yet.
+    // Fork at the LAST user turn (id 4): the copy carries the whole tool
+    // exchange, so the call's buffered output rides along; the orphan has
+    // no copied call and is not copied. The source keeps both.
+    let fork = state
+        .fork_chat(
+            &sess(&state, "a").await,
+            &cid,
+            4,
+            ResolvedPin {
+                provider: Arc::new(DummyProvider),
+                id: "default".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let fid = fork.chat_id.clone();
     assert_eq!(
-        state
-            .rebase_chat(&sess(&state, "a").await, &cid, None)
-            .await,
-        RebaseOutcome::Rebased(2)
+        store
+            .load_buf_entry(&fid, "call_old")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("OLD OUTPUT"),
+        "the copied call's buffered output is resolvable in the fork"
     );
-    // (the GC runs inside rebase_chat, before it returns — no wait needed)
     assert!(
+        store
+            .load_buf_entry(&fid, "orphan")
+            .await
+            .unwrap()
+            .is_none(),
+        "an uncopied call's entry does not ride along"
+    );
+    // Source untouched: both entries remain.
+    assert_eq!(
+        store
+            .load_buf_entry(&cid, "call_old")
+            .await
+            .unwrap()
+            .as_deref(),
+        Some("OLD OUTPUT")
+    );
+    assert_eq!(
         store
             .load_buf_entry(&cid, "orphan")
             .await
             .unwrap()
-            .is_none(),
-        "the orphan has no live call either"
+            .as_deref(),
+        Some("junk")
     );
 
-    // A NEW call lands above the base (a fresh round): its entry survives
-    // a further rebase to the new latest.
-    store
-        .append_messages(
-            &cid,
-            &[
-                flux_core::Message::user("more"),
-                flux_core::Message::tool("call_live", "live result"),
-            ],
-        )
-        .await
-        .unwrap();
-    store
-        .save_buf_entry(&cid, "call_live", "LIVE OUTPUT")
-        .await
-        .unwrap();
-    // Rebase to above the OLD call only (base = 2): call_live (id 4) stays
-    // above the base — its entry must SURVIVE the GC. (A rebase-to-latest
-    // here would archive call_live itself and delete its entry — correct,
-    // but that path is already pinned above.)
-    assert_eq!(
-        state
-            .rebase_chat(&sess(&state, "a").await, &cid, Some(2))
-            .await,
-        RebaseOutcome::Rebased(2)
-    );
-    // The second rebase's notice announces the new base.
-    wait_for(|| {
-        recorded
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|el| matches!(&el.kind, Some(Kind::ContextRebased(_))))
-            .count()
-            >= 2
-    })
-    .await;
-    let base: i64 = store
-        .load_state(&cid)
-        .await
-        .unwrap()
-        .get(flux_chat::CONTEXT_BASE_KEY)
-        .and_then(|v| v.parse().ok())
-        .unwrap();
-    assert_eq!(base, 2, "the second rebase archived up to the old call");
-    assert_eq!(
-        store
-            .load_buf_entry(&cid, "call_live")
-            .await
-            .unwrap()
-            .as_deref(),
-        Some("LIVE OUTPUT"),
-        "the live call's entry survives the GC"
-    );
+    // The copied tool_calls rows keep the call id — history rendering and
+    // buf references agree on it.
+    let copied = store.load_stored_messages(&fid).await.unwrap();
+    let assistant = copied
+        .iter()
+        .find(|s| s.message.role == Role::Assistant)
+        .expect("the copied assistant tool-call turn");
+    assert_eq!(assistant.message.tool_calls[0].id, "call_old");
+    assert!(assistant.id > 0, "fresh row ids in the fork");
 }
 
 // ── send idempotency (client_msg_id dedup) ──────────────────────────────
@@ -895,4 +1031,55 @@ async fn send_with_a_client_msg_id_dedups_resends() {
             .unwrap(),
         SendOutcome::Ok
     );
+}
+
+// ── graceful-shutdown drain ─────────────────────────────────────────────
+
+#[tokio::test]
+async fn drain_returns_immediately_without_live_tasks() {
+    let (state, _store) = instance_state().await;
+    let start = std::time::Instant::now();
+    state.drain(std::time::Duration::from_secs(5)).await;
+    assert!(start.elapsed() < std::time::Duration::from_secs(1));
+}
+
+#[tokio::test]
+async fn drain_cancels_a_live_round_and_lands_it_on_the_boundary() {
+    let (state, store) = instance_state().await;
+    register(&state, "a").await;
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::once(hang_script()));
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            "/tmp",
+            ResolvedPin {
+                provider,
+                id: "scripted".into(),
+                model: "m".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id.clone();
+    let _ = state.subscribe_chat(&sess(&state, "a").await, &cid).await;
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+    // The hang script pushed one delta then stalls — the round is live.
+    wait_for(|| task_streaming(&state, &cid)).await;
+
+    state.drain(std::time::Duration::from_secs(5)).await;
+
+    // The round landed on the machine's boundary (cancel → commit → Idle).
+    assert!(task_idle(&state, &cid));
+    // The cancelled round's partial assistant text persisted — the
+    // transcript commit is round-atomic, so the rebirth history is
+    // provider-valid (user + assistant, no dangling tool_calls).
+    let messages = store.load_messages(&cid).await.unwrap();
+    assert_eq!(messages.len(), 2);
+    assert_eq!(messages[0].role, Role::User);
+    assert_eq!(messages[1].role, Role::Assistant);
+    assert_eq!(messages[1].content, "started");
 }

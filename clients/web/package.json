@@ -12,6 +12,7 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "ui-check": "node e2e/ui-check.mjs",
+    "shots": "node e2e/shots.mjs",
     "gen:proto": "cd ../.. && buf generate proto --template buf.gen.yaml",
     "prebuild": "npm run gen:proto",
     "pretest": "npm run gen:proto",

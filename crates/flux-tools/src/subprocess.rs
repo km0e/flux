@@ -66,7 +66,7 @@ impl Drop for ProcessGroupGuard {
 #[derive(Debug)]
 pub(crate) enum RunError {
     Spawn(std::io::Error),
-    Timeout { secs: u64 },
+    Timeout,
     Wait(std::io::Error),
 }
 
@@ -264,9 +264,7 @@ pub(crate) async fn run_command_with_timeout(
     // so no orphan is left behind. Idempotent against an already-dead group.
     match exit {
         Exit::Timeout => {
-            return Err(RunError::Timeout {
-                secs: duration.as_secs(),
-            });
+            return Err(RunError::Timeout);
         }
         Exit::Normal(out_trunc, err_trunc) =>
         {

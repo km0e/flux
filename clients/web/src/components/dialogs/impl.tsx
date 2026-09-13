@@ -71,30 +71,6 @@ export function registerDialogs(): void {
         ));
       }),
 
-    confirmRebase: (snippet: string) =>
-      new Promise<boolean>((resolve) => {
-        mountOverlay((close) => (
-          <ConfirmDialog
-            title="Archive context up to here"
-            message={
-              'This message and everything before it will be archived out of the model’s context ' +
-              '(messages after it stay). The chat history remains viewable, but this cannot be ' +
-              'undone. A round in flight finishes first.' +
-              (snippet ? `\n\n“${snippet}”` : '')
-            }
-            confirmLabel="Archive & restart"
-            onConfirm={() => {
-              close();
-              resolve(true);
-            }}
-            onCancel={() => {
-              close();
-              resolve(false);
-            }}
-          />
-        ));
-      }),
-
     pickNewChat: () =>
       new Promise((resolve) => {
         mountOverlay((close) => (

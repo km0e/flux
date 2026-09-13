@@ -28,11 +28,11 @@ use tokio_util::sync::CancellationToken;
 /// never blocks the round wrap-up noticeably.
 pub const INTERRUPT_GRACE: Duration = Duration::from_secs(5);
 
-/// Uniform transcript marker for an interrupted tool result. The contract:
-/// tools never mention cancellation themselves — they return whatever
-/// partial output they have (possibly empty); the supervisor prepends the
-/// marker, so the transcript marks interruption in exactly one place.
-pub const INTERRUPTED_MARK: &str = "[interrupted by user]";
+/// Uniform transcript marker for an interrupted tool result — the
+/// definition lives in flux-core (transcript vocabulary; the read-side
+/// history validator synthesizes it too); re-exported here so the
+/// crate-internal callers keep one path.
+pub use flux_core::INTERRUPTED_MARK;
 
 /// One in-flight tool: its call and its cooperative cancellation token
 /// (an interrupt cancels it; the grace clock inside the flight handles

@@ -5,10 +5,6 @@
 
 ## Accepted tradeoffs
 
-### T-01 VACUUM write-lock window
-
-Under WAL, VACUUM rewrites the whole database while holding the write lock (triggered only when the freelist crosses a threshold; failure surfaces as a transient write error + log). Accepted; if hardening is ever needed: run it once before the listener binds, or switch to incremental cleanup.
-
 ### T-02 Inherent risk of runner-class bash commands
 
 Under the defense that classifies commands by their first word, `eval`/`sudo`/interpreter-direct runners can execute arbitrary commands without any smuggling — that is the inherent semantics of "allow by first word", not a bypass (the notice shows the full command). Rejected alternatives: a runner blocklist (false-positives on legitimate use), disabling first-word allow (sacrifices convenience). The approval layer is gone; this entry stays in case approvals ever return.
@@ -16,10 +12,6 @@ Under the defense that classifies commands by their first word, `eval`/`sudo`/in
 ### T-03 The state tool's generic KV behavior
 
 state writes any key / reads of unknown keys return an empty string — **by design** (a generic KV channel for the agent across rounds; the schema enum is guidance, not a whitelist; read/write are symmetric). Do not fix as a defect.
-
-### T-04 Performance exclusions
-
-Per-viewer clones in the streaming fan-out (no benefit with a single viewer), unbounded-queue hardening (defensive), splitting the global lock's cross-await hold into two phases (~0 benefit for a single user — re-evaluate with new evidence if the multi-window premise changes). Breaking protocol changes (binary frames/compression) were rejected after measurement showed the wire format is not the bottleneck.
 
 ### T-05 Explorer git status via the git CLI, not git2/gix
 
@@ -31,4 +23,16 @@ The web server (on by default) does not validate the dist layout at startup: an 
 
 ### T-07 Streaming render pipeline keeps marked — no renderer swap, no streaming library
 
-The streaming markdown pipeline stays on marked + splitAndFold/ParagraphSplitter + renderStableSlice + FenceCache (researched and decided 2026-08-28; do not re-propose a swap): ① marked has no incremental continuation API — the trailing `text` token absorbs unclosed inline constructs, so caching at token boundaries loses inline context; ② micromark's true streaming entry is Node-only, and the browser fallback degrades to a full re-parse (the O(n²) remains); ③ the ecosystem's "streaming markdown renderers" (streamdown, Vercel AI SDK, etc.) are actually remend self-healing of incomplete blocks + full re-parse + DOM diff, all carrying a React peer dep. The current pipeline's per-block caching / stable-prefix scheme is finer-grained than those implementations; the residual O(n²) lives only in pathological wall-of-text paragraphs (measured: 64KB ≈ 12ms, clamped to the current paragraph). Re-evaluate when: a framework-free incremental renderer with a stable prefix-cache contract appears, or real-world inputs measurably exceed the frame budget.
+The streaming markdown pipeline stays on marked + splitAndFold/ParagraphSplitter + renderStableSlice + FenceCache (researched and decided; do not re-propose a swap): ① marked has no incremental continuation API — the trailing `text` token absorbs unclosed inline constructs, so caching at token boundaries loses inline context; ② micromark's true streaming entry is Node-only, and the browser fallback degrades to a full re-parse (the O(n²) remains); ③ the ecosystem's "streaming markdown renderers" (streamdown, Vercel AI SDK, etc.) are actually remend self-healing of incomplete blocks + full re-parse + DOM diff, all carrying a React peer dep. The current pipeline's per-block caching / stable-prefix scheme is finer-grained than those implementations; the residual O(n²) lives only in pathological wall-of-text paragraphs (measured: 64KB ≈ 12ms, clamped to the current paragraph). Re-evaluate when: a framework-free incremental renderer with a stable prefix-cache contract appears, or real-world inputs measurably exceed the frame budget.
+
+### T-08 No context compaction; long sessions are managed manually by the user
+
+The transcript stays a single accumulating context — no automatic budget pruning, no compaction/summarization (decided; both phases excluded). Hitting the model's context window in a long session surfaces as a provider 400 → round failure (error event); recovery is the existing affordances — fork (restart from any user message), rebase, or a new chat — the user splits the context at a moment they choose. Why accepted: within typical single-user sessions, overflow is rare; automatic pruning/summarization would introduce the project's first archive boundary, dragging fork/rebase semantics, buf lifetime, and the proto along — complexity out of proportion to the current benefit. Design essentials for a revival (absorbed from the shelf draft): 1) pruning granularity = whole rounds — a round is the machine's atomic commit unit, never split; 2) pruning only shapes the assembly view sent to the provider, the store is never rewritten, and large outputs of pruned rounds stay readable via buf_read (buf is anchored by call id and does not expire with the transcript) — the key enabler; 3) budget = context_window × safety factor (~0.7), estimator starts as chars/4 behind a trait; 4) compaction lands on the engine-rebuild primitive (machine gate + re-begin), the same path as a provider hot-swap; 5) compaction introduces the first archive boundary — fork points / rebase bases must live inside the surviving history, the UI needs a visible compression notice, and the store needs an archive table. Re-evaluate when: overflow becomes a frequent pain point in real use (long sessions interrupted constantly, users tired of manually splitting), or a requirement appears that genuinely needs loading an oversized repository whole.
+
+### T-09 Usage cache-write stays derived — no wire field
+
+`W = max(0, in − cached)` (under OpenAI-compatible semantics cached ⊆ prompt, so the derivation is exact), and the wire `Usage` gains no `cache_write_tokens` field. Why accepted: a dedicated field only serves upstreams that report cache-write separately; every currently supported endpoint reports none, so the field would be constant-zero noise. Re-evaluate when: an upstream that reports cache-write separately is integrated (Anthropic-style usage, vLLM extensions), or cost estimation needs a cache-write price tier.
+
+### T-10 No observability surface (/healthz, /metrics, round spans) for now
+
+No metrics endpoint, no health check, no round-level structured observability — stderr tracing only (plus the structured log fields on the self-healing/rebuild paths). Why accepted: for a single-process, single-user/small-team deployment bound to 127.0.0.1, logs answer every current diagnosis question; a metrics surface (endpoint, histogram buckets, cross-crate static counters) would freeze a shape for an operations plane that does not exist yet. Design essentials for a revival (absorbed from the shelf draft): 1) `/healthz` is pure liveness; `/metrics` is hand-rolled Prometheus text (fixed-bucket histogram + AtomicU64 counters, zero new dependencies); 2) counters are statics in flux-core (provider/chat/loop can all bump them), gauges (active_chats, mcp state) are read at scrape time; 3) instruments: round total/duration/failures, the three token totals, tool_calls, buf_writes, provider_retries; 4) round correlation = chat_id + round-sequence log fields, no OTel. Re-evaluate when: deployed somewhere logs cannot attribute (multi-instance aggregation, long-running service SLAs), or "why was this round slow / which provider misbehaved" becomes a frequent diagnosis question.

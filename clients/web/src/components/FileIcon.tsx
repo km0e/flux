@@ -3,7 +3,7 @@
  * Explorer tree and the preview header.
  *
  * Files render as a tinted monospace glyph chip (colors from lib/fileIcons,
- * fixed decorative palette per D-24 — language identity never drifts with
+ * a fixed decorative palette — language identity never drifts with
  * the theme); folders render as an inline SVG that swaps to its open variant
  * when expanded. Both are decorative (aria-hidden) — the name carries the
  * semantics.

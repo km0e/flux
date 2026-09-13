@@ -9,29 +9,14 @@
  * labeled ≈ because the estimate assumes the snapshot's rates for the
  * whole conversation.
  *
- * Provides: UsageStats, fmtTokens, fmtCost, estimateCost
+ * Provides: UsageStats, ModelCost, estimateCost
  * Depends: core/state (UsageTotals), services/models (findSavedModel),
- *          components/ui/tooltip
+ *          lib/format (fmtTokens/fmtCost), components/ui/tooltip
  */
 import { Tooltip } from './ui/tooltip';
 import type { UsageTotals } from '../core/state';
 import { findSavedModel } from '../services/models';
-
-/** Compact token formatting: 999 → "999", 12_345 → "12.3k", 1_500_000 → "1.5m". */
-export function fmtTokens(n: number): string {
-  if (n < 1000) return String(n);
-  const unit = n < 1_000_000 ? 'k' : 'm';
-  const v = n / (unit === 'k' ? 1000 : 1_000_000);
-  const body = v >= 100 ? String(Math.round(v)) : v.toFixed(1).replace(/\.0$/, '');
-  return body + unit;
-}
-
-/** Compact USD formatting: 0.5 → "$0.50", 1.234 → "$1.23", 12.5 → "$12.50",
- * 1250 → "$1.25k". */
-export function fmtCost(usd: number): string {
-  if (usd >= 1000) return `$${(usd / 1000).toFixed(2)}k`;
-  return `$${usd.toFixed(2)}`;
-}
+import { fmtTokens, fmtCost } from '../lib/format';
 
 /** Model price snapshot (USD per million tokens) — from the saved model's
  * models.dev meta, when the chat's pin has one. */

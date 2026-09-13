@@ -47,9 +47,23 @@ describe('store — chats', () => {
     expect(useFlux.getState().chats.map((c) => c.id)).toEqual(['new', 'mid', 'old']);
   });
 
-  it('setChats clears the in-flight lease-switch marker (release confirmation)', () => {
+  it('setChats ends the lease-switch suppression only on a frame that carries the release', () => {
+    // A frame where the from-side is STILL leased (e.g. the fork's attach
+    // broadcast, sent before the release) must not end the window — the
+    // left row would flash In-use on stale truth.
     useFlux.setState({ leaseSwitch: { from: 'c1', to: 'c2' } });
-    useFlux.getState().setChats([chat('c1'), chat('c2')]);
+    useFlux
+        .getState()
+        .setChats([chat('c1', { active: true }), chat('c2', { active: true })]);
+    expect(useFlux.getState().leaseSwitch).toEqual({ from: 'c1', to: 'c2' });
+    // The release confirmation: the from-side freed → the window ends.
+    useFlux.getState().setChats([chat('c1'), chat('c2', { active: true })]);
+    expect(useFlux.getState().leaseSwitch).toBeNull();
+  });
+
+  it('setChats treats a vanished from-row as release confirmation', () => {
+    useFlux.setState({ leaseSwitch: { from: 'c1', to: 'c2' } });
+    useFlux.getState().setChats([chat('c2')]);
     expect(useFlux.getState().leaseSwitch).toBeNull();
   });
 

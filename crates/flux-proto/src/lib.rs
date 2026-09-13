@@ -1,10 +1,9 @@
 //! Generated protobuf/tonic contracts for the flux wire protocol.
 //!
-//! `proto/` (repo root) is the single source of truth (P4 spike, form 3a);
-//! tonic-build compiles it into this crate at build time. Downstream crates
-//! depend on `flux-proto` instead of hand-mirroring frames — the three-place
-//! manual sync (protocol.rs / types.ts / docs) collapses to one `.proto` +
-//! codegen as the migration proceeds family by family.
+//! `proto/` (repo root) is the single contract source; tonic-prost-build
+//! compiles it into this crate at build time, and the TS binding is
+//! derived from the same .proto by `buf generate` — one source, two
+//! bindings, no hand-mirroring.
 //!
 //! The generated module mirrors the proto package (`flux.v1`).
 

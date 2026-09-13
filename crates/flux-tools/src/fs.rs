@@ -97,11 +97,15 @@ impl ReadFileTool {
         // count and the continuation footer fires when lines are unread.
         // Skipped for oversized files: their footer uses the 10MB notice,
         // and draining a multi-GB file would defeat the streaming design.
+        // read_until into a reusable byte buffer skips the per-line UTF-8
+        // validation read_line pays when appending to a String — the bytes
+        // are discarded, only the count matters.
         if !truncated && lines.len() >= limit {
+            let mut drain_buf = Vec::new();
             loop {
-                line_buf.clear();
+                drain_buf.clear();
                 let n = reader
-                    .read_line(&mut line_buf)
+                    .read_until(b'\n', &mut drain_buf)
                     .await
                     .map_err(|e| CoreError::Tool(format!("failed to read {file_str}: {e}")))?;
                 if n == 0 {

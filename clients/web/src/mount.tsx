@@ -1,7 +1,7 @@
 /**
  * mount.tsx — Mount the chat UI into the page.
  *
- * The single initialization: wires the ConnectionManager, the WS handler
+ * The single initialization: wires the ConnectConnection, the wire handler
  * registry, the lease-switching subscription, code-copy delegation, and the
  * React tree. Dialogs are first-party (components/dialogs — D-26: no host
  * abstraction) and register before connect.
@@ -52,7 +52,7 @@ export interface MountHandle {
   disposeCodeCopy?: () => void;
 }
 
-/** Auto-register all WS handlers (table-driven). */
+/** Auto-register all wire handlers (table-driven). */
 registerAllHandlers();
 
 export function mountChat(opts: MountOptions): MountHandle {

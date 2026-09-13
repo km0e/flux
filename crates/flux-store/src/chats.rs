@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 impl Store {
     /// Insert a brand-new chat and return the DB-generated `created_at`.
     /// `last_activity_at` starts equal to it (a chat's first activity is
-    /// its creation).
+    /// its creation) — both carry the same DEFAULT, so one INSERT suffices.
     pub async fn insert_chat(&self, chat_id: &str, name: &str) -> Result<String> {
         let (created_at,): (String,) =
             sqlx::query_as("INSERT INTO chats (id, name) VALUES (?1, ?2) RETURNING created_at")
@@ -15,12 +15,6 @@ impl Store {
                 .fetch_one(&self.pool)
                 .await
                 .context("failed to insert chat")?;
-        sqlx::query("UPDATE chats SET last_activity_at = ?1 WHERE id = ?2")
-            .bind(&created_at)
-            .bind(chat_id)
-            .execute(&self.pool)
-            .await
-            .context("failed to stamp chat activity")?;
         Ok(created_at)
     }
 
@@ -63,9 +57,8 @@ impl Store {
                 Option<String>,
             ),
         >(
-            "SELECT c.id, c.name, c.created_at, c.last_activity_at, k.value, w.value, p.value, m.value \
+            "SELECT c.id, c.name, c.created_at, c.last_activity_at, c.forked_from_chat, w.value, p.value, m.value \
              FROM chats c \
-             LEFT JOIN state k ON k.chat_id = c.id AND k.key = 'kind' \
              LEFT JOIN state w ON w.chat_id = c.id AND w.key = 'workdir' \
              LEFT JOIN state p ON p.chat_id = c.id AND p.key = 'provider' \
              LEFT JOIN state m ON m.chat_id = c.id AND m.key = 'model' \
@@ -78,7 +71,16 @@ impl Store {
         Ok(rows
             .into_iter()
             .map(
-                |(chat_id, name, created_at, last_activity_at, kind, workdir, provider, model)| {
+                |(
+                    chat_id,
+                    name,
+                    created_at,
+                    last_activity_at,
+                    forked_from_chat,
+                    workdir,
+                    provider,
+                    model,
+                )| {
                     // A row predating the backfill falls back to creation time.
                     let activity = last_activity_at.unwrap_or_else(|| created_at.clone());
                     ChatSummary {
@@ -86,7 +88,7 @@ impl Store {
                         name,
                         created_at,
                         last_activity_at: activity,
-                        kind,
+                        forked_from_chat,
                         workdir,
                         provider,
                         model,

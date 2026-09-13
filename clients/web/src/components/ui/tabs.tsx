@@ -30,7 +30,7 @@ export function TabsTrigger({
     <TabsPrimitive.Trigger
       className={cn(
         'flex-1 cursor-pointer rounded-sm px-2.5 py-1 max-md:py-2.5 max-md:text-sm font-medium text-muted select-none',
-        'transition-colors duration-100 hover:text-fg',
+        'transition-colors duration-fast hover:text-fg',
         'data-[state=active]:bg-elev data-[state=active]:text-fg data-[state=active]:shadow-sm',
         className,
       )}

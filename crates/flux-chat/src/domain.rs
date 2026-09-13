@@ -2,7 +2,7 @@
 //!
 //! ## The boundary key is read-only state
 //!
-//! `workdir` is the chat's sandbox boundary — carried at `chat_create`,
+//! `workdir` is the chat's sandbox boundary — fixed at chat creation,
 //! held by the `StateManager` as a fixed field, and surfaced read-only
 //! through `state_get`. A movable boundary would be no boundary, so the
 //! write path refuses it structurally: `set("workdir", …)` is an error at
@@ -66,8 +66,9 @@ pub const INITIAL_STATE: &[(&str, &str)] = &[
 /// - the authoritative boundary for the per-chat `ToolCtx` enrichment
 #[derive(Debug)]
 pub(crate) struct StateManager {
-    /// The chat's sandbox boundary — canonical (create_chat canonicalized
-    /// it before persisting), carried at `chat_create`, never writable.
+    /// The chat's sandbox boundary — canonical (chat creation
+    /// canonicalized it before persisting), fixed for the chat's
+    /// lifetime, never writable.
     workdir: String,
     /// A sync mutex (not tokio's): the chat loop is the only accessor, so
     /// contention never happens, and the guard is never held across `.await`.
@@ -170,7 +171,7 @@ impl StateManager {
 
 /// Canonical names of the built-in state tools — the single source of truth
 /// for the tool `name()` impls below and for the reserved-name check in
-/// `approvals::is_reserved_tool_name`. Order matches the tool definitions:
+/// `reserved::is_reserved_tool_name`. Order matches the tool definitions:
 /// index 0 is [`StateGetTool`], index 1 is [`StateSetTool`].
 pub const STATE_TOOL_NAMES: &[&str] = &["state_get", "state_set"];
 

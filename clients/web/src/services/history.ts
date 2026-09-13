@@ -4,19 +4,21 @@
  * Receives `chat_history` payloads from the server and constructs the
  * static message DOM (user/assistant bubbles, reasoning blocks, tool cards).
  *
- * Provides: renderHistoryMessages
+ * Provides: renderHistoryMessages, attachForkToLiveBubble
  * Depends: lib/markdown.ts, services/panes.ts, services/stream.ts,
- *          lib/dom.ts, core/types.ts
+ *          services/forkDraft.ts, lib/dom.ts, core/types.ts
  */
 
 import { log } from '../logger';
 import { preloadHighlighter } from '../lib/highlight';
 import { renderMarkdown } from '../lib/markdown';
-import { getPane, hideEmptyState } from './panes';
+import { getPane, getPaneIfExists, hideEmptyState } from './panes';
+import { stashForkDraft } from './forkDraft';
+import { takePaneStale } from './stream-handler';
 import { disposeController } from './stream';
-import { dialogs } from './dialogs';
 import { bridge } from '../core/bridge';
 import {
+  buildForkButton,
   createMessageBubble,
   createReasoningBlock,
   createToolCard,
@@ -33,9 +35,12 @@ import { useFlux } from '../core/state';
 /**
  * Render complete chat history messages into a pane.
  * Called when the server sends `chat_history` in response to a first
- * `chat_open` subscription or a `chat_claim` (D-06 single-message claim).
+ * `chat_open` subscription or a `chat_claim` (the single-message claim).
  */
-export async function renderHistoryMessages(chatId: string, messages: HistoryMessage[]): Promise<void> {
+export async function renderHistoryMessages(
+  chatId: string,
+  messages: HistoryMessage[],
+): Promise<void> {
   // The highlighter is a deferred async chunk prefetched at boot; awaiting
   // it here is the one place the tiny load window is realistic (history can
   // render before the prefetch lands) — without the wait, code blocks would
@@ -47,7 +52,13 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
   // a history snapshot would dispose the controller and clear the pane,
   // dropping in-flight frames. (The server sends history before subscribing
   // on ChatOpen, so this is a race/duplicate-open path, not the norm.)
-  if (useFlux.getState().streaming[chatId]) {
+  // OVERRIDE: a STALE pane (the session departed mid-round — see
+  // stream-handler's stalePanes) must re-render even though the streaming
+  // flag may still say live: the flag went stale across the unsubscribe
+  // window, and everything the round persisted after departure is missing
+  // from the DOM. The snapshot is the resync; live deltas continue from it.
+  const paneStale = takePaneStale(chatId);
+  if (useFlux.getState().streaming[chatId] && !paneStale) {
     log.debug('renderHistory skipped: ' + chatId + ' is streaming');
     return;
   }
@@ -65,34 +76,27 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
 
   if (messages.length > 0) {
     hideEmptyState(chatId);
-    // Opening a chat means looking at the latest message: scroll to the
-    // bottom + reset stick, so the live follow is not lost afterwards. Without
-    // the scroll a long history stays parked at the top, the latest reply out
-    // of view.
-    forceFollow(pane);
   }
 
-  let staggerIdx = 0;
-
+  // NOTE: no per-message stagger here. The stagger delays exist to soften
+  // the LIVE stream's burst; a history RESTORE is a resync of content that
+  // already exists — with fill-mode:both a delayed message sits at opacity 0,
+  // and the delay is largest for the LAST messages, exactly where the view
+  // opens (forceFollow lands at the bottom). The result read as "scrolled to
+  // the bottom but blank for a moment". One simultaneous msgIn fade instead.
   for (const msg of messages) {
     switch (msg.role) {
       case 'user': {
-        // Manual rebase affordance (§2.1 of the protocol-hardening ledger):
-        // history row ids are the rebase base keys. Gates: the id must be
-        // present (assembled messages carry none) and the operator holds
-        // the lease (a mutation).
-        const rebaseable =
-          msg.id !== undefined && useFlux.getState().readonlyChats[chatId] !== true;
+        // Fork affordance: history row ids are the fork points. The only
+        // gate is the id itself (assembled messages carry none) — forking
+        // is a non-destructive read + create, so read-only viewers may
+        // fork too.
         const bubble = createMessageBubble({
           role: 'user',
           text: msg.content,
-          staggerIndex: staggerIdx++,
-          historyId: rebaseable ? msg.id : undefined,
+          forkPoint: msg.id,
         });
-        const rebaseBtn = bubble.el.querySelector<HTMLButtonElement>('.msg-rebase');
-        rebaseBtn?.addEventListener('click', () => {
-          void rebaseFrom(chatId, msg.id!, msg.content);
-        });
+        if (msg.id !== undefined) attachForkBehavior(bubble.el, chatId, msg.id, msg.content ?? '');
         pane.appendChild(bubble.el);
         break;
       }
@@ -102,7 +106,6 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
           const block = createReasoningBlock({
             summary: 'Thought for a bit',
             html: renderMarkdown(msg.reasoning_content),
-            staggerIndex: staggerIdx,
           });
           block.el.open = false;
           pane.appendChild(block.el);
@@ -116,7 +119,6 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
             role: 'assistant',
             html: renderMarkdown(msg.content),
             raw: msg.content, // enables createCopyButton to read the raw text
-            staggerIndex: staggerIdx++,
           });
           pane.appendChild(bubble.el);
         }
@@ -129,7 +131,6 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
             name: tc.name,
             args: tc.arguments,
             status: 'done',
-            staggerIndex: staggerIdx++,
           });
           pane.appendChild(toolEl);
         }
@@ -156,7 +157,6 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
           name: '',
           args: undefined,
           status: 'done',
-          staggerIndex: staggerIdx++,
         });
         // Override tool card appearance for inline tool results — same
         // icon system as createToolCard, anonymous "result" status.
@@ -178,23 +178,61 @@ export async function renderHistoryMessages(chatId: string, messages: HistoryMes
       }
     }
   }
+
+  if (messages.length > 0) {
+    // Opening a chat means looking at the latest message: scroll to the
+    // bottom + reset stick, so the live follow is not lost afterwards.
+    // AFTER the appends — the scroll must land on the grown content. A
+    // pre-append call lands on the just-cleared pane (scrollTop 0), the
+    // view stays parked at the TOP of the history — the first few
+    // messages paint and only a later follow (a live delta, a send)
+    // jumps to the bottom, reading as "rendered a few, got interrupted,
+    // then fully re-rendered".
+    forceFollow(pane);
+  }
 }
 
-/** Manual rebase (the §2.1 entry): confirm, then send the rebase with the
- * clicked message's row id as the base — everything at/below it archives
- * out of the model's context (messages ABOVE it stay). The server applies
- * at the machine gate (a live round finishes first), echoes the ACTUAL
- * base in the response, and announces `context_rebased` on the stream —
- * the notice bubble renders from that, never from here. */
-async function rebaseFrom(chatId: string, messageId: number, snippet: string): Promise<void> {
-  const preview = snippet.length > 60 ? snippet.slice(0, 60) + '…' : snippet;
-  let confirmed = false;
-  try {
-    confirmed = await dialogs.confirmRebase(preview);
-  } catch (err) {
-    log.error('rebase confirm failed: ' + (err instanceof Error ? err.message : String(err)));
-    return;
-  }
-  if (!confirmed) return;
-  bridge.send({ type: 'rebase', chat_id: chatId, base_message_id: messageId });
+/** Fork from a message: NO confirmation — a fork is a non-destructive
+ * read + create (the source chat is untouched), so the click sends
+ * directly. The copy EXCLUDES the fork point (it is the turn being
+ * redone), so the click stashes its content; the ack's chat_created
+ * pairs it with the fork and the fork's composer opens prefilled (see
+ * forkDraft.ts). The ack's auto-select lands the fork; its claim
+ * delivers the copied transcript. */
+function forkFrom(chatId: string, messageId: number, content: string): void {
+  stashForkDraft(chatId, content);
+  bridge.send({ type: 'fork', chat_id: chatId, fork_point: messageId });
+}
+
+/** Wire the click behavior onto a bubble that already carries the
+ * `.msg-fork` button (history render). */
+function attachForkBehavior(
+  bubble: HTMLElement,
+  chatId: string,
+  messageId: number,
+  content: string,
+): void {
+  bubble
+    .querySelector<HTMLButtonElement>('.msg-fork')
+    ?.addEventListener('click', () => forkFrom(chatId, messageId, content));
+}
+
+/** Live path: the sender's OWN user bubble just persisted with `id` — find
+ * the matching un-id'd live bubble in the pane (exact text, oldest first)
+ * and attach the affordance. Returns whether a bubble matched. A cancelled
+ * turn never persisted → its bubble never matches → the affordance never
+ * appears on it, which is honest (there is no row to fork at). */
+export function attachForkToLiveBubble(chatId: string, messageId: number, content: string): boolean {
+  const pane = getPaneIfExists(chatId);
+  if (!pane) return false;
+  const candidates = [...pane.querySelectorAll<HTMLElement>('.message.user')].filter(
+    (el) =>
+      !el.querySelector('.msg-fork') &&
+      (el.querySelector('.message-body')?.textContent ?? '') === content,
+  );
+  const target = candidates[0];
+  if (!target) return false;
+  target.insertBefore(buildForkButton(messageId), target.querySelector('.message-body'));
+  attachForkBehavior(target, chatId, messageId, content);
+  return true;
 }

@@ -56,7 +56,7 @@ function ContextMeter(props: { cid: string; provider: string; model: string }): 
           <span
             aria-hidden="true"
             className={cn(
-              'block h-full rounded-full transition-all duration-180',
+              'block h-full rounded-full transition-all duration-base',
               pct > 92 ? 'bg-danger' : pct > 80 ? 'bg-warn' : 'bg-accent',
             )}
             style={{ width: `${pct}%` }}
@@ -145,6 +145,7 @@ export function ChatView(): React.ReactElement {
           <div className="mx-auto w-full max-w-[var(--fx-chat-max)]">
             <ChatInput
               key={cid}
+              chatId={cid}
               onSend={onSend}
               onCancel={onCancel}
               /* The composer stays ENABLED through an outage: a message
@@ -170,7 +171,7 @@ export function ChatView(): React.ReactElement {
                   disabled={connStatus !== 'connected'}
                   className={cn(
                     'min-w-0 max-w-56 cursor-pointer truncate rounded-md border border-border bg-inset px-1.5 py-0.5 max-md:min-h-9 max-md:py-1.5',
-                    'font-mono text-2xs text-muted transition-colors duration-100 hover:border-border-strong hover:text-fg',
+                    'font-mono text-2xs text-muted transition-colors duration-fast hover:border-border-strong hover:text-fg',
                     'disabled:cursor-not-allowed disabled:opacity-40',
                   )}
                   title="Switch provider / model (applies at the round boundary)"

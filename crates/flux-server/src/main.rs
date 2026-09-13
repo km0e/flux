@@ -18,7 +18,7 @@ use flux_session::ServerState;
 use flux_store::Store;
 use flux_tools::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    RustInitTool, RustVerifyTool, SkillListTool, SkillReadTool, WriteFileTool,
+    SkillListTool, SkillReadTool, WriteFileTool,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -34,8 +34,28 @@ use tracing::info;
 const CONNECT_TIMEOUT_SECS: u64 = 30;
 const READ_TIMEOUT_SECS: u64 = 30;
 
-const DEFAULT_PREAMBLE: &str =
-    "You are a helpful coding assistant. Use the provided tools when needed.";
+/// The default system prompt. Tool schemas (name, description, parameter
+/// JSON) ride every request's `tools` array (flux-provider serializes them
+/// at `Connection::begin`), so the prompt carries NO tool enumeration —
+/// only orientation and usage policy; a duplicated list would drift from
+/// the registry and pay tokens twice. Deliberately free of dates/times so
+/// the per-connection prefix cache sees a stable prefix. Per-chat
+/// interpolation (e.g. the workdir) needs assembly at the `begin` call
+/// site, not a static string.
+const DEFAULT_PREAMBLE: &str = r#"You are an expert coding assistant operating inside Flux, a coding agent framework. You help users by reading files, executing commands, editing code, and writing new files.
+
+Tool definitions (name, description, parameter schema) ride every request — file read/edit/write/list, bash, grep/glob, skills (skill_list/skill_read), shared state (state_get/state_set), buffered-output paging (buf_read), and user questions (question), plus any MCP-provided tools. The guidelines below govern how to use them.
+
+Guidelines:
+- Be concise in your responses.
+- Show file paths clearly when working with files.
+- Tools execute without user approval — never ask permission to use one. When a tool fails, the error is in the result text: read it, adjust, and retry.
+- Path arguments resolve inside the chat's working directory automatically. Use relative paths (or absolute paths under the workdir); no tool takes a boundary parameter — an out-of-bounds path comes back as a tool error, so correct the path and continue.
+- Prefer grep/glob over bash for locating code — they are faster and return structured results.
+- When a tool result says its output was truncated and names a ref, fetch the rest with buf_read before claiming you could not see it.
+- Treat a result marked INTERRUPTED as an aborted flight: its effects may be partial, so re-check state before continuing.
+- Use question only when a decision materially changes what you do next and the options are not equivalent — never to confirm work you can simply do.
+- For non-trivial tasks, call skill_list first and skill_read any skill that matches before concluding a capability is missing."#;
 
 /// The default database location: `$HOME/.flux/flux.db` (`USERPROFILE`
 /// fallback) — the global flux home, consistent with the global skills
@@ -55,18 +75,20 @@ fn default_db_path() -> PathBuf {
 
 /// Flux server — there is NO config file. Everything is a CLI flag
 /// (host/port/db/preamble/web), the database (providers, MCP servers,
-/// chats) or the UI. One listener serves both the web UI and `/ws`.
+/// chats) or the UI. One listener serves the Connect surface, the
+/// terminal side channel, and the web UI.
 #[derive(Parser)]
 #[command(
     name = "flux-server",
-    about = "Flux agent server (web UI + WS on one port)"
+    about = "Flux agent server (Connect API + terminal channel + web UI on one port)"
 )]
 struct Args {
     /// Host address to bind to. Loopback by default (no app-level auth —
     /// expose remotely only behind a TLS reverse proxy with its own auth).
     #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
     host: String,
-    /// Port to listen on (the web UI and the WS endpoint share it).
+    /// Port to listen on (the Connect surface, the terminal side channel,
+    /// and the web UI share it).
     #[arg(long, short, value_name = "PORT", default_value_t = 8080)]
     port: u16,
     /// SQLite database path (chats, providers, MCP servers). Default:
@@ -77,12 +99,12 @@ struct Args {
     /// System prompt / instructions sent to the agent on every request.
     #[arg(long, value_name = "TEXT")]
     preamble: Option<String>,
-    /// Do NOT serve the browser chat UI (headless WS-only). The UI is
+    /// Do NOT serve the browser chat UI (headless: API only). The UI is
     /// served by default.
     #[arg(long)]
     no_web: bool,
     /// Web UI assets directory override (default: `web-ui/` next to the
-    /// binary — the packaged layout; no assets found = WS-only).
+    /// binary — the packaged layout; no assets found = headless).
     #[arg(long, value_name = "PATH")]
     web_assets_dir: Option<PathBuf>,
 }
@@ -115,8 +137,6 @@ async fn main() -> anyhow::Result<()> {
     tool_registry.register(Arc::new(GlobTool::new()));
     tool_registry.register(Arc::new(GrepTool::new()));
     tool_registry.register(Arc::new(ListDirectoryTool::new()));
-    tool_registry.register(Arc::new(RustInitTool::new()));
-    tool_registry.register(Arc::new(RustVerifyTool::new()));
     tool_registry.register(Arc::new(EditFileTool::new()));
     tool_registry.register(Arc::new(WriteFileTool::new()));
     tool_registry.register(Arc::new(ReplaceLinesTool::new()));
@@ -165,10 +185,9 @@ async fn main() -> anyhow::Result<()> {
     // (one hung server costs only its own init timeout) and a row that
     // fails is SKIPPED with a warning, never blocking startup (it stays
     // fixable from the UI and retried at the next restart).
-    let mcp_manager = Arc::new(mcp::McpManager::new(
-        Arc::clone(&tool_registry),
-        mcp::production_connect(),
-    ));
+    let (mcp_manager, mcp_events_rx) =
+        mcp::McpManager::new(Arc::clone(&tool_registry), mcp::production_connect());
+    let mcp_manager = Arc::new(mcp_manager);
     mcp_manager.restore(&store).await;
 
     let initial_state: HashMap<String, String> = flux_chat::INITIAL_STATE
@@ -197,7 +216,9 @@ async fn main() -> anyhow::Result<()> {
         .context("failed to build server state")?,
     );
 
-    // Periodic vacuum to reclaim free pages in the WAL
+    // Periodic freelist trim — incremental_vacuum (auto_vacuum=INCREMENTAL,
+    // ensured at Store::open before the listener bound) is a short normal
+    // write transaction: no whole-db rewrite window while serving.
     let vacuum_store = store.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(3600));
@@ -209,10 +230,18 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
+    // MCP supervisor events (self-healing) → the SAME broadcast/rebuild
+    // machinery the mutation path uses.
+    tokio::spawn(mcp::consume_events(
+        Arc::clone(&server_state),
+        Arc::clone(&mcp_manager),
+        mcp_events_rx,
+    ));
+
     // Web UI static site — served by DEFAULT on the SAME listener as the
-    // WS endpoint (one port; the page connects back same-origin to `/ws`).
-    // No startup validation: an incomplete build surfaces at request time
-    // (decisions.md T-06).
+    // Connect surface and the terminal side channel (one port; the page
+    // connects back same-origin). No startup validation: an incomplete
+    // build surfaces at request time (decisions.md T-06).
     let web_root = if args.no_web {
         None
     } else {
@@ -220,7 +249,7 @@ async fn main() -> anyhow::Result<()> {
         if root.is_none() {
             info!(
                 "no web UI assets found (--web-assets-dir, or web-ui/ next to the binary) \
-                 — serving WS only"
+                 — serving headless"
             );
         }
         root
@@ -248,7 +277,7 @@ async fn main() -> anyhow::Result<()> {
 /// 1. `--web-assets-dir` (CLI, used as-is)
 /// 2. `web-ui/` next to the running binary (packaged distribution layout)
 ///
-/// Otherwise `None` — the UI is simply not served (WS-only). There is no
+/// Otherwise `None` — the UI is simply not served (headless). There is no
 /// CWD-relative repo guess: a hardcoded `clients/web/dist` silently works
 /// or breaks depending on where the process was launched from. Devs use
 /// `run-server.sh`, which always pins the repo dist with an absolute flag.
@@ -277,8 +306,8 @@ mod tests {
 
     #[test]
     fn no_cli_and_no_packaged_dir_means_no_ui() {
-        // No CLI value, no web-ui/ next to the test binary → None (WS-only);
-        // never a CWD-relative repo guess.
+        // No CLI value, no web-ui/ next to the test binary → None
+        // (headless); never a CWD-relative repo guess.
         let got = resolve_assets_dir(None).unwrap();
         assert_eq!(got, None);
     }

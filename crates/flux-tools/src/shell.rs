@@ -3,6 +3,16 @@ use crate::subprocess::RunError;
 use flux_core::{CoreError, ToolCtx};
 use std::time::Duration;
 
+/// Default command timeout (seconds). 30s blocked real workloads (builds,
+/// installs, test runs); 5 minutes covers the vast majority of single
+/// commands. A deliberate semantic change from the old hardcoded 30s.
+const DEFAULT_TIMEOUT_SECS: u64 = 300;
+/// Clamp bounds. The floor keeps `timeout: 0` meaningless; the ceiling
+/// bounds a single flight's hold on the round under the no-approval model
+/// — genuinely long work belongs in the background (`… &` + polling).
+const MIN_TIMEOUT_SECS: u64 = 1;
+const MAX_TIMEOUT_SECS: u64 = 1800;
+
 // ---------------------------------------------------------------------------
 // BashTool
 // ---------------------------------------------------------------------------
@@ -10,11 +20,13 @@ use std::time::Duration;
 #[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
 #[tool(
     name = "bash",
-    description = "Execute a shell command in the working directory. Returns stdout and stderr. Very long output is buffered by the system and can be read back in pages with buf_read."
+    description = "Execute a shell command in the working directory. Returns stdout and stderr. Optional 'timeout' in seconds (default 300, max 1800); for longer-running work background the command ('… &') and poll its output instead. Very long output is buffered by the system and can be read back in pages with buf_read."
 )]
 pub struct BashTool {
     /// The shell command to execute.
     command: String,
+    /// Timeout in seconds (default 300, clamped to 1..=1800).
+    timeout: Option<u64>,
 }
 
 impl BashTool {
@@ -37,6 +49,10 @@ impl BashTool {
             ));
         }
         let cwd = &ctx.current_dir;
+        let timeout_secs = self
+            .timeout
+            .unwrap_or(DEFAULT_TIMEOUT_SECS)
+            .clamp(MIN_TIMEOUT_SECS, MAX_TIMEOUT_SECS);
 
         // The kill-the-whole-tree hygiene (process group, kill_on_drop,
         // armed guard, timeout) lives in the shared subprocess runner.
@@ -44,7 +60,7 @@ impl BashTool {
             "bash",
             &["-c", cmd.as_str()],
             cwd,
-            Duration::from_secs(30),
+            Duration::from_secs(timeout_secs),
             &ctx.cancel,
         )
         .await
@@ -52,7 +68,9 @@ impl BashTool {
             RunError::Spawn(e) | RunError::Wait(e) => {
                 CoreError::Tool(format!("command execution failed: {e}"))
             }
-            RunError::Timeout { .. } => CoreError::Tool("command timed out after 30s".into()),
+            RunError::Timeout => {
+                CoreError::Tool(format!("command timed out after {timeout_secs}s"))
+            }
         })?;
 
         // An interrupted command's killed status (exit code -9) is noise —
@@ -286,6 +304,70 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("HELLO"));
+    }
+
+    #[test]
+    fn bash_timeout_default_is_300() {
+        // The deliberate semantic change from the old hardcoded 30s —
+        // pinned so a silent drift back is caught.
+        assert_eq!(DEFAULT_TIMEOUT_SECS, 300);
+    }
+
+    #[test]
+    fn bash_timeout_schema_is_optional_integer() {
+        let tool = BashTool::new();
+        let schema = tool.schema();
+        let props = schema["properties"].as_object().unwrap();
+        let timeout = props
+            .get("timeout")
+            .expect("timeout must be in the bash schema");
+        assert_eq!(timeout["type"], "integer");
+        let required = schema["required"].as_array().unwrap();
+        assert!(
+            !required.contains(&json!("timeout")),
+            "timeout must be optional"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn bash_timeout_override_times_out_with_dynamic_message() {
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new();
+        let result = tool
+            .call(
+                processed(vec![("command", json!("sleep 5")), ("timeout", json!(1))]),
+                boundary_ctx(dir.path()),
+            )
+            .await;
+        let err = result.unwrap_err();
+        assert!(
+            matches!(err, CoreError::Tool(ref m) if m.contains("timed out after 1s")),
+            "expected a 1s timeout error, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_clamps_out_of_range_values() {
+        // 0 clamps up to the 1s floor, 99999 clamps down to the 30min
+        // ceiling — both must still run a quick command cleanly.
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new();
+        for value in [0u64, 99999] {
+            let result = tool
+                .call(
+                    processed(vec![
+                        ("command", json!("echo ok")),
+                        ("timeout", json!(value)),
+                    ]),
+                    boundary_ctx(dir.path()),
+                )
+                .await;
+            assert!(
+                result.is_ok(),
+                "timeout {value} must clamp to a working value: {result:?}"
+            );
+        }
     }
 
     #[tokio::test]

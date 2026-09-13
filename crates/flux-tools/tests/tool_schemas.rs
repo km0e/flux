@@ -14,7 +14,7 @@
 use flux_core::Tool;
 use flux_tools::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    RustInitTool, RustVerifyTool, SkillListTool, SkillReadTool, WriteFileTool,
+    SkillListTool, SkillReadTool, WriteFileTool,
 };
 
 fn expected_schema(name: &str) -> serde_json::Value {
@@ -89,24 +89,9 @@ fn expected_schema(name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "command": { "type": "string", "description": "The shell command to execute." },
+                "timeout": { "type": "integer", "description": "Timeout in seconds (default 300, clamped to 1..=1800)." },
             },
             "required": ["command"],
-            "additionalProperties": false,
-        }),
-        "rust_init" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Project name." },
-            },
-            "required": ["name"],
-            "additionalProperties": false,
-        }),
-        "rust_verify" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "path": { "type": "string", "description": "Path to the Rust project. Defaults to the chat workdir." },
-            },
-            "required": [],
             "additionalProperties": false,
         }),
         "skill_list" => serde_json::json!({
@@ -139,8 +124,6 @@ fn all_tool_schemas_match_the_pinned_contract() {
         ("grep", Box::new(GrepTool::new())),
         ("glob", Box::new(GlobTool::new())),
         ("bash", Box::new(BashTool::new())),
-        ("rust_init", Box::new(RustInitTool::new())),
-        ("rust_verify", Box::new(RustVerifyTool::new())),
         ("skill_list", Box::new(SkillListTool::new())),
         ("skill_read", Box::new(SkillReadTool::new())),
     ];

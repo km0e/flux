@@ -1,5 +1,13 @@
 use serde::{Deserialize, Serialize};
 
+/// Uniform transcript marker for an interrupted tool result. The contract:
+/// tools never mention cancellation themselves — they return whatever
+/// partial output they have (possibly empty); the supervisor prepends the
+/// marker, so the transcript marks interruption in exactly one place.
+/// Lives in flux-core because it is transcript vocabulary, not tool-exec
+/// private state — the read-side history validator synthesizes it too.
+pub const INTERRUPTED_MARK: &str = "[interrupted by user]";
+
 /// The role of a chat message.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, strum::Display)]
 #[serde(rename_all = "snake_case")]

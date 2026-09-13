@@ -9,9 +9,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/cn';
 import { useIsMobile } from '../hooks/useIsMobile';
+import { takePendingDraft } from '../services/forkDraft';
 import { ArrowUp, Square } from 'lucide-react';
 
 interface ChatInputProps {
+  /** The composer's chat — keys the fork-draft consume (a fork's composer
+   *  opens prefilled with the fork point's content; see forkDraft.ts). */
+  chatId: string;
   onSend: (text: string) => void;
   onCancel: () => void;
   disabled: boolean;
@@ -29,11 +33,19 @@ function inputMaxHeight(): number {
   return Math.min(320, Math.round(window.innerHeight * 0.4));
 }
 
+/** Re-run the auto-grow: collapse to auto, then clamp to the scrollHeight
+ * (≤ the event-time viewport cap). The one place the height dance lives —
+ * the fork-draft fill, the compose-event fill, and typing all ride it. */
+function grow(el: HTMLTextAreaElement): void {
+  el.style.height = 'auto';
+  el.style.height = Math.min(el.scrollHeight, inputMaxHeight()) + 'px';
+}
+
 /** The char counter appears only near the model's inline limit — a permanent
  * counter is noise; 8000 is the output-buffer budget of the kernel. */
 const CHAR_WARN_AT = 8000;
 
-export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputProps): React.ReactElement {
+export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: ChatInputProps): React.ReactElement {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [len, setLen] = useState(0);
   // The keyboard-hint suffix is desktop-only: at the mobile 16px composer
@@ -48,6 +60,19 @@ export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputPr
     inputRef.current?.focus();
   }, []);
 
+  // A fork's redo-turn draft: the fork's composer opens with the fork
+  // point's content prefilled (the transcript copy stops before it —
+  // services/forkDraft.ts). Consumed ONCE, on the fork's first mount —
+  // editing the text is the fork's whole point.
+  useEffect(() => {
+    const draft = takePendingDraft(chatId);
+    const el = inputRef.current;
+    if (!draft || !el) return;
+    el.value = draft;
+    grow(el);
+    setLen(el.value.length);
+  }, [chatId]);
+
   // A prompt suggestion (or any compose request) fills the composer. The
   // empty state lives in imperative DOM (services/panes.ts) — this window
   // event is the bridge across the React boundary.
@@ -57,8 +82,7 @@ export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputPr
       const text = (e as CustomEvent<string>).detail;
       if (!el || !text) return;
       el.value = text;
-      el.style.height = 'auto';
-      el.style.height = Math.min(el.scrollHeight, inputMaxHeight()) + 'px';
+      grow(el);
       el.focus();
       el.setSelectionRange(el.value.length, el.value.length);
       setLen(el.value.length);
@@ -90,8 +114,7 @@ export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputPr
   const onInput = () => {
     const el = inputRef.current;
     if (!el) return;
-    el.style.height = 'auto';
-    el.style.height = Math.min(el.scrollHeight, inputMaxHeight()) + 'px';
+    grow(el);
     setLen(el.value.length);
   };
 
@@ -117,7 +140,7 @@ export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputPr
         id="input-row"
         className={cn(
           'flex items-end gap-2 rounded-md border bg-inset px-3 py-2 shadow-sm',
-          'border-border transition-colors duration-150 focus-within:border-accent',
+          'border-border transition-colors duration-fast focus-within:border-accent',
           streaming && 'streaming border-accent/45 focus-within:border-accent',
         )}
       >
@@ -140,7 +163,7 @@ export function ChatInput({ onSend, onCancel, disabled, streaming }: ChatInputPr
         <button
           id="send"
           className={cn(
-            'grid size-8 max-md:size-10 shrink-0 place-items-center rounded-lg transition-all duration-150',
+            'grid size-8 max-md:size-10 shrink-0 place-items-center rounded-sm transition-all duration-fast',
             streaming
               ? 'bg-warn text-white hover:brightness-110'
               : 'bg-accent text-accent-fg hover:bg-accent-strong',

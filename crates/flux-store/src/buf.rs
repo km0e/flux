@@ -5,9 +5,9 @@
 //! at the same id, so the reference is self-describing and stable across
 //! engine rebuilds AND process restarts. Entries are never overwritten —
 //! a call id maps to exactly one output — and they die when their tool
-//! call disappears from the model's view: the GC (at a rebase or a
-//! feature boundary) deletes every entry whose call id has no tool
-//! message above the persisted `context_base`. Chat deletion cascades.
+//! call disappears from the model's view: entries live exactly as long
+//! as their chat (a transcript only grows), and a FORK copies the
+//! entries its copied transcript carries. Chat deletion cascades.
 
 use crate::Store;
 use anyhow::{Context, Result};
@@ -29,8 +29,8 @@ impl Store {
     }
 
     /// Load one buffered output (`buf_read`'s read-through). `None` = the
-    /// reference no longer resolves (never existed, evicted by the GC, or
-    /// an old-format reference from before call-id anchoring).
+    /// reference no longer resolves (never existed, or the chat was
+    /// deleted).
     pub async fn load_buf_entry(&self, chat_id: &str, call_id: &str) -> Result<Option<String>> {
         let row: Option<(String,)> =
             sqlx::query_as("SELECT content FROM buf_entries WHERE chat_id = ?1 AND call_id = ?2")
@@ -40,26 +40,6 @@ impl Store {
                 .await
                 .context("failed to load buf entry")?;
         Ok(row.map(|(content,)| content))
-    }
-
-    /// Delete every buffered entry whose tool call has NO tool message
-    /// above `base_message_id` — the entries the model can no longer
-    /// reference after a rebase / feature boundary archived their calls.
-    /// One statement: the keep-set never crosses into the application.
-    /// Returns the number of entries deleted.
-    pub async fn gc_buf_entries(&self, chat_id: &str, base_message_id: i64) -> Result<u64> {
-        let result = sqlx::query(
-            "DELETE FROM buf_entries WHERE chat_id = ?1 AND call_id NOT IN (
-                     SELECT tool_call_id FROM messages
-                     WHERE chat_id = ?1 AND id > ?2 AND tool_call_id IS NOT NULL
-                 )",
-        )
-        .bind(chat_id)
-        .bind(base_message_id)
-        .execute(&self.pool)
-        .await
-        .context("failed to gc buf entries")?;
-        Ok(result.rows_affected())
     }
 }
 
@@ -110,27 +90,37 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_deletes_entries_below_the_base_and_keeps_live_ones() {
+    async fn fork_copies_the_copied_calls_entries() {
         let store = test_store().await;
         seed_chat(&store, "c").await;
-        // Two tool calls land in the transcript (ids 1..4: call_old then
-        // call_live, each a user turn + a tool result).
+        // A fork inherits the workdir pair — a server-created chat always
+        // carries one.
+        store
+            .save_state_entries("c", &[("workdir", "/tmp"), ("current_dir", "/tmp")])
+            .await
+            .unwrap();
+        // Transcript: user + tool result (call_old) + user (id 3); a
+        // buffered output for the call and one orphan (no call anywhere).
         store
             .append_messages(
                 "c",
                 &[
                     flux_core::Message::user("go"),
+                    // The assistant turn is what carries the tool_calls
+                    // row (the buf keep-set joins on it).
+                    flux_core::Message {
+                        role: flux_core::Role::Assistant,
+                        content: String::new(),
+                        reasoning_content: None,
+                        tool_calls: vec![flux_core::ToolCall {
+                            id: "call_old".into(),
+                            name: "bash".into(),
+                            arguments: "{}".into(),
+                        }],
+                        tool_call_id: None,
+                    },
                     flux_core::Message::tool("call_old", "old result"),
-                ],
-            )
-            .await
-            .unwrap();
-        store
-            .append_messages(
-                "c",
-                &[
                     flux_core::Message::user("more"),
-                    flux_core::Message::tool("call_live", "live result"),
                 ],
             )
             .await
@@ -139,48 +129,37 @@ mod tests {
             .save_buf_entry("c", "call_old", "OLD OUTPUT")
             .await
             .unwrap();
-        store
-            .save_buf_entry("c", "call_live", "LIVE OUTPUT")
-            .await
-            .unwrap();
+        store.save_buf_entry("c", "orphan", "junk").await.unwrap();
 
-        // Rebase to above message 2 (call_old archived, call_live kept):
-        // exactly the archived call's entry dies.
-        let deleted = store.gc_buf_entries("c", 2).await.unwrap();
-        assert_eq!(deleted, 1);
-        assert!(
+        // Fork at the LAST user turn (id 4): the copy carries the whole
+        // tool exchange, so its entry rides along; the orphan does not.
+        // The source keeps everything.
+        store.fork_chat("c", 4, "f", "c (fork)").await.unwrap();
+        assert_eq!(
+            store
+                .load_buf_entry("f", "call_old")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("OLD OUTPUT")
+        );
+        assert!(store.load_buf_entry("f", "orphan").await.unwrap().is_none());
+        assert_eq!(
             store
                 .load_buf_entry("c", "call_old")
                 .await
                 .unwrap()
-                .is_none()
+                .as_deref(),
+            Some("OLD OUTPUT")
         );
         assert_eq!(
             store
-                .load_buf_entry("c", "call_live")
+                .load_buf_entry("c", "orphan")
                 .await
                 .unwrap()
                 .as_deref(),
-            Some("LIVE OUTPUT")
+            Some("junk")
         );
-
-        // Idempotent: a second GC at the same base deletes nothing.
-        assert_eq!(store.gc_buf_entries("c", 2).await.unwrap(), 0);
-    }
-
-    #[tokio::test]
-    async fn gc_covers_calls_without_entries_and_entries_without_calls() {
-        let store = test_store().await;
-        seed_chat(&store, "c").await;
-        // An entry whose call never reached the transcript (a mid-round
-        // crash orphan) — the GC sweeps it at any base.
-        store.save_buf_entry("c", "orphan", "junk").await.unwrap();
-        store
-            .append_messages("c", &[flux_core::Message::user("hi")])
-            .await
-            .unwrap();
-        assert_eq!(store.gc_buf_entries("c", 1).await.unwrap(), 1);
-        assert!(store.load_buf_entry("c", "orphan").await.unwrap().is_none());
     }
 
     #[tokio::test]

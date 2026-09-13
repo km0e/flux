@@ -1,6 +1,6 @@
 /**
  * bridge.ts — typed message bus from UI code to the active transport
- * (the WS connection).
+ * (the Connect connection).
  *
  * Replaces the ad-hoc `window.__flux*` global assignments with a single
  * injectable module-level singleton. Tests call `resetBridgeForTest()` to
@@ -23,7 +23,7 @@ let current: HostBridge = {
   reconnect: noop,
 };
 
-/** Inject bridge handlers (typically called from index.tsx at init). */
+/** Inject bridge handlers (called from mount.tsx at init). */
 export function setBridge(partial: Partial<HostBridge>): void {
   if (partial.send) current.send = partial.send;
   if (partial.reconnect) current.reconnect = partial.reconnect;

@@ -1,7 +1,9 @@
-// MCP launch-list management — the servers spawn as child processes at
-// SERVER START (no hot-apply): a successful add persists the row and takes
-// effect at the next restart; spawn failures keep the row for the next
-// start. Validation failures ride the inline `error` (D4').
+// MCP launch-list management — persist-first + LIVE apply: a successful
+// add spawns/connects the child, registers its tools into the global
+// registry, and the matching chats rebuild at the machine gate. A
+// self-healing supervisor respawns a dead child with capped backoff; a
+// row whose spawn fails stays (retried at the next server start).
+// Validation failures ride the inline `error` (D4').
 syntax = "proto3";
 
 package flux.v1;
@@ -12,11 +14,12 @@ service McpService {
   // The registered servers, sorted by id (env values redacted — keys only).
   rpc ListServers(ListServersRequest) returns (ListServersResponse);
 
-  // Register an MCP server to spawn at server start. The list lives in
-  // the server database (the server has no config file).
+  // Register an MCP server (spawned as a child process). The list lives
+  // in the server database (the server has no config file).
   rpc AddServer(AddServerRequest) returns (AddServerResponse);
 
-  // Remove a registered server (takes effect at the next restart).
+  // Remove a registered server (unregisters exactly the tools it
+  // registered; a live child is killed).
   rpc RemoveServer(RemoveServerRequest) returns (RemoveServerResponse);
 }
 

@@ -2,13 +2,13 @@
  * models.ts — LOCAL saved-model registry client.
  *
  * Direct gRPC-Web calls (the ModelService RPCs): replies pair natively
- * over HTTP — the old value-matched AckWait correlation is gone. The
- * broadcast/reply routing that lands the authoritative list in the
+ * over HTTP. The broadcast/reply routing that lands the authoritative
+ * list in the
  * store's `savedModels` stays (the `models` stream element routes through
  * handlers.ts into handleModelsFrame).
  *
  * Provides: fetchModels, saveModel, removeModel, syncModels,
- *           importCatalogModel, handleModelsFrame, savedModelParams,
+ *           handleModelsFrame, findSavedModel, savedModelParams,
  *           effectiveContextLength
  * Depends: core/grpc.ts, core/state.ts
  */
@@ -48,13 +48,6 @@ export function syncModels(
   model?: string,
 ): Promise<{ updated?: number; error?: string }> {
   return grpcSyncModels(provider, model);
-}
-
-/** Import one catalog entry into the LOCAL registry: a create via
- * `model_save` whose metadata the server auto-fills from models.dev.
- * Conflict rule lives with the caller (it knows the import batch). */
-export function importCatalogModel(provider: string, model: string): Promise<string | undefined> {
-  return saveModel(provider, model, {}).then((r) => r.error);
 }
 
 /** Reply routing (called by handlers.ts): the authoritative list replaces

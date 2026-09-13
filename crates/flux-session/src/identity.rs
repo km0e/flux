@@ -23,8 +23,7 @@ use std::time::{Duration, Instant};
 /// network — implementations use try_send semantics and drop on a full
 /// queue. The elements are the proto wire vocabulary
 /// ([`SubscribeResponse`]) — the event plane IS the wire, and the fanout
-/// hands it pre-typed stream elements (the old pre-serialized JSON sink
-/// died with the WS transport).
+/// hands it pre-typed stream elements.
 ///
 /// Two channels per connection (see the stream sink in flux-server's
 /// grpc::events):

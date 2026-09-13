@@ -1,15 +1,16 @@
 /**
- * session.ts — sessionStorage-backed identity continuity (D-19).
+ * session.ts — sessionStorage-backed identity continuity.
  *
- * The server hands the connection a session id in `ready`; the client
- * stores it and replays it via `session_resume` on the next connection, so
- * a page refresh keeps its leases and subscriptions.
+ * The Subscribe stream's ready frame hands the connection the session id;
+ * the client stores it and the stored token rides the NEXT stream open —
+ * the server adopts it within the grace window (leases and subscriptions
+ * survive), so a page refresh keeps its chat identity.
  *
  * sessionStorage is deliberate (NOT localStorage): it is per-tab, so two
  * tabs are two sessions — the lease model's "one operator per chat per
  * window" semantics depend on that — while a tab refresh re-uses its own
  * identity. All accessors swallow storage failures (private mode) so the
- * chat UI degrades to the pre-D-19 fresh-session behavior.
+ * chat UI degrades to fresh-session behavior.
  *
  * Provides: readStoredSessionId, storeSessionId, readStoredActiveChat, storeActiveChat
  */

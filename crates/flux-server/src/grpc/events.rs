@@ -1,12 +1,12 @@
-//! The event plane — the session-scoped `Subscribe` server-streaming call,
-//! the ONE anchor of a client identity's lifecycle (R3).
+//! The event plane — the session-scoped `Subscribe` server-streaming
+//! call, the ONE anchor of a client identity's lifecycle.
 //!
 //! Opening the stream attaches the identity: the request's `session_id`
 //! adopts a previous identity (page refresh / reconnect within the grace
 //! window), absence mints a fresh one. The first frame is `ready` carrying
 //! the authoritative token plus the leases held after the attach — the
-//! old `session_resume` handshake collapsed into this frame. Closing the
-//! stream detaches (the stale-teardown guard compares the sink Arc, so a
+//! resume handshake collapsed into this frame. Closing the stream
+//! detaches (the stale-teardown guard compares the sink Arc, so a
 //! superseded stream's teardown no-ops); the grace window and the reaper
 //! take over from there, unchanged.
 //!
@@ -16,8 +16,7 @@
 //! content queue drops frames (the router's gap machinery recovers); a
 //! failed pump send means the client went away — the pump exits and the
 //! detach runs. The pump also injects periodic keepalive frames so the
-//! client's frame deadline detects a half-open connection (the WS
-//! ping/pong role on this plane).
+//! client's frame deadline detects a half-open connection.
 
 use flux_proto::flux::v1::event_service_server::EventService;
 use flux_proto::flux::v1::subscribe_response::Kind;
@@ -29,9 +28,8 @@ use tokio::sync::mpsc;
 use tonic::Request;
 
 /// Content queue depth per stream — the fanout's single drop surface.
-/// Mirrors the old WS transport's queue: a client that stops reading fills
-/// it and further frames are dropped (gap recovery) instead of
-/// head-of-line-blocking every chat.
+/// A client that stops reading fills it and further elements are dropped
+/// (gap recovery) instead of head-of-line-blocking every chat.
 const STREAM_CONTENT_QUEUE: usize = 1024;
 /// Control queue depth — must-deliver notices (gap, question prompts) on
 /// a small priority queue the pump drains before content.
@@ -100,10 +98,10 @@ impl flux_session::SessionSink for StreamSink {
 }
 
 /// Drain the two queues into the response stream, control first (the
-/// biased select mirrors the WS writer's priority drain). Exits — running
-/// the detach teardown — when the response stream dies (client gone), the
-/// request future is dropped, or both queues close (the identity dropped
-/// this sink). `keepalive` is injectable for tests.
+/// biased select gives notices priority). Exits — running the detach
+/// teardown — when the response stream dies (client gone), the request
+/// future is dropped, or both queues close (the identity dropped this
+/// sink). `keepalive` is injectable for tests.
 async fn pump(
     mut content: mpsc::Receiver<SubscribeResponse>,
     mut control: mpsc::Receiver<SubscribeResponse>,
@@ -359,6 +357,10 @@ mod tests {
             .await
             .unwrap();
         let cid = info.chat_id.to_owned();
+        // Claim BEFORE the round (the real client's create → claim flow):
+        // the claim registers the viewer slot, so the router's fanout
+        // reaches this stream.
+        let _ = state.claim_chat(&session, &cid).await;
         state
             .send_message(&session, &cid, "hi".into())
             .await
@@ -370,7 +372,21 @@ mod tests {
         .await;
 
         // The first content frame of the chat carries seq 0 (fetch_add's
-        // old value) and the delta content, straight from the router.
+        // old value) and the delta content, straight from the router. The
+        // turn-acceptance `message_persisted` announcement precedes the
+        // round's streaming (persist-before-announce), so it takes seq 0
+        // and the first delta lands on seq 1.
+        let persisted = responses
+            .iter()
+            .find_map(|r| match &r.kind {
+                Some(ResponseKind::MessagePersisted(p)) => {
+                    Some((r.chat_id.as_str(), p.id, r.chat_seq))
+                }
+                _ => None,
+            })
+            .expect("message_persisted seen");
+        assert_eq!(persisted.0, cid.as_str());
+        assert_eq!(persisted.2, 0, "the router stamped the frame");
         let delta = responses
             .iter()
             .find_map(|r| match &r.kind {
@@ -382,7 +398,7 @@ mod tests {
             .expect("text_delta seen");
         assert_eq!(delta.0, cid.as_str());
         assert_eq!(delta.1, "hello plane");
-        assert_eq!(delta.2, 0, "the router stamped the frame");
+        assert_eq!(delta.2, persisted.2 + 1, "the seq advanced monotonically");
     }
 
     /// A provider registration broadcasts to every session — the stream

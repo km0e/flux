@@ -1,9 +1,10 @@
 //! The management families — providers, models, mcp servers, skills.
 //!
-//! All four call the SAME operations as the WS dispatch
-//! (crate::management): persist-first mutations with their broadcast side
-//! effects inside. These impls are pure serialization shims between the
-//! proto shapes and the operation payloads — no behavior lives here.
+//! All four call the SAME operations crate::management exposes (the
+//! shared layer the MCP supervisor's event consumer uses too):
+//! persist-first mutations with their broadcast side effects inside.
+//! These impls are pure serialization shims between the proto shapes and
+//! the operation payloads — no behavior lives here.
 
 use crate::management;
 use crate::registry::ProviderRegistry;
@@ -237,9 +238,9 @@ impl McpService for McpManagement {
         &self,
         _request: Request<ListServersRequest>,
     ) -> Result<tonic::Response<ListServersResponse>, tonic::Status> {
-        // Same contract as the WS frame: a listing failure degrades to an
+        // Same contract as everywhere else: a listing failure degrades to an
         // empty list + a warn (the dialog renders nothing to retry against).
-        let servers = match crate::mcp::summaries(&self.state.store).await {
+        let servers = match crate::mcp::summaries(&self.state.store, &self.mcp.states()).await {
             Ok(servers) => servers,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to list MCP servers");
@@ -254,6 +255,7 @@ impl McpService for McpManagement {
                     command: s.command,
                     args: s.args,
                     env_keys: s.env_keys,
+                    state: s.state,
                 })
                 .collect(),
         }))
@@ -273,7 +275,7 @@ impl McpService for McpManagement {
         let m = management::add_mcp_server(&self.state, &self.mcp, row).await;
         let ok = m.error.is_none();
         if ok {
-            management::broadcast_mcp_servers(&self.state).await;
+            management::broadcast_mcp_servers(&self.state, &self.mcp).await;
         }
         Ok(tonic::Response::new(AddServerResponse {
             id: m.id,
@@ -288,7 +290,7 @@ impl McpService for McpManagement {
         let req = request.into_inner();
         let m = management::remove_mcp_server(&self.state, &self.mcp, req.id).await;
         if m.error.is_none() {
-            management::broadcast_mcp_servers(&self.state).await;
+            management::broadcast_mcp_servers(&self.state, &self.mcp).await;
         }
         Ok(tonic::Response::new(RemoveServerResponse {
             id: m.id,

@@ -6,7 +6,7 @@
  * element carries the authoritative token + leases, the stream close
  * detaches into the server's grace window. Keepalive elements mark the
  * connection live — a frame deadline (3× the server's 30s period) detects
- * a half-open connection and reconnects (the WS ping/pong role).
+ * a half-open connection and reconnects.
  *
  * The stream elements are translated ONTO the existing handler vocabulary
  * (ServerMessage shapes dispatched through services/dispatch.ts), so the
@@ -25,6 +25,7 @@
  */
 
 import { clients } from './grpc';
+import { mcpStateOf } from './grpc';
 import { readStoredSessionId, storeSessionId } from './session';
 import type {
   ChatInfo,
@@ -45,7 +46,7 @@ import { newId } from '../lib/id';
 const KEEPALIVE_DEADLINE_MS = 90_000;
 /** Deadline check cadence — well under the deadline itself. */
 const DEADLINE_TICK_MS = 10_000;
-/** Reconnect backoff schedule (mirrors the old WS manager's). */
+/** Reconnect backoff schedule: 2s base, ×2 per retry, 30s cap, 5 tries. */
 const RETRY_DELAYS_MS = [2_000, 4_000, 8_000, 16_000, 30_000];
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'failed';
@@ -63,6 +64,7 @@ export function protoChatToChat(c: ProtoChatInfo): ChatInfo {
     workdir: c.workdir,
     provider: c.provider,
     model: c.model,
+    forked_from_chat_id: c.forkedFromChatId ?? undefined,
   };
 }
 
@@ -145,19 +147,20 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
         chat_id: chatId,
         state: k.value.state === ProtoChatStateKind.STREAMING ? 'streaming' : 'idle',
       };
-    case 'chatHistory':
+    case 'chatHistory': {
       return {
         type: 'chat_history',
         chat_id: chatId,
         messages: k.value.messages.map(protoMessageToHistory),
       };
-    case 'contextRebased': {
-      // proto int64 → bigint; message ids sit far below 2^53.
-      const base = k.value.baseMessageId;
+    }
+    case 'messagePersisted': {
+      const id = k.value.id;
       return {
-        type: 'context_rebased',
+        type: 'message_persisted',
         chat_id: chatId,
-        base_message_id: typeof base === 'bigint' ? Number(base) : 0,
+        id: typeof id === 'bigint' ? Number(id) : 0,
+        content: k.value.content,
       };
     }
     case 'providerSwitched':
@@ -195,6 +198,7 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
           }),
         ),
       };
+
     case 'mcpServers':
       return {
         type: 'mcp_servers',
@@ -203,6 +207,7 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
           command: s.command,
           args: s.args,
           env_keys: s.envKeys,
+          state: mcpStateOf(s.state),
         })),
       };
     case 'skills':
@@ -266,7 +271,6 @@ const GATED_KINDS = new Set([
   'streamEnd',
   'streamCancelled',
   'chatState',
-  'contextRebased',
   'providerSwitched',
 ]);
 
@@ -299,11 +303,11 @@ export function reconcileElement(el: SubscribeResponse, snapshotSeq: Record<stri
 type MessageHandler = (msg: ServerMessage) => void;
 
 /**
- * ConnectConnection mirrors the old WS ConnectionManager's contract:
- * status transitions, an open handler, a message handler, a pending queue
- * flushed on open, exponential reconnect backoff, and half-open detection
- * (now keyed on the server's keepalive frames instead of pongs). The send
- * path translates ClientMessages onto ChatService RPCs.
+ * ConnectConnection — the page's one connection: status transitions, an
+ * open handler, a message handler, a pending queue flushed on open,
+ * exponential reconnect backoff, and half-open detection keyed on the
+ * server's keepalive frames (the frame deadline). The send path
+ * translates ClientMessages onto ChatService RPCs.
  */
 export class ConnectConnection {
   private abort: AbortController | null = null;
@@ -345,7 +349,7 @@ export class ConnectConnection {
 
     const abort = new AbortController();
     this.abort = abort;
-    // Identity continuity (D-19): the stored token rides the open — the
+    // Identity continuity: the stored token rides the open — the
     // adoption happens IN the handshake (the ready frame always carries
     // the authoritative result).
     const prevSession = readStoredSessionId();
@@ -400,10 +404,10 @@ export class ConnectConnection {
     if (el.kind.case !== 'ready') return; // guarded by the caller
     const ready = el.kind.value;
     storeSessionId(ready.sessionId);
-    // The WS path's session_resumed semantics, reused verbatim: the
-    // authoritative identity + the leases restore the focus and pull the
-    // chat list. Synthesizing the frame keeps the handler table the ONE
-    // place that logic lives.
+    // The ready element is translated into the session_resumed frame:
+    // the authoritative identity + the leases restore the focus and pull
+    // the chat list. Synthesizing the frame keeps the handler table the
+    // ONE place that logic lives.
     this.startDeadlineCheck();
     log.info('stream attached (session ' + ready.sessionId + ')');
     this.onStatusChange?.('connected');
@@ -556,7 +560,7 @@ export class ConnectConnection {
         }
         case 'chat_claim': {
           // (The optimistic read-only clear + loadedChatId mark stay with
-          // the callers — lease.ts — same as the WS path.) A claim always
+          // the caller — lease.ts.) A claim always
           // grants: another holder's lease is STOLEN server-side and the
           // previous holder is demoted in-band (the chat_busy error event
           // degrades ITS pane). The snapshot rides the stream (single-point
@@ -613,23 +617,31 @@ export class ConnectConnection {
           }
           return;
         }
-        case 'rebase': {
-          const resp = await clients.chat.rebaseChat(
-            {
-              chatId: data.chat_id,
-              baseMessageId:
-                data.base_message_id !== undefined ? BigInt(data.base_message_id) : undefined,
-            },
+        case 'fork': {
+          // proto int64 → bigint; message row ids sit far below 2^53.
+          const resp = await clients.chat.forkChat(
+            { chatId: data.chat_id, forkPoint: BigInt(data.fork_point) },
             { timeoutMs: 8000, headers },
           );
-          // The echoed base is informational — the context_rebased stream
-          // event (same value) is the notice the pane renders.
-          log.info('rebase [' + data.chat_id + '] landed at base ' + resp.baseMessageId);
+          if (resp.error || !resp.chat) {
+            // Validation failures (unknown chat, fork point not a user
+            // message) ride the inline error (D4').
+            this.onMessage?.({
+              type: 'error',
+              chat_id: data.chat_id,
+              code: 'invalid_request',
+              message: resp.error ?? 'fork failed',
+            });
+            return;
+          }
+          // The ack IS the chat_created payload — addChat auto-selects the
+          // fork, and the claim's snapshot delivers the copied transcript.
+          this.onMessage?.({ type: 'chat_created', chat: protoChatToChat(resp.chat) });
           return;
         }
         case 'question_response': {
-          // Stale/unknown answers drop silently server-side — same as the
-          // WS frame; a refusal surfaces no error.
+          // Stale/unknown answers drop silently server-side — a refusal
+          // surfaces no error.
           await clients.chat.answerQuestion(
             { chatId: data.chat_id, id: data.id, answer: data.answer },
             { timeoutMs: 8000, headers },
@@ -638,8 +650,7 @@ export class ConnectConnection {
         }
         default:
           // Management/fs families ride their own typed clients (services/
-          // *.ts call core/grpc.ts directly); ping/session_resume have no
-          // Connect equivalent (keepalives anchor liveness and identity).
+          // *.ts call core/grpc.ts directly) — nothing to translate here.
           log.debug('send ignored on the connect plane: ' + data.type);
           return;
       }

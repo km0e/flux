@@ -6,6 +6,7 @@ import { ensurePane, getPaneIfExists, _resetPanesForTest } from '../../services/
 import { getController } from '../../services/stream';
 import { markInterrupt } from '../../services/stream-handler';
 import { bridge, setBridge, resetBridgeForTest } from '../../core/bridge';
+import { stashForkDraft, takePendingDraft } from '../../services/forkDraft';
 import { setDialogImpls, resetDialogsForTest } from '../../services/dialogs';
 import type { ConnectionLike } from '../../services/dispatch';
 import type { ServerMessage } from '../../core/types';
@@ -126,6 +127,32 @@ describe('handlers', () => {
     dispatchMessage({ type: 'chat_history', chat_id: 'c1', messages: [] }, ctx);
 
     expect(useFlux.getState().loadedChatId).toBe('c1');
+  });
+
+  it("a fork's chat_created pairs the stashed redo-turn draft with the new chat", () => {
+    stashForkDraft('c1', 'redo me');
+    const { ctx } = mockCtx();
+    dispatchMessage(
+      {
+        type: 'chat_created',
+        chat: {
+          chat_id: 'fork-1',
+          name: 'One (fork)',
+          created_at: '2026-01-01T00:00:00Z', last_activity_at: '2026-01-01T00:00:00Z',
+          workdir: '/tmp/proj',
+          provider: 'default',
+          model: 'gpt-4o-mini',
+          active: false,
+          forked_from_chat_id: 'c1',
+        },
+      },
+      ctx,
+    );
+    // addChat auto-selected the fork; the draft now belongs to it and its
+    // composer consumes it on mount (once).
+    expect(useFlux.getState().activeChatId).toBe('fork-1');
+    expect(takePendingDraft('fork-1')).toBe('redo me');
+    expect(takePendingDraft('fork-1')).toBeUndefined();
   });
 
   it('question_required: host answers, wait bar dismissed, question_response sent', async () => {
@@ -298,16 +325,6 @@ describe('handlers', () => {
     expect(conn.send).toHaveBeenCalledWith({ type: 'chat_list' });
   });
 
-  it('the ready frame is gone: no handler, no store write', () => {
-    const { ctx, conn } = mockCtx();
-    sessionStorage.removeItem('flux.session.id');
-    // The wire vocabulary's identity frames collapsed into
-    // session_resumed — a stray ready frame dispatches to nothing.
-    expect(() => dispatchMessage({ type: 'ready', session_id: 's-1' } as never, ctx)).not.toThrow();
-    expect(sessionStorage.getItem('flux.session.id')).toBeNull();
-    expect(conn.send).not.toHaveBeenCalled();
-  });
-
   it('session_resumed stores the authoritative id and restores a leased focus', () => {
     const { ctx, conn } = mockCtx();
     dispatchMessage(
@@ -349,46 +366,6 @@ describe('handlers', () => {
     expect(chat?.provider).toBe('swap');
     expect(chat?.model).toBe('custom-model');
     expect(pane.textContent).toContain('swap · custom-model');
-  });
-
-  it.skip('provider_models frame is gone (probes ride the GetModels RPC — providers.test pins it)', async () => {
-    const { ctx } = mockCtx();
-    const { probeProvider } = await import('../../services/providers');
-    const promise = probeProvider('deepseek');
-    dispatchMessage(
-      {
-        type: 'provider_models',
-        provider: 'deepseek',
-        models: [
-          { id: 'm2', context_length: 131072 },
-          { id: 'm1' },
-        ],
-      },
-      ctx,
-    );
-    await expect(promise).resolves.toEqual({
-      models: [
-        { id: 'm2', context_length: 131072 },
-        { id: 'm1' },
-      ],
-      error: undefined,
-    });
-    expect(useFlux.getState().providerModels['deepseek']).toEqual([
-      { id: 'm2', context_length: 131072 },
-      { id: 'm1' },
-    ]);
-    // Success clears the probe-error slot.
-    expect(useFlux.getState().providerProbeErrors['deepseek']).toBeUndefined();
-
-    // A failing probe caches [] AND records the error for the dialog.
-    const failed = probeProvider('broken');
-    dispatchMessage(
-      { type: 'provider_models', provider: 'broken', models: [], error: 'connection refused' },
-      ctx,
-    );
-    await expect(failed).resolves.toEqual({ models: [], error: 'connection refused' });
-    expect(useFlux.getState().providerModels['broken']).toEqual([]);
-    expect(useFlux.getState().providerProbeErrors['broken']).toBe('connection refused');
   });
 
   it('providers reply fills the registry cache', () => {

@@ -50,7 +50,7 @@ message AddProviderRequest {
   string id = 1;
   // Interface protocol — only "openai" is supported. Empty = the server
   // default ("openai"; proto3 scalars have no presence, so absence and
-  // "" carry the same meaning the WS frame's serde default did).
+  // "" mean the same thing).
   string protocol = 2;
   // Endpoint base url (bare, no `/chat/completions` suffix). Absent =
   // the OpenAI default base url.

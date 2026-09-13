@@ -49,7 +49,7 @@ export function MessageList(): React.ReactElement {
         aria-label="Scroll to latest message"
         className={cn(
           'absolute right-3 bottom-3 z-10 grid size-9 max-md:size-11 place-items-center rounded-full border border-border',
-          'bg-elev text-fg shadow-[var(--fx-shadow-pop)] transition-all duration-200',
+          'bg-elev text-fg shadow-[var(--fx-shadow-pop)] transition-all duration-base',
           'hover:border-border-strong hover:text-accent',
           visible ? 'translate-y-0 opacity-95' : 'pointer-events-none translate-y-2 opacity-0',
         )}

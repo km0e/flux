@@ -1,5 +1,5 @@
-//! The fs family — `FsList` / `FsRead`, pure reuse of the browsing helpers
-//! the WS dispatch uses (crate::fsbrowse).
+//! The fs family — `FsList` / `FsRead`, pure reuse of the browsing
+//! helpers in crate::fsbrowse.
 //!
 //! Browse failures ride the response's inline `error` (D4') — the picker
 //! renders them; the gRPC status stays reserved for transport faults.
@@ -23,7 +23,16 @@ impl FileSystemService for FsService {
     ) -> Result<tonic::Response<FsListResponse>, tonic::Status> {
         let req = request.into_inner();
         let requested = req.path.clone().unwrap_or_default();
-        let response = match fsbrowse::list_dir(req.path.as_deref()) {
+        // list_dir spawns git subprocesses and stats every entry — blocking
+        // work that must NOT sit on a tokio worker: the UI's fixed-cadence
+        // auto-refresh makes this a high-frequency call, and the chat
+        // stream pump shares the runtime. A panicking blocking task
+        // degrades to the same inline error the UI renders.
+        let path = req.path;
+        let listing = tokio::task::spawn_blocking(move || fsbrowse::list_dir(path.as_deref()))
+            .await
+            .unwrap_or_else(|e| fsbrowse::Listing::Err(format!("browse failed: {e}")));
+        let response = match listing {
             fsbrowse::Listing::Ok {
                 path,
                 parent,
@@ -52,9 +61,15 @@ impl FileSystemService for FsService {
     ) -> Result<tonic::Response<FsReadResponse>, tonic::Status> {
         let req = request.into_inner();
         let requested = req.path.clone();
+        // Same inline-error contract as fs_list, same spawn_blocking
+        // rationale (synchronous file I/O off the async workers).
+        let path = req.path;
+        let preview = tokio::task::spawn_blocking(move || fsbrowse::preview_file(&path))
+            .await
+            .unwrap_or_else(|e| Err(format!("preview failed: {e}")));
         // Same inline-error contract as fs_list: preview failures are UI
         // data (the pane renders a neutral placeholder), never statuses.
-        let response = match fsbrowse::preview_file(&req.path) {
+        let response = match preview {
             Ok(p) => FsReadResponse {
                 requested,
                 error: None,

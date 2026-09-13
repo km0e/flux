@@ -1,13 +1,13 @@
 /**
- * dispatch.ts — WebSocket message dispatch via a handler registry.
+ * dispatch.ts — wire message dispatch via a handler registry.
  *
- * The embedding-host channel (dialogs, workspace pushes, question
- * round-trips) does NOT flow through here — it is owned by the embedding's
- * ChatHost implementation (core/host.ts). This registry is purely the WS
- * wire.
+ * The Connect plane's translated frames (ServerMessage shapes, delivered
+ * by core/grpc-connection.ts) dispatch here by message type. The
+ * embedding-host channel (dialogs, question round-trips) does NOT flow
+ * through here — it is owned by the dialog service (services/dialogs.ts).
  *
  * Provides: registerHandler, dispatchMessage, DispatchContext, handleServerError
- * Depends: core/state.ts, core/connection.ts, core/bridge.ts, core/types.ts,
+ * Depends: core/state.ts, core/bridge.ts, core/types.ts,
  *          services/stream-handler.ts
  */
 
@@ -19,8 +19,7 @@ import { handleStreamError } from './stream-handler';
 import type { ServerMessage } from '../core/types';
 
 /** The connection facet the handlers use: send (the transport translates
- * onto its wire). The WS manager and the Connect connection both satisfy
- * it. */
+ * onto its wire). The Connect connection satisfies it. */
 export interface ConnectionLike {
   send(msg: import('../core/types').ClientMessage): void;
 }
@@ -39,12 +38,12 @@ export type MessageHandler = (msg: ServerMessage, ctx: DispatchContext) => void;
 
 const handlers = new Map<string, MessageHandler>();
 
-/** Register a handler for a WebSocket server message type. Call at startup. */
+/** Register a handler for a server message type. Call at startup. */
 export function registerHandler(type: string, handler: MessageHandler): void {
   handlers.set(type, handler);
 }
 
-/** Dispatch a WebSocket server message to the registered handler for its type. */
+/** Dispatch a server message to the registered handler for its type. */
 export function dispatchMessage(msg: ServerMessage, ctx: DispatchContext): void {
   log.debug('dispatch: ' + msg.type);
   const handler = handlers.get(msg.type);

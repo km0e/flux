@@ -1,14 +1,15 @@
 /**
- * handlers.ts — Table-driven WebSocket message handler registry.
+ * handlers.ts — Table-driven wire-message handler registry.
  *
- * One table: the WebSocket wire (ServerMessage, registered via
- * registerAllHandlers). Host-embedding concerns (dialogs, question
- * walk-throughs, workspace) live behind the ChatHost capability interface
- * (core/host.ts) — the embedding implements it, this file only calls it.
+ * One table: the ServerMessage frames the Connect connection translates
+ * out of the Subscribe stream (registered via registerAllHandlers).
+ * Host-embedding concerns (dialogs, question walk-throughs) live behind
+ * the promise-shaped dialog service (services/dialogs.ts) — this file
+ * only calls it.
  *
  * Provides: registerAllHandlers
  * Depends: services/dispatch.ts, services/stream-handler.ts, services/history.ts,
- *          services/panes.ts, logger.ts
+ *          services/forkDraft.ts, services/panes.ts, logger.ts
  */
 
 import { registerHandler, handleServerError, type MessageHandler, type DispatchContext } from './dispatch';
@@ -24,7 +25,8 @@ import {
   handleToolResult,
   discardInterrupt,
 } from './stream-handler';
-import { renderHistoryMessages } from './history';
+import { attachForkToLiveBubble, renderHistoryMessages } from './history';
+import { pairForkDraft } from './forkDraft';
 import { clearChatPane, getPaneIfExists, getPaneIds } from './panes';
 import { handleModelsFrame } from './models';
 import { handleSkillsMessage } from './skills';
@@ -48,6 +50,7 @@ function toChat(c: ChatInfo): Chat {
     workdir: c.workdir,
     provider: c.provider,
     model: c.model,
+    forked_from_chat_id: c.forked_from_chat_id,
   };
 }
 
@@ -101,7 +104,7 @@ const HANDLERS = {
     for (const c of msg.chats) {
       if (!c.active) ctx.state.setReadOnly(c.chat_id, false);
     }
-    // D-06: a programmatic re-select (activeChatId survives reconnects,
+    // A programmatic re-select (activeChatId survives reconnects,
     // loadedChatId was cleared by resetStreamingForReconnect; the delete
     // fallback goes through switchLease) re-opens via claim — the single
     // message carries history snapshot + subscription + lease. An
@@ -115,6 +118,12 @@ const HANDLERS = {
 
   chat_created: (msg, ctx) => {
     ctx.state.addChat(toChat(msg.chat));
+    // A fork's redo-turn draft: pair the stashed fork-point content with
+    // the new chat so its composer opens prefilled (see forkDraft.ts —
+    // the copy excludes the fork point; it re-enters when re-sent).
+    if (msg.chat.forked_from_chat_id) {
+      pairForkDraft(msg.chat.chat_id, msg.chat.forked_from_chat_id);
+    }
   },
 
   /** Provider registry broadcast — the pickers' data source. */
@@ -159,10 +168,10 @@ const HANDLERS = {
     void renderHistoryMessages(msg.chat_id, msg.messages);
   },
 
-  /** D-07: the authoritative round-state snapshot (rides the open/claim
+  /** The authoritative round-state snapshot (rides the open/claim
    * response) — the client converges its streaming state from this instead
    * of inferring from events: reconnects / gap reloads / multi-window no
-   * longer drift. The snapshot is authoritative, so any in-flight R1
+   * longer drift. The snapshot is authoritative, so any in-flight
    * interrupt-sequence bookkeeping retires to it. idle = the server
    * confirms the round ended → clear streaming. */
   chat_state: (msg, ctx) => {
@@ -178,19 +187,18 @@ const HANDLERS = {
     }
   },
 
-  /** Context rebase: the archive boundary moved (manual rebase) — insert a
-   * neutral notice into the chat flow (the history stays viewable in the
-   * DB but is no longer in the model's context). */
-  context_rebased: (msg, _ctx) => {
-    const pane = getPaneIfExists(msg.chat_id);
-    if (!pane) return;
-    pane.appendChild(createNoticeBubble(`⟳ Context archived from message #${msg.base_message_id}`));
-    scrollPaneToBottom(pane, 50);
-    log.info('context_rebased [' + msg.chat_id + '] base=' + msg.base_message_id);
+  /** A user message just persisted (announced at turn acceptance) — the
+   * sender's own live bubble gains the fork affordance now, instead of
+   * only after the next history snapshot. Matching is by exact content
+   * against the pane's un-id'd user bubbles (oldest first); a cancelled
+   * turn never persisted, so its bubble never gains an id. */
+  message_persisted: (msg, _ctx) => {
+    const attached = attachForkToLiveBubble(msg.chat_id, msg.id, msg.content);
+    if (attached) log.info('message_persisted [' + msg.chat_id + '] id=' + msg.id);
   },
 
   /**
-   * Unified error channel (D-12): chat-scoped errors dispatch by code —
+   * Unified error channel: chat-scoped errors dispatch by code —
    * chat_busy flips the pane to read-only watch, stream_gap offers a reload,
    * everything else is a stream error; chat-less errors bubble globally.
    */

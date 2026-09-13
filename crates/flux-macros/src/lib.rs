@@ -56,10 +56,6 @@
 //!                     "type": "integer",
 //!                     "description": "Line to start reading from.",
 //!                 },
-//!                 "workdir": {
-//!                     "type": "string",
-//!                     "description": "Working directory for path resolution. Defaults to the sandbox boundary.",
-//!                 },
 //!             },
 //!             "required": ["file_path"],
 //!             "additionalProperties": false,
@@ -299,9 +295,8 @@ fn build_schema_fields(fields: &syn::Fields) -> (Vec<proc_macro2::TokenStream>, 
         let serde_default = field.attrs.iter().any(has_serde_default);
 
         let field_lit = syn::LitStr::new(&field_name, proc_macro2::Span::call_site());
-        // `#[serde(default)]` fields (schema-only `workdir`, injected
-        // `current_dir`) stay out of `required` — the LLM is not forced to
-        // send them; the approval layer fills them from state.
+        // `#[serde(default)]` fields stay out of `required` — the model is
+        // never forced to send a value the tool would default anyway.
         if (!is_optional || force_required) && !serde_default {
             required.push(field_lit.clone());
         }
@@ -387,8 +382,8 @@ fn infer_array_item_type(ty: &syn::Type) -> String {
 /// `#[serde(default)]` (bare path) or `#[serde(default = "path")]`
 /// (name-value). Parsed structurally: substring matching on token text
 /// would misread e.g. `rename = "default_name"` and silently flip the
-/// field out of `required` (C8). A malformed list counts as no-default —
-/// the field stays required (fail-safe direction).
+/// field out of `required`. A malformed list counts as no-default — the
+/// field stays required (fail-safe direction).
 fn has_serde_default(attr: &syn::Attribute) -> bool {
     if !attr.path().is_ident("serde") {
         return false;

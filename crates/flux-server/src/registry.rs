@@ -6,11 +6,11 @@
 //!
 //! The registry's ONLY home is the server database (`providers` table) —
 //! the config file carries no providers; the UI manages the registry over
-//! the WS (`provider_add` / `provider_remove`). Startup hydrates the
-//! in-memory map from the store (`hydrate`); every mutation persists
+//! the Connect surface (AddProvider / RemoveProvider). Startup hydrates
+//! the in-memory map from the store (`hydrate`); every mutation persists
 //! FIRST and touches memory second, so a failed write never leaves a
-//! phantom entry. A server with zero providers is legal: `chat_create`
-//! rejects unknown pins with `invalid_request` until the UI adds one.
+//! phantom entry. A server with zero providers is legal: CreateChat
+//! rejects unknown pins (inline) until the UI adds one.
 //!
 //! Instances are CHEAP (string assembly over a shared HTTP client — no
 //! network state of their own), which is what makes per-chat pins and
@@ -46,7 +46,7 @@ pub(crate) struct ModelEntryMem {
 }
 
 /// One registered provider slot: the constructor plus the EFFECTIVE base
-/// url (baked at registration) for the `provider_list` summaries. There is
+/// url (baked at registration) for the ListProviders summaries. There is
 /// no configured default model to remember — selection is always a
 /// per-chat decision. The api_key is never exposed through the summaries.
 #[derive(Clone)]

@@ -65,6 +65,12 @@
 
   --animate-fade-in: fadeIn 0.2s var(--fx-ease-out) both;
   --animate-scale-in: scaleIn 0.16s var(--fx-ease-out) both;
+
+  /* Motion durations — the TWO token steps as named utilities, so
+     component-land cannot drift off the contract (75/100/150/200ms ad-hoc
+     values retired; stream.css consumes the same vars directly). */
+  --transition-duration-fast: var(--fx-duration-fast);
+  --transition-duration-base: var(--fx-duration-base);
 }
 
 /* ── Base ───────────────────────────────────────────────────────────────

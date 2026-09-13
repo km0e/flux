@@ -1,7 +1,7 @@
 // The session-scoped event plane — ONE server-streaming Subscribe call per
 // connection multiplexes every chat's events plus the global broadcasts.
 //
-// Identity (R3): the stream IS the session lifecycle anchor — opening it
+// Identity: the stream IS the session lifecycle anchor — opening it
 // attaches the identity (the request's `session_id` adopts a previous
 // identity, absent mints a fresh one) and the first frame carries the
 // authoritative token plus the leases it holds (`ready`). The session
@@ -47,10 +47,10 @@ message SubscribeResponse {
     Ready ready = 3;
     // Server-injected liveness mark — carries no state. The client's
     // frame deadline keys on ANY element (keepalive included) to detect
-    // a half-open connection (the WS ping/pong role on this plane).
+    // a half-open connection.
     Keepalive keepalive = 23;
     TextDelta text_delta = 4;
-    // Unified error-channel events (the legacy WS `error` frame).
+    // Unified error-channel events (round errors, demotion, gap).
     ErrorEvent error = 5;
     ReasoningDelta reasoning_delta = 6;
     Usage usage = 7;
@@ -71,8 +71,13 @@ message SubscribeResponse {
     // the sink IS this stream, so a snapshot and the events it must be
     // reconciled against are ordered on one channel by construction.
     ChatHistory chat_history = 22;
-    ContextRebased context_rebased = 14;
     ProviderSwitched provider_switched = 15;
+    // A user message just persisted with this store row id — announced to
+    // the SENDER's stream so its own live bubble can gain the fork
+    // affordance (the id is the ForkChatRequest.fork_point) without
+    // waiting for the next history snapshot. `content` is the
+    // bubble-matching key.
+    MessagePersisted message_persisted = 25;
     // ── Global broadcasts (session-level) ──
     ChatsBroadcast chats = 16;
     ChatCreated chat_created = 17;
@@ -152,9 +157,12 @@ message ChatHistory {
   repeated Message messages = 1;
 }
 
-message ContextRebased {
-  // The context now lives only above this message id.
-  int64 base_message_id = 1;
+message MessagePersisted {
+  // The store row id assigned to the persisted user message.
+  int64 id = 1;
+  // The message content verbatim — the client matches it against its own
+  // un-id'd live user bubbles (exact text; the oldest match wins).
+  string content = 2;
 }
 
 message ProviderSwitched {

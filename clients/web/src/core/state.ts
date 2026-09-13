@@ -1,5 +1,5 @@
 /**
- * state.ts — Global reactive application state (zustand, D-25).
+ * state.ts — Global reactive application state (zustand).
  *
  * Components subscribe via selectors: `useFlux((s) => s.chats)`. Imperative
  * services (handlers/stream/panes — the streaming pipeline is framework-free)
@@ -64,6 +64,8 @@ export interface Chat {
   provider: string;
   /** The chat's resolved model string. */
   model: string;
+  /** Fork provenance — the SOURCE conversation (`undefined` = not a fork). */
+  forked_from_chat_id?: string;
 }
 
 export type ConnectionStatus = 'connecting' | 'connected' | 'disconnected' | 'failed';
@@ -132,7 +134,7 @@ export interface FluxStore {
   /** Scroll-to-bottom floating button visibility. */
   scrollBtnVisible: boolean;
   /** The chat whose history was last loaded (chat_history). Guards against
-   * double chat_claim sends and re-renders on refresh pushes (D-06). */
+   * double chat_claim sends and re-renders on refresh pushes. */
   loadedChatId: string;
   /** Chats being watched read-only (another window holds the lease →
    * chat_busy). While set, the composer is replaced by a viewer bar. */
@@ -216,7 +218,9 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   toasts: [],
   sidebarOpen:
     readStoredSidebarOpen() ??
-    (typeof window !== 'undefined' && window.innerWidth < 900 ? false : true),
+    // The one breakpoint (app.css matches ≤767.5px): a phone starts
+    // collapsed — the drawer opens on demand. A tablet/laptop starts open.
+    (typeof window !== 'undefined' && window.innerWidth <= 767.5 ? false : true),
   sidebarWidth: readStoredSidebarWidth() ?? SIDEBAR_DEFAULT_WIDTH,
   previewWidth: readStoredPreviewWidth() ?? PREVIEW_DEFAULT_WIDTH,
   dockOpen: false,
@@ -275,8 +279,16 @@ export const useFlux = create<FluxStore>()((set, get) => ({
       (a, b) => (b.lastActivityAt ?? b.createdAt) - (a.lastActivityAt ?? a.createdAt),
     );
     // A chats frame is the release confirmation for an in-flight lease
-    // switch — the badge-suppression window ends here.
-    set({ chats, activeChatId, leaseSwitch: null });
+    // switch — but ONLY a frame that actually carries the release (the
+    // from-side row gone or freed). An unrelated broadcast that predates
+    // the release — the fork's attach frame still shows the source
+    // leased — must NOT end the window early, or the left row flashes
+    // In-use until the real confirmation lands. The timeout fallback in
+    // switchLease covers switches that release nothing.
+    const sw = cur.leaseSwitch;
+    const fromConfirmed =
+      !sw || !chats.some((c) => c.id === sw.from && c.active);
+    set({ chats, activeChatId, leaseSwitch: fromConfirmed ? null : cur.leaseSwitch });
   },
 
   addChat(chat) {

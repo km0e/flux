@@ -11,7 +11,7 @@
 
 use crate::identity::SessionRef;
 use crate::router::RouterHandle;
-use flux_core::{Provider, ToolRegistry};
+use flux_core::{ChatStateKind, Provider, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -19,8 +19,9 @@ use std::sync::atomic::AtomicU64;
 use tokio::sync::RwLock;
 
 /// How long a disconnected session's identity (and its leases) survive,
-/// waiting for a `session_resume` from the same client. Covers a
-/// page refresh comfortably; a genuinely closed tab is reaped after this.
+/// waiting for the client's Subscribe stream to re-open and adopt the
+/// token. Covers a page refresh comfortably; a genuinely closed tab is
+/// reaped after this.
 pub(crate) const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
 type ChatId = String;
@@ -45,11 +46,14 @@ pub(crate) struct CachedChat {
     pub(crate) provider_id: String,
     /// The chat's resolved model string (the router updates it on swap).
     pub(crate) model: String,
+    /// Fork provenance — the SOURCE conversation when this chat was forked
+    /// (`None` = not a fork). Wire metadata only; no runtime behavior.
+    pub(crate) forked_from_chat: Option<String>,
     /// The chat's resolved provider INSTANCE (model-pinned). `None` = the
     /// persisted pin no longer resolves (registry changed across restarts)
     /// — the task spawn then FAILS with an error naming the dead pin
-    /// (recovery: `chat_provider` swap). Kept next to the id/model strings
-    /// so a respawn rebuilds its connection on the SAME provider.
+    /// (recovery: a SwitchProvider swap). Kept next to the id/model
+    /// strings so a respawn rebuilds its connection on the SAME provider.
     pub(crate) provider: Option<Arc<dyn Provider>>,
     /// The chat's runtime task, if any. Spawned lazily on the first message
     /// (lifecycle::ensure_task); a terminated task is replaced lazily on
@@ -111,6 +115,7 @@ impl CachedChat {
             workdir: self.workdir.clone(),
             provider: self.provider_id.clone(),
             model: self.model.clone(),
+            forked_from_chat: self.forked_from_chat.clone(),
         }
     }
 
@@ -160,6 +165,8 @@ pub struct ChatInfoOwned {
     pub provider: String,
     /// The chat's resolved model string.
     pub model: String,
+    /// Fork provenance — the SOURCE conversation (`None` = not a fork).
+    pub forked_from_chat: Option<String>,
 }
 
 impl From<&ChatInfoOwned> for flux_proto::flux::v1::ChatInfo {
@@ -174,6 +181,7 @@ impl From<&ChatInfoOwned> for flux_proto::flux::v1::ChatInfo {
             workdir: i.workdir.clone(),
             provider: i.provider.clone(),
             model: i.model.clone(),
+            forked_from_chat_id: i.forked_from_chat.clone(),
         }
     }
 }
@@ -264,9 +272,62 @@ pub struct ServerState {
 }
 
 impl ServerState {
+    /// Graceful-shutdown drain: ask every live chat task to cancel its
+    /// in-flight round, wait bounded for the rounds to land on the
+    /// machine's round boundary (Idle), then force-abort stragglers.
+    /// Called ONCE by the transport after the listener has stopped
+    /// accepting requests — SIGTERM/SIGINT lands here instead of killing
+    /// mid-flight. `send_cancel` is absorbed in Idle (a no-op for quiet
+    /// chats); a cancelled round commits its transcript atomically at the
+    /// round boundary (the machine's invariant), so whatever completed is
+    /// on disk and the next rebirth resumes clean. Note the wait target
+    /// is the ROUND boundary, not task termination — a cancelled round
+    /// leaves the task alive-but-idle, which is exactly the quiescent
+    /// state shutdown wants (the process exits right after).
+    pub async fn drain(&self, timeout: std::time::Duration) {
+        // ChatHandle is a cheap Clone (senders + flags) — copied OUT of
+        // the read guard so the bounded wait below never holds the lock
+        // (ops and the router fanout keep needing it).
+        let handles: Vec<flux_chat::handle::ChatHandle> = {
+            let chats = self.manager.chats.read().await;
+            chats
+                .values()
+                .filter_map(|c| c.live_task().cloned())
+                .collect()
+        };
+        let settled = |h: &flux_chat::handle::ChatHandle| h.active_state() == ChatStateKind::Idle;
+        if handles.is_empty() {
+            return;
+        }
+        tracing::info!(live = handles.len(), "drain: cancelling live rounds");
+        for handle in &handles {
+            handle.send_cancel();
+        }
+        let deadline = tokio::time::Instant::now() + timeout;
+        while tokio::time::Instant::now() < deadline {
+            if handles.iter().all(settled) {
+                tracing::info!(live = handles.len(), "drain: all rounds settled");
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        // Stragglers (a flight stuck past its grace, a wedged stream):
+        // abort — the same teardown a crash gets, minus the ambiguity
+        // about what is on disk (every completed commit is transactional).
+        for handle in &handles {
+            if !settled(handle) {
+                handle.shutdown();
+            }
+        }
+        tracing::warn!(
+            live = handles.len(),
+            "drain: timeout hit, stragglers aborted"
+        );
+    }
+
     /// Build the server state, loading the chat cache from the store.
     /// Fail-fast on a store error: a DB that cannot list chats would
-    /// otherwise present every conversation as deleted (C5).
+    /// otherwise present every conversation as deleted.
     ///
     /// `lookup` is a one-shot hydration closure: at startup each cached
     /// chat's persisted provider pin resolves to an instance here (the
@@ -274,7 +335,7 @@ impl ServerState {
     /// no resident provider-management surface grows back into the chat
     /// layer). A miss leaves `CachedChat.provider` empty — the chat then
     /// fails EXPLICITLY at spawn (naming the dead pin) instead of silently
-    /// running on some other provider; recovery is a `chat_provider` swap.
+    /// running on some other provider; recovery is a SwitchProvider swap.
     pub async fn new(
         system_prompt: Arc<str>,
         tool_registry: Arc<ToolRegistry>,
@@ -307,6 +368,7 @@ impl ServerState {
                     created_at: s.created_at.clone(),
                     last_activity_at: s.last_activity_at,
                     workdir: s.workdir.unwrap_or_default(),
+                    forked_from_chat: s.forked_from_chat,
                     provider_id: s.provider.unwrap_or_default(),
                     model: s.model.unwrap_or_default(),
                     provider,
@@ -355,7 +417,7 @@ mod tests {
         let store = Arc::new(Store::open_in_memory().await.unwrap());
         // Break the chats table — list_chats fails, and ServerState::new
         // must fail fast instead of presenting an empty chat list (the
-        // "all chats deleted" illusion, C5).
+        // "all chats deleted" illusion).
         sqlx::query("DROP TABLE chats")
             .execute(&store.pool)
             .await
@@ -383,9 +445,9 @@ mod tests {
         let store = Arc::new(Store::open_in_memory().await.unwrap());
         let state = test_state(store.clone()).await;
         // Break ONLY the state table AFTER startup: insert_chat (chats
-        // table) still succeeds, save_state_entry fails — the exact S1
-        // failure path. (list_chats joins state, so the drop must come
-        // after the cache is populated.)
+        // table) still succeeds, save_state_entry fails — the exact
+        // workdir-persist failure path. (list_chats joins state, so the
+        // drop must come after the cache is populated.)
         sqlx::query("DROP TABLE state")
             .execute(&store.pool)
             .await
@@ -422,8 +484,8 @@ mod tests {
     async fn create_chat_fails_when_chat_insert_fails() {
         let store = Arc::new(Store::open_in_memory().await.unwrap());
         // Break ONLY the chats table — after ServerState::new loaded the
-        // cache (fail-fast on a broken store, C5, prevents building a
-        // state in the first place). insert_chat fails first, so create_chat
+        // cache (fail-fast on a broken store prevents building a state
+        // in the first place). insert_chat fails first, so create_chat
         // must propagate THAT error — with foreign_keys=ON the chat row never
         // exists, so the downstream workdir save would also fail and mask the
         // real failure with a misleading "workdir" error.

@@ -1,17 +1,17 @@
-//! Management-plane operations shared by BOTH transports: the legacy WS
-//! dispatch and the Connect surface call the SAME functions, so the two
-//! wires cannot drift in behavior — only in serialization.
+//! Management-plane operations: the Connect surface's grpc shims and the
+//! MCP supervisor's event consumer call the SAME functions, so every
+//! mutation path — UI action or self-healing respawn — shares one
+//! behavior.
 //!
 //! Each mutation is persist-first (the row IS the truth source); the
 //! return value is the reply payload with the inline `error` (D4':
 //! request-scoped failures are UI data, never a transport status). The
-//! BROADCAST is the caller's job, AFTER the reply goes out — the WS
-//! contract orders ack-before-broadcast on the same connection, and the
-//! caller owns that ordering (the gRPC path's ack and broadcasts ride
-//! independent channels, so its ordering is free).
+//! BROADCAST is the caller's job, AFTER the reply goes out — the caller
+//! owns the ack-before-broadcast ordering.
 
 use crate::registry::ProviderRegistry;
 use flux_session::ServerState;
+use std::sync::Arc;
 
 // ── Providers ───────────────────────────────────────────────────────────────
 
@@ -240,7 +240,7 @@ pub(crate) struct McpMutation {
 /// ack inline while the row stays.
 pub(crate) async fn add_mcp_server(
     state: &ServerState,
-    mcp: &crate::mcp::McpManager,
+    mcp: &Arc<crate::mcp::McpManager>,
     row: flux_store::mcp::McpServerRow,
 ) -> McpMutation {
     let id = row.id.clone();
@@ -274,7 +274,7 @@ pub(crate) async fn add_mcp_server(
 /// removal only logs — the row is already gone from the launch list).
 pub(crate) async fn remove_mcp_server(
     state: &ServerState,
-    mcp: &crate::mcp::McpManager,
+    mcp: &Arc<crate::mcp::McpManager>,
     id: String,
 ) -> McpMutation {
     match crate::mcp::remove(&state.store, &id).await {
@@ -411,9 +411,9 @@ pub(crate) async fn broadcast_models(state: &ServerState, registry: &ProviderReg
 
 /// Broadcast the fresh MCP-server list to every session after a
 /// successful add/remove.
-pub(crate) async fn broadcast_mcp_servers(state: &ServerState) {
+pub(crate) async fn broadcast_mcp_servers(state: &ServerState, mcp: &crate::mcp::McpManager) {
     use flux_proto::flux::v1::subscribe_response::Kind;
-    match crate::mcp::summaries(&state.store).await {
+    match crate::mcp::summaries(&state.store, &mcp.states()).await {
         Ok(servers) => {
             let el = flux_proto::flux::v1::SubscribeResponse {
                 chat_seq: 0,

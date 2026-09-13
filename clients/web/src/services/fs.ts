@@ -2,8 +2,8 @@
  * fs.ts — Filesystem browsing for the workdir picker + explorer.
  *
  * Direct gRPC-Web calls (the FsList/FsRead RPCs): replies pair natively
- * over HTTP — the old value-matched AckWait correlation is gone. Failures
- * (transport or inline) resolve with `error` set so every surface renders
+ * over HTTP. Failures (transport or inline) resolve with `error` set so
+ * every surface renders
  * them inline on the unified toast stack instead of rejecting.
  *
  * Provides: listDir, readFile

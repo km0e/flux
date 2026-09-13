@@ -1,5 +1,5 @@
 //! Codegen: the `.proto` single source of truth lives at the repo root
-//! (`proto/`), compiled by tonic-build/prost-build into this crate at
+//! (`proto/`), compiled by tonic-prost-build/prost-build into this crate at
 //! build time. `protoc` must be on PATH (system package, no vendoring).
 //!
 //! Both sides are generated: the server types power the axum-mounted
@@ -7,10 +7,14 @@
 //! gRPC/h2c, which hyper-util's auto detection serves alongside HTTP/1.1
 //! on the same listener — the browser's gRPC-Web path stays pinned by the
 //! headless-Chrome e2e instead).
+//!
+//! tonic 0.14 moved the prost codegen out of `tonic-build` into
+//! `tonic-prost-build` (the generated code pairs tonic's generic service
+//! plumbing with `tonic_prost::ProstCodec`).
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let proto_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../proto");
-    tonic_build::configure()
+    tonic_prost_build::configure()
         .build_server(true)
         .build_client(true)
         .compile_protos(

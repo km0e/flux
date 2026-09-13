@@ -1,13 +1,12 @@
 /**
  * App.tsx — Root component: top bar, sidebar layer, chat body, global
- * cancel. Dialogs are first-party Preact→React components (D-26: no host
- * round-trips).
+ * cancel. Dialogs are first-party React components.
  *
  * Layout: a column — the always-visible TopBar on top, then the body row
  * (sidebar layer + chat). The sidebar layer serves two regimes: a normal
  * flex column on desktop (drag-resizable, hidden when collapsed) and an
- * overlay drawer on narrow viewports (<900px). Ctrl/Cmd+B toggles; the
- * choice persists via core/prefs.
+ * overlay drawer on narrow viewports (<768px — the app's ONE breakpoint).
+ * Ctrl/Cmd+B toggles; the choice persists via core/prefs.
  *
  * Provides: App
  * Depends: components/TopBar.tsx, components/Sidebar.tsx,

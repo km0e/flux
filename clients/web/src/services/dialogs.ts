@@ -1,12 +1,11 @@
 /**
- * dialogs.ts — dialog orchestration service (the D-26 replacement for the
- * ChatHost capability contract).
+ * dialogs.ts — dialog orchestration service.
  *
  * The logic layer (handlers/new-chat/panes) calls promise-shaped functions
  * here; the UI layer (components/dialogs) registers the actual renderers at
  * mount — confirm/new-chat show real modal components, askQuestion mounts an
  * inline QuestionCard into the chat pane. Tests inject stubs via
- * setDialogImpls, mirroring the old ChatHost mock pattern.
+ * setDialogImpls.
  *
  * Provides: dialogs, setDialogImpls, resetDialogsForTest, NewChatChoice
  */
@@ -33,21 +32,17 @@ export interface DialogImpls {
   /** The `question` tool's user prompt — options + free-form input;
    * dismissal resolves with a neutral "no answer" string. */
   askQuestion(chatId: string, q: ChatQuestion): Promise<string>;
-  /** Manual context rebase confirmation (archive up to a message).
-   * `snippet` is the clicked message's text (truncated). */
-  confirmRebase(snippet: string): Promise<boolean>;
 }
 
 /** Answer recorded when the user dismisses the question (Esc / close). */
 export const QUESTION_DISMISSED = '(no answer: the user dismissed the question)';
 
 /** Neutral fallbacks — flows never hang when no UI is registered (tests,
- * early mount). Mirrors the old ChatHost fallback semantics. */
+ * early mount). */
 const fallback: DialogImpls = {
   confirmDelete: async () => false,
   pickNewChat: async () => null,
   askQuestion: async () => QUESTION_DISMISSED,
-  confirmRebase: async () => false,
 };
 
 let impls: DialogImpls = fallback;
@@ -71,8 +66,5 @@ export const dialogs = {
   },
   askQuestion(chatId: string, q: ChatQuestion): Promise<string> {
     return impls.askQuestion(chatId, q);
-  },
-  confirmRebase(snippet: string): Promise<boolean> {
-    return impls.confirmRebase(snippet);
   },
 };

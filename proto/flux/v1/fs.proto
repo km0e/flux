@@ -28,9 +28,9 @@ message FsListRequest {
 }
 
 message FsListResponse {
-  // The request's path as given ("" = default start dir). Under gRPC the
-  // HTTP round-trip pairs the response natively; the echo remains for
-  // display/debug parity with the legacy WS frame.
+  // The request's path as given ("" = default start dir) — the response
+  // pairs the request over the HTTP round-trip; the echo is kept for
+  // display/debug convenience.
   string requested = 1;
   // Inline browse failure — the UI renders it in the picker; never a
   // transport-level status (see D4').

@@ -4,17 +4,31 @@
  *
  * Pure DOM creation — no side effects, no dependency on state/panes/stream.
  * Callers append elements to their pane and wire scroll/state themselves.
+ * The scroll-follow state machine lives in lib/follow.ts; this module
+ * re-exports it so every consumer keeps a single import surface.
  *
  * Provides: createCopyButton, createMessageBubble, createReasoningBlock,
  *           createToolCard, setToolCardResult, markToolCardComplete,
- *           createErrorBubble, isNearBottom, scrollPaneToBottom,
- *           alwaysScrollToBottom, forceFollow, scheduleFollow,
- *           followExpansion, followExpansionFrom
- * Depends: lib/markdown.ts
+ *           createErrorBubble, escapeCssSelector,
+ *           re-exports from lib/follow.ts (isNearBottom, alwaysScrollToBottom,
+ *           scrollPaneToBottom, forceFollow, scheduleFollow,
+ *           followExpansion, followExpansionFrom)
+ * Depends: lib/markdown.ts, lib/clipboard.ts, lib/follow.ts
  */
 
 import { escapeHtml } from './markdown';
 import { copyText } from './clipboard';
+import { followExpansionFrom } from './follow';
+
+export {
+  isNearBottom,
+  alwaysScrollToBottom,
+  scrollPaneToBottom,
+  forceFollow,
+  scheduleFollow,
+  followExpansion,
+  followExpansionFrom,
+} from './follow';
 
 // ── Tool icons (monochrome inline SVG, stroke follows currentColor) ─────────────────────
 
@@ -27,8 +41,6 @@ const TOOL_ICON_PATHS: Record<string, string> = {
   terminal: '<polyline points="4 17 10 11 4 5"/><line x1="12" y1="19" x2="20" y2="19"/>',
   // feather: search —— grep / glob / find
   search: '<circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/>',
-  // feather: package — rust_* project tools
-  box: '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><polyline points="3.27 6.96 12 12.01 20.73 6.96"/><line x1="12" y1="22.08" x2="12" y2="12"/>',
   // feather: share-2 — external MCP tools
   share:
     '<circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.59" y1="13.51" x2="15.42" y2="17.49"/><line x1="15.41" y1="6.51" x2="8.59" y2="10.49"/>',
@@ -40,7 +52,6 @@ function toolIconKey(name: string): string {
   if (n.startsWith('edit') || n.includes('write')) return 'pencil';
   if (n.includes('grep') || n.includes('glob') || n.includes('search') || n.includes('find'))
     return 'search';
-  if (n.includes('rust')) return 'box';
   if (n.includes('mcp') || n.includes('remote')) return 'share';
   return 'file';
 }
@@ -124,12 +135,11 @@ export interface BubbleOptions {
   rawGetter?: () => string;
   live?: boolean;
   staggerIndex?: number;
-  /** History row id on a USER bubble — renders the context-rebase
-   * affordance (hover reveal; always visible on touch). The click
-   * behavior (confirm + bridge send) is attached by history.ts; the
-   * caller only passes the id when the gates pass (classic chat, lease
-   * held, id present). */
-  historyId?: number;
+  /** The store row id on a USER bubble — renders the fork affordance
+   * (hover reveal; always visible on touch). The click behavior (the
+   * fork send) is attached by history.ts; the caller only passes the id
+   * when it is known (persisted messages). */
+  forkPoint?: number;
 }
 
 export interface BubbleResult {
@@ -137,12 +147,28 @@ export interface BubbleResult {
   body: HTMLDivElement;
 }
 
-/** Rebase affordance icon (rotate-ccw — rewind the context). Inline SVG
- * keeps the imperative DOM self-contained (no asset fetch). */
-const REBASE_SVG =
+const FORK_SVG =
   '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
-  '<path d="M2.5 8a5.5 5.5 0 1 0 1.6-3.9"/><path d="M2.5 2.5v2.6h2.6"/>' +
+  '<circle cx="4" cy="3.5" r="1.7"/><circle cx="4" cy="12.5" r="1.7"/><circle cx="12" cy="5.5" r="1.7"/>' +
+  '<path d="M4 5.2v5.6"/><path d="M4 7c0-1.6 1.6-2.6 4-2.6 2 0 4-.4 4 1.1"/>' +
   '</svg>';
+
+/** Build the fork affordance button (shared by the history render and the
+ * live path — a bubble gains it the moment its store row id is known).
+ * The row id IS the fork point: forking creates a NEW conversation holding
+ * the transcript up to but excluding this message (the redo turn — its
+ * content prefills the fork's composer); the source is untouched, so the
+ * affordance needs no destructive-action confirmation. */
+export function buildForkButton(forkPoint: number): HTMLButtonElement {
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'msg-fork';
+  btn.dataset.forkPoint = String(forkPoint);
+  btn.title = 'Fork into a new conversation from this message';
+  btn.setAttribute('aria-label', `Fork a new conversation from message ${forkPoint}`);
+  btn.innerHTML = FORK_SVG;
+  return btn;
+}
 
 /**
  * Apply the shared stagger animation to an element: pushes the `staggered`
@@ -169,17 +195,10 @@ export function createMessageBubble(opts: BubbleOptions): BubbleResult {
   if (opts.role === 'user') {
     body.textContent = opts.text || '';
     div.appendChild(body);
-    if (opts.historyId !== undefined) {
-      // Rebase affordance: archive this message (inclusive) and everything
-      // before it out of the model's context. Behavior in history.ts.
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'msg-rebase';
-      btn.dataset.baseMessageId = String(opts.historyId);
-      btn.title = 'Archive context up to here';
-      btn.setAttribute('aria-label', `Archive context up to message ${opts.historyId}`);
-      btn.innerHTML = REBASE_SVG;
-      div.insertBefore(btn, body);
+    if (opts.forkPoint !== undefined) {
+      // Fork affordance: a new conversation restarts before this message
+      // (its content prefills the fork's composer). Behavior in history.ts.
+      div.insertBefore(buildForkButton(opts.forkPoint), body);
     }
   } else {
     // Assistant: header + body + optional raw
@@ -242,9 +261,9 @@ export function createReasoningBlock(opts: ReasoningOptions = {}): ReasoningResu
   details.appendChild(summary);
 
   // User-initiated expansion grows content below the fold when the block
-  // sits near the pane bottom — follow it like streamed content (the
-  // programmatic open in the live stream path rides the same follow via
-  // the delta renders; the listener only adds the user-toggle case).
+  // sits near the pane bottom — follow it like streamed content. Blocks are
+  // born collapsed everywhere (live + history); the only open transition is
+  // the user's own toggle.
   details.addEventListener('toggle', () => {
     if (details.open) followExpansionFrom(details);
   });
@@ -425,7 +444,7 @@ export function setToolCardResult(el: HTMLElement, result: string): void {
 
     const copyBtn = createCopyButton(() => result);
     // Margin rides stream.css (.tool-result-container .copy-btn) — the
-    // imperative DOM must not carry Tailwind utilities (D-25 layering).
+    // imperative DOM must not carry Tailwind utilities (layering).
     resultContainer.appendChild(copyBtn);
   }
 }
@@ -494,208 +513,4 @@ export function escapeCssSelector(value: string): string {
   const platformEscape = (globalThis as { CSS?: { escape?: (s: string) => string } }).CSS?.escape;
   if (platformEscape) return platformEscape(value);
   return value.replace(/["\\]/g, (c) => '\\' + c);
-}
-
-export function isNearBottom(el: HTMLElement, threshold = 50): boolean {
-  return el.scrollHeight - el.scrollTop - el.clientHeight < threshold;
-}
-
-/**
- * Scroll a pane to the bottom unconditionally (smooth). Used by the
- * scroll-to-bottom button — unlike {@link scrollPaneToBottom}, it must work
- * exactly when the user is NOT near the bottom.
- */
-export function alwaysScrollToBottom(pane: HTMLElement): void {
-  pane.scrollTo({ top: pane.scrollHeight, behavior: 'smooth' });
-}
-
-/**
- * Scroll a pane to the bottom only if it is already near the bottom —
- * respects the user's scroll position.
- */
-export function scrollPaneToBottom(pane: HTMLElement, threshold: number): void {
-  const st = followState(pane);
-  if (isNearBottom(pane, threshold)) {
-    st.stick = true; // a programmatic jump within the threshold re-attaches
-    pane.scrollTop = pane.scrollHeight;
-  }
-}
-
-// ── Stick-to-bottom follow (rAF merge + a stick state machine) ──
-//
-// Scroll-following for streamed content is NOT "force-scroll on every delta"
-// but a stick state machine:
-//   - attached: leaving the bottom by 8px detaches, and detaching cancels the
-//     pending follow frame (a user scrolling up to read is never yanked back)
-//   - detached: scrolling up stays detached; scrolling down into the bottom
-//     96px re-attaches automatically
-// Follow scrolls merge through requestAnimationFrame — N deltas in one frame
-// scroll once, with behavior equivalent to instant (smooth compounds latency
-// into wobble).
-
-const SCROLL_ENTER = 96;
-
-interface ScrollFollowState {
-  stick: boolean;
-  raf: number | null;
-  lastTop: number;
-}
-
-const followStates = new WeakMap<HTMLElement, ScrollFollowState>();
-
-function nearBottomPx(el: HTMLElement, threshold: number): boolean {
-  return el.scrollTop + el.clientHeight >= el.scrollHeight - threshold;
-}
-
-function followState(pane: HTMLElement): ScrollFollowState {
-  let st = followStates.get(pane);
-  if (!st) {
-    st = { stick: true, raf: null, lastTop: pane.scrollTop };
-    followStates.set(pane, st);
-    pane.addEventListener(
-      'scroll',
-      () => {
-        const goingUp = pane.scrollTop < st!.lastTop - 1;
-        if (st!.stick) {
-          // While attached, a scroll event has only two sources: the follow
-          // scroll itself (programmatic, including the reposition after a burst
-          // of content growth) or the user scrolling DOWN — neither is a detach
-          // intent. The only detach signal is the user scrolling UP. Position-
-          // based checks misjudge after a burst (stale scrollTop vs the grown
-          // scrollHeight) and lose the follow.
-          if (goingUp) {
-            st!.stick = false;
-            if (st!.raf !== null) {
-              cancelAnimationFrame(st!.raf);
-              st!.raf = null;
-            }
-          }
-        } else if (!goingUp && nearBottomPx(pane, SCROLL_ENTER)) {
-          st!.stick = true;
-        }
-        st!.lastTop = pane.scrollTop;
-      },
-      { passive: true },
-    );
-  }
-  return st;
-}
-
-/**
- * Force back to the bottom and re-attach — a "clearly wants to see the
- * reply" intent like sending a message.
- */
-export function forceFollow(pane: HTMLElement): void {
-  const st = followState(pane);
-  st.stick = true;
-  if (st.raf !== null) {
-    cancelAnimationFrame(st.raf);
-    st.raf = null;
-  }
-  pane.scrollTop = pane.scrollHeight;
-}
-
-// ── Expansion follow (user-opened tool cards / reasoning blocks) ──
-//
-// The pane is the scroll container and carries `overflow-anchor: none`
-// (native anchoring is disabled on purpose), and expansion grows content
-// through a ~180ms CSS grid-rows transition — without an explicit follow
-// the revealed content lands below the fold and the scrollbar thumb just
-// rises. User-triggered DOM growth must drive the same stick machine the
-// streamed deltas do:
-//   - attached (stick): the viewport is at the bottom, so the expanded
-//     element is necessarily near it — keep the bottom pinned across the
-//     transition with a bounded rAF loop (each frame merges through
-//     scheduleFollow; the stick machine self-cancels when the user
-//     scrolls up mid-animation).
-//   - detached: the user is reading history — never yank them; scrolling
-//     down into the re-attach window is their own move.
-
-/** Follow-window bounds (wall-clock ms). The MINIMUM also covers
- * transition-less expansions (the reasoning <details> opens instantly);
- * the MAXIMUM keeps a pathological computed duration from pinning the
- * loop for seconds. */
-const EXPANSION_FOLLOW_MIN_MS = 250;
-const EXPANSION_FOLLOW_MAX_MS = 1000;
-/** Margin over the computed transition duration — the loop must outlive
- * the growth so the final write lands on the SETTLED height. */
-const EXPANSION_FOLLOW_MARGIN_MS = 120;
-
-/**
- * Total CSS transition time of one element (the max across its
- * transitioned properties, e.g. the tool-detail's grid-rows + opacity
- * pair), in ms. 0 when nothing transitions.
- */
-function transitionMs(el: HTMLElement): number {
-  let max = 0;
-  for (const token of getComputedStyle(el).transitionDuration.split(',')) {
-    const t = token.trim();
-    const v = parseFloat(t);
-    if (Number.isNaN(v)) continue;
-    const ms = t.endsWith('ms') ? v : v * 1000;
-    if (ms > max) max = ms;
-  }
-  return max;
-}
-
-/**
- * Follow a user-initiated expansion (tool card / reasoning details) so the
- * revealed content does not grow below the fold unnoticed.
- *
- * The loop is bounded in WALL TIME, never in frames — a frame counter
- * assumes 60fps, and on a 120/144Hz display 16 frames end BEFORE the
- * 180ms detail transition: the follow stops mid-growth and the pane lands
- * above the true bottom (the "it only reached the expanded content's
- * bottom" bug). Deriving the deadline from the element's own computed
- * transition duration keeps the loop spanning the growth at ANY refresh
- * rate; frames past the transition end are no-op writes on the settled
- * height, so the final state is exactly the bottom.
- *
- * Stick semantics unchanged: attached = keep the bottom pinned across the
- * transition (each frame merges through scheduleFollow and self-cancels
- * when the user scrolls up); detached = never yank. Collapse shrinks the
- * content — the clamp-down scroll detaches the stick state and the loop
- * degrades to no-ops on its own.
- */
-export function followExpansion(pane: HTMLElement, durationMs = EXPANSION_FOLLOW_MIN_MS): void {
-  const st = followState(pane);
-  if (!st.stick) return;
-  const deadline = performance.now() + durationMs;
-  const tick = () => {
-    scheduleFollow(pane); // no-op once detached (user scrolled up mid-transition)
-    if (st.stick && performance.now() < deadline) requestAnimationFrame(tick);
-  };
-  requestAnimationFrame(tick);
-}
-
-/** Expansion follow anchored on the expanded element — resolves the pane
- * through the DOM (`.chat-pane` is the cross-layer scroll-container
- * contract) and the follow window from the element's own transition (the
- * tool card's `.tool-detail` animates grid-template-rows; the reasoning
- * <details> opens instantly and falls back to the minimum window). No
- * pane (detached node, test fixture): a no-op. */
-export function followExpansionFrom(el: HTMLElement): void {
-  const pane = el.closest<HTMLElement>('.chat-pane');
-  if (!pane) return;
-  const detail = el.querySelector<HTMLElement>('.tool-detail') ?? el;
-  const duration = Math.min(
-    Math.max(transitionMs(detail) + EXPANSION_FOLLOW_MARGIN_MS, EXPANSION_FOLLOW_MIN_MS),
-    EXPANSION_FOLLOW_MAX_MS,
-  );
-  followExpansion(pane, duration);
-}
-
-/**
- * Streaming follow: while attached, coalesce scroll-to-bottom through rAF
- * (at most one per frame); ignored when detached. Each per-delta call is
- * cheap — the actual scroll happens at most once per frame.
- */
-export function scheduleFollow(pane: HTMLElement): void {
-  const st = followState(pane);
-  if (!st.stick || st.raf !== null) return;
-  st.raf = requestAnimationFrame(() => {
-    st.raf = null;
-    if (!st.stick) return;
-    pane.scrollTop = pane.scrollHeight;
-  });
 }
