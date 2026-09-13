@@ -20,6 +20,13 @@ if (-not (Test-Path (Join-Path $repo "clients\node_modules"))) {
     Pop-Location
 }
 
+Write-Host "==> Deriving the TS contract (buf generate)..."
+# The TS contract is DERIVED, never committed - a clean checkout lacks
+# clients/web/src/gen and vite cannot resolve "../gen/..." without it.
+Push-Location $repo
+& (Join-Path $repo "clients\node_modules\.bin\buf.cmd") generate proto
+Pop-Location
+
 Write-Host "==> Building web UI (vite)..."
 Push-Location (Join-Path $repo "clients\web")
 npm run build:fast

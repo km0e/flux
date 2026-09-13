@@ -21,6 +21,12 @@ if [ ! -d "$repo/clients/node_modules" ]; then
     (cd "$repo/clients" && npm install)
 fi
 
+# The TS contract is DERIVED, never committed (see AGENTS.md) — any clean
+# checkout lacks clients/web/src/gen, so derive it here or vite cannot
+# resolve "../gen/..." imports. Uses the npm-local buf: no global install.
+echo "==> Deriving the TS contract (buf generate)..."
+(cd "$repo" && "$repo/clients/node_modules/.bin/buf" generate proto)
+
 echo "==> Building web UI (vite)..."
 (cd "$repo/clients/web" && npm run build:fast)
 
