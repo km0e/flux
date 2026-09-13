@@ -22,12 +22,39 @@ const CANCEL_DRAIN: Duration = Duration::from_secs(2);
 
 /// Kill the whole process group. Idempotent against an already-dead group.
 #[cfg(unix)]
+/// Signal the whole process group with SIGKILL. Direct `libc::kill` — NOT a
+/// shelled-out `kill` binary: `/usr/bin/kill` is procps on some distros
+/// (negative pid = process group, what we want) but util-linux on others
+/// (GitHub runners), where `-<pgid>` parses as an invalid signal spec and
+/// the signal is silently never sent — cancels then waited out the child's
+/// full runtime and group-kill tests saw descendants survive.
 fn kill_group(pgid: i32) {
     if pgid > 0 {
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &format!("-{pgid}")])
-            .status();
+        // SAFETY: kill(2) with a negative pid signals the process group.
+        // Errors are ignored — an ESRCH means the group is already gone,
+        // which is the goal.
+        unsafe {
+            libc::kill(-pgid, libc::SIGKILL);
+        }
     }
+}
+
+/// Whether a process is still RUNNING, zombie-aware: `kill(pid, 0)` reports
+/// zombies as signalable, but a zombie has already honored the SIGKILL —
+/// only the reaping is pending (orphaned grandchildren can sit unreaped for
+/// a while under a subreaper). Tests that assert a kill must not mistake
+/// that window for liveness.
+#[cfg(unix)]
+#[cfg(test)]
+pub(crate) fn process_alive(pid: i32) -> bool {
+    let stat = match std::fs::read_to_string(format!("/proc/{pid}/stat")) {
+        Ok(s) => s,
+        Err(_) => return false, // no such process — gone
+    };
+    // comm may contain spaces and parens: the state letter is the field
+    // after the LAST ')' ("… (sleep) Z …" → "Z").
+    let state = stat.rsplit(')').next().unwrap_or("").trim();
+    !state.starts_with('Z')
 }
 
 /// Kills the whole process group on drop unless disarmed. Ensures a timeout

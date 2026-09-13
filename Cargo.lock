@@ -921,6 +921,7 @@ dependencies = [
  "flux-core",
  "flux-macros",
  "glob",
+ "libc",
  "regex",
  "serde",
  "serde_json",

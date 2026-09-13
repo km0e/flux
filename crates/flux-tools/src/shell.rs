@@ -243,11 +243,10 @@ mod tests {
         drop(child); // kill_on_drop also reaps bash itself
 
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-        let alive = std::process::Command::new("kill")
-            .args(["-0", &bg_pid.to_string()])
-            .status()
-            .unwrap()
-            .success();
+        // Zombie-aware probe: `kill -0` reports an unreaped zombie as
+        // signalable, which would false-fail here when the killed orphan's
+        // reaping is pending (runner subreaper timing).
+        let alive = crate::subprocess::process_alive(bg_pid);
         assert!(!alive, "descendant {bg_pid} survived group kill");
     }
 
