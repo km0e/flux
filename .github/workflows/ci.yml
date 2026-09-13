@@ -12,6 +12,8 @@ env:
 jobs:
   rust:
     runs-on: ubuntu-latest
+    # bound a hung build/test — the default (360) would burn hours
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -27,6 +29,10 @@ jobs:
 
       - name: Cache Cargo dependencies
         uses: Swatinem/rust-cache@v2
+        # warm the next run even when this one fails — cold builds are
+        # the single biggest CI cost on this repo (383 crates, aws-lc C)
+        with:
+          cache-on-failure: true
 
       - name: Check formatting
         run: cargo fmt --check
@@ -37,16 +43,12 @@ jobs:
       - name: Run clippy
         run: cargo clippy --workspace --tests -- -D warnings
 
-      - name: Cache cargo-audit binary
-        id: cache-audit
-        uses: actions/cache@v4
-        with:
-          path: ~/.cargo/bin/cargo-audit
-          key: cargo-audit-${{ runner.os }}
-
+      # prebuilt binary — compiling cargo-audit from source costs 10-15 min
+      # on a cold runner, every cache miss
       - name: Install cargo-audit
-        if: steps.cache-audit.outputs.cache-hit != 'true'
-        run: cargo install cargo-audit --locked
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
 
       - name: Cargo audit
         run: cargo audit
