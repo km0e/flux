@@ -25,6 +25,7 @@ pub use fs::{EditFileTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool, Wr
 pub use search::{GlobTool, GrepTool};
 pub use shell::BashTool;
 pub use skills::{SkillEntry, SkillListTool, SkillReadTool, discover_skills, validate_skill_dir};
+pub use subprocess::arm_parent_death_signal;
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};

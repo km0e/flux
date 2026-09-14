@@ -45,6 +45,28 @@ There is no config file — everything is a CLI flag (`--host`, `--port`,
 Open `http://127.0.0.1:8080`, add a provider endpoint in the Providers dialog
 (top bar), then pick a working directory in the new-chat dialog and chat.
 
+## Install (release artifacts)
+
+No source checkout needed — use the [Releases](https://github.com/km0e/flux/releases) artifacts:
+
+```bash
+# ① server binary (headless)
+curl --proto '=https' --tlsv1.2 -LsSf \
+  https://github.com/km0e/flux/releases/latest/download/flux-server-installer.sh | sh
+# ② browser UI (installed to ~/.flux/web-ui, picked up by the server)
+mkdir -p ~/.flux && curl -fL \
+  https://github.com/km0e/flux/releases/latest/download/flux-web-ui.tar.gz | tar xz -C ~/.flux
+```
+
+(Windows PowerShell likewise, via `flux-server-installer.ps1`; installs to
+`~/.cargo/bin` and writes the PATH scripts and uninstall receipt for you.)
+
+**The full form with the browser UI**: download the platform archive and
+unpack — `web-ui/` sits side-by-side with the binary.
+
+UI assets resolve as `--web-assets-dir` > `web-ui/` next to the binary >
+`~/.flux/web-ui` > none (headless).
+
 ## Documentation
 
 | Doc | Question it answers |

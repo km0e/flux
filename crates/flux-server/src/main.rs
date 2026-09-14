@@ -59,18 +59,29 @@ Guidelines:
 
 /// The default database location: `$HOME/.flux/flux.db` (`USERPROFILE`
 /// fallback) — the global flux home, consistent with the global skills
-/// dir (`$HOME/.flux/skills`). Running `flux-server` in ANY directory
+/// dir (`$HOME/.flux/skills`) and the web-ui asset fallback
+/// (`$HOME/.flux/web-ui`). Running `flux-server` in ANY directory
 /// must not litter the database into that directory. CWD-relative
 /// `flux.db` survives only as the no-home fallback (headless/service
 /// contexts), warned at startup.
 fn default_db_path() -> PathBuf {
-    match std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")) {
-        Some(home) => Path::new(&home).join(".flux").join("flux.db"),
+    match flux_home() {
+        Some(home) => home.join("flux.db"),
         None => {
             tracing::warn!("no HOME/USERPROFILE set — database falls back to ./flux.db");
             PathBuf::from("flux.db")
         }
     }
+}
+
+/// The global flux home: `$HOME/.flux` (`USERPROFILE` fallback on
+/// Windows). Shared by the database default, the global skills dir and
+/// the web-ui asset fallback.
+fn flux_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .map(|home| home.join(".flux"))
 }
 
 /// Flux server — there is NO config file. Everything is a CLI flag
@@ -245,11 +256,11 @@ async fn main() -> anyhow::Result<()> {
     let web_root = if args.no_web {
         None
     } else {
-        let root = resolve_assets_dir(args.web_assets_dir.as_deref())?;
+        let root = resolve_assets_dir(args.web_assets_dir.as_deref());
         if root.is_none() {
             info!(
-                "no web UI assets found (--web-assets-dir, or web-ui/ next to the binary) \
-                 — serving headless"
+                "no web UI assets found (--web-assets-dir, web-ui/ next to the binary, or \
+                 ~/.flux/web-ui) — serving headless"
             );
         }
         root
@@ -276,20 +287,42 @@ async fn main() -> anyhow::Result<()> {
 /// Web assets directory resolution (first match wins):
 /// 1. `--web-assets-dir` (CLI, used as-is)
 /// 2. `web-ui/` next to the running binary (packaged distribution layout)
+/// 3. `<flux-home>/web-ui` (the global flux home, `$HOME/.flux` — where
+///    the release's `flux-web-ui.tar.gz` unpacks; the script-installer
+///    layout)
 ///
 /// Otherwise `None` — the UI is simply not served (headless). There is no
 /// CWD-relative repo guess: a hardcoded `clients/web/dist` silently works
 /// or breaks depending on where the process was launched from. Devs use
 /// `run-server.sh`, which always pins the repo dist with an absolute flag.
-fn resolve_assets_dir(cli: Option<&Path>) -> anyhow::Result<Option<PathBuf>> {
+fn resolve_assets_dir(cli: Option<&Path>) -> Option<PathBuf> {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(Path::to_path_buf));
+    resolve_assets_dir_in(cli, exe_dir.as_deref(), flux_home().as_deref())
+}
+
+/// The resolution chain with the environment sources injected — the pure,
+/// testable core of [`resolve_assets_dir`].
+fn resolve_assets_dir_in(
+    cli: Option<&Path>,
+    exe_dir: Option<&Path>,
+    flux_home: Option<&Path>,
+) -> Option<PathBuf> {
     if let Some(d) = cli {
-        return Ok(Some(d.to_path_buf()));
+        return Some(d.to_path_buf());
     }
-    let packaged = std::env::current_exe()?
-        .parent()
-        .map(|d| d.join("web-ui"))
-        .context("failed to locate the executable directory")?;
-    Ok(packaged.is_dir().then_some(packaged))
+    if let Some(d) = exe_dir.map(|d| d.join("web-ui"))
+        && d.is_dir()
+    {
+        return Some(d);
+    }
+    if let Some(d) = flux_home.map(|d| d.join("web-ui"))
+        && d.is_dir()
+    {
+        return Some(d);
+    }
+    None
 }
 
 #[cfg(test)]
@@ -300,15 +333,43 @@ mod tests {
     fn cli_flag_wins_and_is_used_as_is() {
         let dir = std::env::temp_dir().join("flux-assets-cli");
         std::fs::create_dir_all(&dir).unwrap();
-        let got = resolve_assets_dir(Some(&dir)).unwrap();
+        // The flag wins even over populated fallback levels.
+        let got = resolve_assets_dir_in(Some(&dir), Some(&dir), Some(&dir));
         assert_eq!(got, Some(dir));
     }
 
     #[test]
-    fn no_cli_and_no_packaged_dir_means_no_ui() {
-        // No CLI value, no web-ui/ next to the test binary → None
-        // (headless); never a CWD-relative repo guess.
-        let got = resolve_assets_dir(None).unwrap();
+    fn binary_adjacent_beats_flux_home() {
+        let base = std::env::temp_dir().join("flux-assets-adjacent");
+        let exe_dir = base.join("bin");
+        std::fs::create_dir_all(exe_dir.join("web-ui")).unwrap();
+        let flux_home = base.join("home/.flux");
+        std::fs::create_dir_all(flux_home.join("web-ui")).unwrap();
+
+        let got = resolve_assets_dir_in(None, Some(&exe_dir), Some(&flux_home));
+        assert_eq!(got, Some(exe_dir.join("web-ui")));
+    }
+
+    #[test]
+    fn flux_home_fallback_when_no_packaged_layout() {
+        let base = std::env::temp_dir().join("flux-assets-home");
+        // The parameter is the FLUX home ($HOME/.flux), matching what the
+        // caller gets from flux_home().
+        let flux_home = base.join("home/.flux");
+        std::fs::create_dir_all(flux_home.join("web-ui")).unwrap();
+
+        // An exe dir WITHOUT a web-ui/ inside (installer layout).
+        let got = resolve_assets_dir_in(None, Some(&base.join("bin")), Some(&flux_home));
+        assert_eq!(got, Some(flux_home.join("web-ui")));
+    }
+
+    #[test]
+    fn no_candidates_means_headless() {
+        let base = std::env::temp_dir().join("flux-assets-none");
+        std::fs::create_dir_all(base.join("bin")).unwrap(); // no web-ui inside
+        let flux_home = base.join("home/.flux"); // no web-ui inside either
+
+        let got = resolve_assets_dir_in(None, Some(&base.join("bin")), Some(&flux_home));
         assert_eq!(got, None);
     }
 }

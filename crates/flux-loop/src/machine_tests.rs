@@ -194,7 +194,8 @@ fn streaming_end_with_tools_dispatches_first_tool() {
         finish_reason: None,
     }));
     // The tool_calls assistant message lands in the transcript buffer
-    // (persisted at round end), the batch dispatches one at a time.
+    // (persisted at the batch boundary), the batch dispatches one at a
+    // time.
     assert_eq!(
         step.facts,
         vec![Fact::ToolDispatched {
@@ -223,19 +224,21 @@ fn tool_round_final_stream_end_carries_follow_up_reason() {
         call: call("c1", "t"),
         result: "r".into(),
     });
-    // Tool result wire fact first, then the continuation stream request
-    // over the dual-written tool result.
+    // Tool result wire fact, the batch commit, then the continuation
+    // stream request over the dual-written tool result.
     assert_eq!(
-        step.facts,
-        vec![
-            Fact::Wire(WireEvent::ToolResult {
-                id: "c1".into(),
-                name: "t".into(),
-                result: "r".into(),
-            }),
-            Fact::ModelInputRequested(vec![Message::tool("c1", "r")]),
-        ]
+        step.facts[0],
+        Fact::Wire(WireEvent::ToolResult {
+            id: "c1".into(),
+            name: "t".into(),
+            result: "r".into(),
+        })
     );
+    assert!(matches!(&step.facts[1], Fact::TranscriptCommitted(msgs) if msgs.len() == 2));
+    assert!(matches!(
+        &step.facts[2],
+        Fact::ModelInputRequested(pending) if pending.len() == 1
+    ));
     let step = m.step(chunk(StreamChunk::End {
         finish_reason: Some("stop".into()),
     }));
@@ -335,37 +338,96 @@ fn processing_batch_dispatches_one_at_a_time() {
             },
         ]
     );
-    // Last tool result → continuation stream over every dual-written result.
+    // Last tool result → the batch commits atomically (assistant + both
+    // results), then the continuation stream opens over every dual-written
+    // result.
     let step = m.step(Input::ToolFinished {
         call: call("c2", "t"),
         result: "done2".into(),
     });
+    let Fact::TranscriptCommitted(msgs) = &step.facts[1] else {
+        panic!("batch commit fact");
+    };
+    assert_eq!(msgs.len(), 3);
+    assert_eq!(msgs[1], Message::tool("c1", "done"));
+    assert_eq!(msgs[2], Message::tool("c2", "done2"));
     assert!(matches!(
-        &step.facts[1],
+        &step.facts[2],
         Fact::ModelInputRequested(pending) if pending.len() == 2
     ));
+}
+
+#[test]
+fn multi_batch_round_commits_at_every_batch_boundary() {
+    // Each batch boundary commits its own segment: assistant1 + results1,
+    // then assistant2 + results2, then the final segment at round end. A
+    // crash between any two of these loses only the live segment.
+    let mut m = m();
+    m.step(Input::UserMessage("go".into()));
+    m.step(chunk(StreamChunk::ToolCalls(vec![call("c1", "t")])));
+    m.step(chunk(StreamChunk::End {
+        finish_reason: None,
+    }));
+    let step = m.step(Input::ToolFinished {
+        call: call("c1", "t"),
+        result: "r1".into(),
+    });
+    let Fact::TranscriptCommitted(first) = &step.facts[1] else {
+        panic!("first batch commit");
+    };
+    assert_eq!(first.len(), 2); // assistant1(tool_calls) + r1
+    assert_eq!(first[1], Message::tool("c1", "r1"));
+    // Continuation stream forms a SECOND batch.
+    m.step(chunk(StreamChunk::ToolCalls(vec![call("c2", "t")])));
+    m.step(chunk(StreamChunk::End {
+        finish_reason: None,
+    }));
+    let step = m.step(Input::ToolFinished {
+        call: call("c2", "t"),
+        result: "r2".into(),
+    });
+    let Fact::TranscriptCommitted(second) = &step.facts[1] else {
+        panic!("second batch commit");
+    };
+    assert_eq!(second.len(), 2); // assistant2(tool_calls) + r2
+    assert_eq!(second[1], Message::tool("c2", "r2"));
+    // Final stream (no tools) — round end commits the last segment only.
+    let step = m.step(chunk(StreamChunk::End {
+        finish_reason: Some("stop".into()),
+    }));
+    let Fact::TranscriptCommitted(final_msgs) = &step.facts[0] else {
+        panic!("final commit");
+    };
+    assert_eq!(final_msgs.len(), 1); // the follow-up assistant only
+    assert_eq!(step.facts[1], stream_end(Some("stop")));
 }
 
 #[test]
 fn processing_tool_executed_dual_writes_and_wraps_up() {
     let mut m = m();
     enter_processing(&mut m, vec![call("c1", "t")]);
-    m.step(Input::ToolFinished {
+    let step = m.step(Input::ToolFinished {
         call: call("c1", "t"),
         result: "42".into(),
     });
+    // Batch boundary: the batch commits (assistant tool_calls + result)
+    // before the continuation stream opens.
+    let Fact::TranscriptCommitted(batch) = &step.facts[1] else {
+        panic!("batch commit fact");
+    };
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[1], Message::tool("c1", "42"));
     let step = m.step(chunk(StreamChunk::End {
         finish_reason: None,
     }));
-    // Wrap-up: transcript (user + assistant tool_calls + tool result) is
-    // persisted before the StreamEnd.
+    // Wrap-up: the FINAL segment (the continuation stream's assistant
+    // message) persists before the StreamEnd.
     let Fact::TranscriptCommitted(msgs) = &step.facts[0] else {
         panic!("transcript fact");
     };
-    // user persisted at round start; transcript = assistant(tool_calls) +
-    // tool result + the continuation stream's (empty) assistant message.
-    assert_eq!(msgs.len(), 3);
-    assert_eq!(msgs[1], Message::tool("c1", "42"));
+    // user + the batch persisted at their own boundaries; the wrap-up
+    // commit carries only the continuation stream's (empty) assistant.
+    assert_eq!(msgs.len(), 1);
     assert_eq!(step.facts[1], stream_end(None));
     assert_eq!(m.state(), &State::Idle);
 }

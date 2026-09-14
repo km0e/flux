@@ -66,44 +66,20 @@ pub async fn run(
         .with_context(|| format!("failed to bind {host}:{port}"))?;
     info!("listening on http://{host}:{port} (connect: /flux.v1.*, term: /ws/term)");
 
+    // No graceful-shutdown handling ON PURPOSE (the crash-only contract):
+    // no signal handler is installed, so SIGTERM/SIGINT keep their default
+    // disposition — the process dies instantly, even with browser streams
+    // held open. A Subscribe body never completes on its own (the keepalive
+    // pump runs forever), so waiting for connections is what used to wedge
+    // shutdown behind the frontend. Durability is the storage layer's
+    // contract instead: every transcript commit is transactional and
+    // batch-atomic (flux-loop), so ANY death mode — SIGKILL, OOM, crash,
+    // power loss — lands on the same recoverable state.
     axum::serve(
         listener,
         app.into_make_service_with_connect_info::<SocketAddr>(),
     )
-    .with_graceful_shutdown(shutdown_signal())
     .await
     .context("server stopped")?;
-    // The listener is closed (no new requests can arrive). Give live
-    // rounds a bounded window to land on the machine's round boundary —
-    // cancel → commit → Idle — then force-abort stragglers. Whatever
-    // completed is on disk; the next rebirth resumes clean.
-    state.drain(std::time::Duration::from_secs(10)).await;
-    info!("drain complete; shutting down");
     Ok(())
-}
-
-/// Resolve on the FIRST of SIGINT (ctrl-c) or SIGTERM (unix). The signal
-/// streams are process-global: installing the handler here replaces the
-/// default terminate behavior, which is exactly the point — the process
-/// exits through the drain instead of dying mid-round.
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let terminate = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut stream) => {
-                stream.recv().await;
-            }
-            Err(e) => tracing::warn!(error = %e, "failed to install SIGTERM handler; ctrl-c only"),
-        }
-    };
-    #[cfg(not(unix))]
-    let terminate = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {}
-        _ = terminate => {}
-    }
-    info!("shutdown signal received");
 }

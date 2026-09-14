@@ -4,7 +4,8 @@
 #   Builds clients/web -> a self-contained servable root (index.html +
 #   assets/*.{js,css} (content-hashed)). Default out: clients/web/dist.
 param(
-    [string]$Out
+    [string]$Out,
+    [string]$Tar
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,6 +49,19 @@ if (-not (Test-Path (Join-Path $Out "index.html")) -or
     -not (Get-ChildItem "$Out\assets" -Filter *.css -ErrorAction SilentlyContinue)) {
     Write-Host "Error: packaged web UI is incomplete (missing index.html or assets)"
     exit 1
+}
+
+if ($Tar) {
+    # Release-asset form: a tarball whose top-level dir is web-ui/ —
+    # `tar xz -C ~/.flux` lands it on the server's asset-fallback path.
+    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-web-ui-" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Force -Path (Join-Path $staging "web-ui") | Out-Null
+    Copy-Item -Recurse -Force (Join-Path $Out "*") (Join-Path $staging "web-ui")
+    tar czf $Tar -C $staging web-ui
+    $hash = (Get-FileHash $Tar -Algorithm SHA256).Hash.ToLower()
+    Set-Content -Path "$Tar.sha256" -Value "$hash  $(Split-Path $Tar -Leaf)"
+    Remove-Item -Recurse -Force $staging
+    Get-Item $Tar, "$Tar.sha256" | Format-Table Name, Length
 }
 
 Write-Host "==> Web UI packaged: $Out"

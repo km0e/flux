@@ -54,7 +54,7 @@ flowchart LR
 
 Key points:
 
-- **Model-agnostic**: the conversation engine (flux-chat) depends only on flux-core's `Provider` factory (`begin` opens a `Connection`); the OpenAI-compatible implementation is just the current one.
+- **Model-agnostic**: the conversation engine (flux-chat) depends only on flux-core's `Provider` factory (`begin` opens a `Connection`); the OpenAI-compatible implementation is the current one.
 - **One Subscribe stream multiplexes many chats**: several chats can be active on a single stream; unary RPCs pair natively over HTTP.
 - **Binds `127.0.0.1` by default**; no application-level authentication — remote exposure goes through a reverse proxy (TLS + its own auth).
 
@@ -388,7 +388,7 @@ Key points:
 | McpService | ListServers · AddServer · RemoveServer |
 | SkillService | ListSkills · AddSkill · RemoveSkill |
 
-**Stream elements** (`SubscribeResponse {chat_seq, chat_id, kind}` — 22 variants): `ready{session_id, leases}` (first frame) · `keepalive` · `text_delta` / `reasoning_delta` / `stream_end{finish_reason?}` / `stream_cancelled` · `tool_start` / `tool_result` (preceded by `tool_call_preview` — identity + argument-stream notice while the model is still forming the call; the client renders a pending card that `tool_start` upgrades in place; a never-upgraded preview voids at round end, never persisted) · `usage` · `question_required` (the control lane) · `chat_history` / `chat_state` (the claim/open snapshots ride the stream — single-point delivery with the events they reconcile against; ) · `error` · `provider_switched` · `message_persisted{id, content}` (a user message just persisted, announced at turn acceptance — the sender's client attaches the fork affordance to its own live bubble by content match; the id IS the ForkChatRequest.fork_point) · global broadcasts `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills`.
+**Stream elements** (`SubscribeResponse {chat_seq, chat_id, kind}` — 22 variants): `ready{session_id, leases}` (first frame) · `keepalive` · `text_delta` / `reasoning_delta` / `stream_end{finish_reason?}` / `stream_cancelled` · `tool_start` / `tool_result` (preceded by `tool_call_preview` — identity + argument-stream notice while the model is still forming the call; the client renders a pending card that `tool_start` upgrades in place; a never-upgraded preview voids at round end, never persisted) · `usage` · `question_required` (the control lane) · `chat_history` / `chat_state` (the claim/open snapshots ride the stream — single-point delivery with the events they reconcile against) · `error` · `provider_switched` · `message_persisted{id, content}` (a user message persisted, announced at turn acceptance — the sender's client attaches the fork affordance to its own live bubble by content match; the id is the fork point carried by ForkChatRequest) · global broadcasts `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills`.
 
 **R2 sequence reconciliation**: every chat carries a monotonic `seq`; the router's fanout consumes (fetch_add's old value — all viewers see the same number for the same element), the claim/open snapshots peek without consuming. The client records the snapshot's seq and drops gated content elements STRICTLY BELOW it (the first event after a snapshot reuses its value — the equal one is the first live element after the snapshot); errors/questions/snapshots/global broadcasts are exempt (type-scoped).
 
@@ -424,7 +424,7 @@ Workdir note: chat creation accepts ANY directory readable by the server process
 
 ### 3.10 Web UI static serving (`web.rs`)
 
-The browser host is just another viewer/lease holder: the page connects back over the Connect surface (same
+The browser host is another viewer/lease holder: the page connects back over the Connect surface (same
 protocol, same lease model) and tools always execute inside the server process. The static
 layer is a **pure leaf** — it serves files and proxies nothing. **ONE axum (hyper) listener
 carries everything**: the Connect services (`/flux.v1.*`), the terminal side channel (`/ws/term`) and the `/` + `/assets/*` static site share
@@ -605,7 +605,7 @@ exit-code status line for diagnosis; the theme re-reads the `--fx-*` tokens on `
  — pills only for true pills), and the type contract is two-voice (IBM Plex Sans for
  people, JetBrains Mono for machine facts, applied ONLY where the content is machine
  output); `styles/app.css` is the Tailwind entry whose `@theme inline` bridges tokens
- into utilities, owns the ID-addressed shell layout (rules Tailwind can't target), and
+ into utilities, owns the ID-addressed shell layout (rules Tailwind cannot target), and
  carries the FLUX LINE (the composer's top-edge sweep — the one non-user-triggered
  animation, encoding round state); `styles/stream.css` styles the imperative streaming
  DOM (bubbles/tool cards with their status rail/prose/hljs via the `--fx-code-*` voice
@@ -697,7 +697,7 @@ thinking creates a new block, and text resuming after thinking starts a fresh bu
 
 | Tool | Purpose |
 |---|---|
-| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads just the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
+| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads only the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
 | Tailwind v4 (@tailwindcss/vite) | Build-time utility CSS generation; `@theme inline` bridges the `--fx-*` tokens into utilities (`bg-panel`, `text-muted`, …), no config JS |
 | tsc --noEmit | Frontend-wide type check (`npm run build` runs it first) |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer capture, scrollIntoView) |

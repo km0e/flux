@@ -11,7 +11,7 @@
 
 use crate::identity::SessionRef;
 use crate::router::RouterHandle;
-use flux_core::{ChatStateKind, Provider, ToolRegistry};
+use flux_core::{Provider, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -272,59 +272,6 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    /// Graceful-shutdown drain: ask every live chat task to cancel its
-    /// in-flight round, wait bounded for the rounds to land on the
-    /// machine's round boundary (Idle), then force-abort stragglers.
-    /// Called ONCE by the transport after the listener has stopped
-    /// accepting requests — SIGTERM/SIGINT lands here instead of killing
-    /// mid-flight. `send_cancel` is absorbed in Idle (a no-op for quiet
-    /// chats); a cancelled round commits its transcript atomically at the
-    /// round boundary (the machine's invariant), so whatever completed is
-    /// on disk and the next rebirth resumes clean. Note the wait target
-    /// is the ROUND boundary, not task termination — a cancelled round
-    /// leaves the task alive-but-idle, which is exactly the quiescent
-    /// state shutdown wants (the process exits right after).
-    pub async fn drain(&self, timeout: std::time::Duration) {
-        // ChatHandle is a cheap Clone (senders + flags) — copied OUT of
-        // the read guard so the bounded wait below never holds the lock
-        // (ops and the router fanout keep needing it).
-        let handles: Vec<flux_chat::handle::ChatHandle> = {
-            let chats = self.manager.chats.read().await;
-            chats
-                .values()
-                .filter_map(|c| c.live_task().cloned())
-                .collect()
-        };
-        let settled = |h: &flux_chat::handle::ChatHandle| h.active_state() == ChatStateKind::Idle;
-        if handles.is_empty() {
-            return;
-        }
-        tracing::info!(live = handles.len(), "drain: cancelling live rounds");
-        for handle in &handles {
-            handle.send_cancel();
-        }
-        let deadline = tokio::time::Instant::now() + timeout;
-        while tokio::time::Instant::now() < deadline {
-            if handles.iter().all(settled) {
-                tracing::info!(live = handles.len(), "drain: all rounds settled");
-                return;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        }
-        // Stragglers (a flight stuck past its grace, a wedged stream):
-        // abort — the same teardown a crash gets, minus the ambiguity
-        // about what is on disk (every completed commit is transactional).
-        for handle in &handles {
-            if !settled(handle) {
-                handle.shutdown();
-            }
-        }
-        tracing::warn!(
-            live = handles.len(),
-            "drain: timeout hit, stragglers aborted"
-        );
-    }
-
     /// Build the server state, loading the chat cache from the store.
     /// Fail-fast on a store error: a DB that cannot list chats would
     /// otherwise present every conversation as deleted.

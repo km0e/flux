@@ -182,7 +182,13 @@ async fn clone_repo(url: &str, dir: &Path) -> Result<(), String> {
         .stdin(std::process::Stdio::null())
         .kill_on_drop(true);
     #[cfg(unix)]
-    cmd.process_group(0); // kill-hygiene: the timeout drop takes the group
+    {
+        cmd.process_group(0); // kill-hygiene: the timeout drop takes the group
+        // A clone can run minutes — if the server dies hard mid-clone, the
+        // kernel kills the child (no orphaned git against a half-written
+        // target dir).
+        flux_tools::arm_parent_death_signal(&mut cmd);
+    }
     let output = tokio::time::timeout(GIT_CLONE_TIMEOUT, cmd.output())
         .await
         .map_err(|_| format!("git clone timed out after {}s", GIT_CLONE_TIMEOUT.as_secs()))?

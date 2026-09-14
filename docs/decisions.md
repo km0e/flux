@@ -1,6 +1,6 @@
 # Flux 既定取舍（Accepted Tradeoffs）
 
-> 明确接受、勿当缺陷修的既有妥协。新增条目需说明「为何接受」与「重开评估的条件」。
+> 明确接受、不应作为缺陷修复的既有妥协。新增条目需说明「为何接受」与「重开评估的条件」。
 
 ## Accepted tradeoffs
 
@@ -10,7 +10,7 @@
 
 ### T-03 state 工具的通用 KV 行为
 
-state 写任意 key / 读未知 key 返回空串是**设计行为**（agent 跨轮次通用 KV 通道；schema 枚举只作引导非白名单；读写对称）——勿当缺陷修。
+state 写任意 key / 读未知 key 返回空串是**设计行为**（agent 跨轮次通用 KV 通道；schema 枚举只作引导非白名单；读写对称）——不应作为缺陷修复。
 
 ### T-05 Explorer git 状态用 git CLI 而非 git2/gix
 
@@ -22,11 +22,11 @@ web 伺服（默认开）启动不校验 dist 布局（曾试过 `index.html` + 
 
 ### T-07 前端流式渲染不换渲染器/不引流式库
 
-流式 markdown 管线维持 marked + splitAndFold/ParagraphSplitter + renderStableSlice + FenceCache（调研定案，勿再提议更换）：① marked 无增量续接 API——末尾 `text` token 吸收未闭合行内构造，按 token 边界缓存会丢内联上下文；② micromark 真流式入口仅 Node.js，浏览器退化为全量 re-parse（O(n²) 依旧）；③ 生态内「streaming markdown renderer」（streamdown、Vercel AI SDK 等）实为 remend 自愈不完整块 + 全量 re-parse + DOM diff，且全带 React peer dep。现有管线的块级缓存/稳定前缀方案比这些实现更精细；残余 O(n²) 仅存于无空行墙式文本的病态输入（实测 64KB ≈ 12ms，被「当前段落」钳制）。重开评估条件：出现框架无关、带稳定前缀缓存契约的增量渲染器，或真实输入实测超帧预算。
+流式 markdown 管线维持 marked + splitAndFold/ParagraphSplitter + renderStableSlice + FenceCache（调研定案，不应再提议更换）：① marked 无增量续接 API——末尾 `text` token 吸收未闭合行内构造，按 token 边界缓存会丢内联上下文；② micromark 真流式入口仅 Node.js，浏览器退化为全量 re-parse（O(n²) 依旧）；③ 生态内「streaming markdown renderer」（streamdown、Vercel AI SDK 等）实为 remend 自愈不完整块 + 全量 re-parse + DOM diff，且全带 React peer dep。现有管线的块级缓存/稳定前缀方案比这些实现更精细；残余 O(n²) 仅存于无空行墙式文本的病态输入（实测 64KB ≈ 12ms，被「当前段落」钳制）。重开评估条件：出现框架无关、带稳定前缀缓存契约的增量渲染器，或真实输入实测超帧预算。
 
 ### T-08 上下文压缩不建设，长会话由用户主动处理
 
-Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机制（定案：预算裁剪与 compaction 两阶段均不做）：长会话撞模型上下文窗的表现就是 provider 400 → 轮失败（error 事件），恢复手段是既有功能——fork（从任意 user 消息重启）、rebase、新开 chat——由用户在合适的时机主动切分上下文。为何接受：单用户小团队的典型会话长度内撞窗罕见；自动裁剪/摘要会引入第一个 archive 边界，牵动 fork/rebase 语义、buf 生命周期与 proto，复杂度与当前收益不成比例；重启时的设计要点（原底稿并入）：① 裁剪粒度 = 整轮——轮是 machine 的原子提交单元，绝不拆半轮；② 裁剪只作用于发往 provider 的装配视图，不改写 store；被裁轮次的大输出仍可经 buf_read 引用（buf 按 call id 锚定，不随 transcript 失效）——这是裁剪可行性的关键支撑；③ 预算 = context_window × 安全系数（~0.7），估算器先 chars/4 并留 trait；④ compaction 的落点 = 引擎重建原语（机器门 + re-begin），与 provider 热切换同一条路；⑤ compaction 引入第一个 archive 边界——fork 点 / rebase base 必须在存活历史内，UI 需可见的压缩通知，store 需归档表。重开评估条件：真实使用中撞窗成为高频痛点（长会话被频繁打断、用户疲于手动切分），或出现必须全量装载超大仓库的需求。
+Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机制（定案：预算裁剪与 compaction 两阶段均不做）：长会话撞模型上下文窗的表现就是 provider 400 → 轮失败（error 事件），恢复手段是既有功能——fork（从任意 user 消息重启）、rebase、新开 chat——由用户在合适的时机主动切分上下文。为何接受：单用户小团队的典型会话长度内撞窗罕见；自动裁剪/摘要会引入第一个 archive 边界，牵动 fork/rebase 语义、buf 生命周期与 proto，复杂度与当前收益不成比例；重启时的设计要点（原底稿并入）：① 裁剪粒度 = 整轮——轮仍是裁剪的语义单元，绝不拆半轮（store 的原子提交单元是批次：每个工具批次与其 assistant 段一起落盘，轮由若干批次组成，见 T-11）；② 裁剪只作用于发往 provider 的装配视图，不改写 store；被裁轮次的大输出仍可经 buf_read 引用（buf 按 call id 锚定，不随 transcript 失效）——这是裁剪可行性的关键支撑；③ 预算 = context_window × 安全系数（~0.7），估算器先 chars/4 并留 trait；④ compaction 的落点 = 引擎重建原语（机器门 + re-begin），与 provider 热切换同一条路；⑤ compaction 引入第一个 archive 边界——fork 点 / rebase base 必须在存活历史内，UI 需可见的压缩通知，store 需归档表。重开评估条件：真实使用中撞窗成为高频痛点（长会话被频繁打断、用户疲于手动切分），或出现必须全量装载超大仓库的需求。
 
 ### T-09 Usage 的 cache-write 由推导维持，不加 wire 字段
 
@@ -35,3 +35,7 @@ Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机
 ### T-10 可观测性（/healthz、/metrics、round span）暂不建设
 
 无指标端点、无健康检查、无 round 级结构化观测——只有 stderr tracing（与自愈/重建路径的结构化日志字段）。为何接受：单进程、单用户/小团队、绑定 127.0.0.1 的部署形态下，日志足以回答当前全部排障问题；指标面（端点、直方图桶、跨 crate 静态计数器）是给一个尚不存在的运维面提前固化形状。重启时的设计要点（原底稿并入）：① `/healthz` 纯 liveness；`/metrics` 手写 Prometheus 文本（固定桶直方图 + AtomicU64 计数器，零新依赖）；② 计数器静态放 flux-core（provider/chat/loop 均可 bump），gauge（active_chats、mcp 状态）scrape 时读；③ 打点：round 总数/时长/失败、token 三项、tool_calls、buf_writes、provider_retries；④ round 关联 = chat_id + 轮序号日志字段，不引 OTel。重开评估条件：部署到无法靠日志归因的环境（多实例聚合、长驻服务 SLA），或「这轮为什么慢 / 哪个 provider 抖动」成为高频排障问题。
+
+### T-11 关停是崩溃（crash-only）：无优雅关停机制，持久性由存储层契约承担
+
+服务端不安装任何信号 handler——SIGTERM/SIGINT 保持默认处置，进程即时死亡，即使有浏览器流在场（曾实现过的优雅关停——`with_graceful_shutdown` + drain——已删）。为何接受：① 优雅关停只覆盖死法全集中最小的子集（SIGKILL、OOM、panic、断电、容器强杀均不经过它），数据正确性不应依赖死法；② 等待连接收尾正是当初「必须关前端才能退出」的根因——Subscribe 响应体永不自然结束（keepalive 泵永转），`serve.await` 被在途流永久楔死，drain 反而一次都跑不到，机制在其唯一需要的场景里价值为零；③ 持久性改由存储层契约无条件承担：transcript 提交**批次原子**（machine 在每个批次边界、续流开启前提交 assistant 段 + 批次结果；轮末提交末段），WAL + 事务写保证「任何死法都落在同一个可恢复点」——已提交批次永不丢，持久尾部永不携带悬空 tool_call（OpenAI 兼容 API 对其 400），崩溃窗口缩到当前存活段（秒级）；④ 工具子进程清理不依赖优雅路径：进程内（`kill_on_drop` + 进程组守卫 + 协作取消）覆盖活着的进程，内核侧 `PR_SET_PDEATHSIG`（flux-tools `arm_parent_death_signal`）覆盖进程自身死亡的所有方式。残余代价：关停时客户端看到的是连接重置（RST）而非干净 EOF——客户端本就有重连 + R2 快照调和，纯观感差异；尾部未答消息由用户手动重发（模型看得到历史，幂等窗口本就随进程内存消亡）；断电可能丢最后几笔提交（`synchronous=NORMAL`，进程崩溃零丢失，不逐笔 fsync）。重开评估条件：出现无法接受 RST 观感、或需要「关停前强制收割在飞轮次」的部署形态（如多实例编排的 drain 钩子），且存储层契约被证明不足以支撑恢复。

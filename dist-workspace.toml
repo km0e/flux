@@ -37,3 +37,11 @@ github-build-setup = "../build-setup.yml"
 # If wider Linux compat is ever needed, the blessed pattern is a manylinux
 # container build (github-custom-runners.<target>.container, see the dist
 # ci-customizing guide) or adding an x86_64-unknown-linux-musl target.
+
+# The browser UI as a standalone release asset — script-installer users
+# fetch it into ~/.flux/web-ui (the server's asset-fallback path); see the
+# README install section. extra-artifacts run ONCE in the global artifacts
+# job (verified: not in the per-target matrix).
+[[dist.extra-artifacts]]
+artifacts = ["flux-web-ui.tar.gz", "flux-web-ui.tar.gz.sha256"]
+build = ["./scripts/package-web.sh", "--tar", "flux-web-ui.tar.gz"]

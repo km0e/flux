@@ -111,8 +111,8 @@ graph LR
 | `flux-core` | 内核契约层：纯类型（`Message` / `Role` / `ToolCall` / `CoreError` / `ErrorCode` / `ChatStateKind`）、`WireEvent`（内核输出词汇）、内核 I/O 词汇（`loop_io.rs`：`LoopInput` / `LoopFact` + `RoundOutcome` / `StreamEvent` / `StreamHandle` / `Connection`）、`Tool` trait（`call(arguments, ctx: ToolCtx)`，每调用协作取消上下文 + `call_id` + 沙箱边界）+ `ToolRegistry`、边界解析（`boundary::resolve_path`，`ToolCtx::resolve` 的实现）、内核端口（`ToolPort` 工具执行 + `OutputPort` 适配器侧事件出口）、`Provider` 工厂（零 IO；依赖 serde、serde_json、strum、thiserror、async-trait、tracing、futures、tokio-util）。proto 契约（`flux.v1`）在 `flux-proto`（构建期生成），flux-session 的 router 是 WireEvent → 流元素的唯一映射点 |
 | `flux-macros` | `#[derive(Tool)]` 过程宏：字段推断 JSON Schema + `call` 反序列化 |
 | `flux-provider` | OpenAI 兼容实现 + SSE 解析，实现 flux-core 的 `Provider` 会话工厂（实例按模型钉定；`begin` 开出 `Connection`） |
-| `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list / skill_read）+ 共享 subprocess 跑者 |
-| `flux-mcp` | MCP 客户端桥：拉起外部 MCP 服务器子进程并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用） |
+| `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list / skill_read）+ 共享 subprocess 执行器 |
+| `flux-mcp` | MCP 客户端桥：启动外部 MCP 服务器子进程并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用） |
 | `flux-store` | SQLite 持久化（sqlx，WAL：chats / messages / state / providers / mcp_servers） |
 | `flux-loop` | 对话内核：纯状态机（`machine.rs`）+ 纯泵驱动（`runtime.rs`：消费输入、步进、按序转发事实）——零 I/O、零 trait 对象 |
 | `flux-chat` | 会话层·数据平面：单 chat 任务机制（`chat` 实体 / `domain` 状态与 state 工具 / `handle` 控制句柄 / `spawn` 装配 / `round` 轮次消费者（事实 fold + 飞行监督；Rebuild → 机器门原地重建，任务不退出）/ `tool_exec` 飞行监督库（无独立任务）/ `buf` 溢出缓冲（store 支撑）/ `question` 提问工具 / `reserved` 保留工具名检查）。只依赖 flux-core 端口（`OutputPort`），对控制平面无反向依赖 |
@@ -188,7 +188,7 @@ sequenceDiagram
 - **回路**（`runtime.rs`）：机器 + 两通道；输出通道有界（1024）——慢消费者背压整轮而非无限缓冲；每步之后状态变化以 `RoundState` 事实输出（后置真值）；回路持有活跃流的 `StreamHandle`（经输入通道递入的纯取消能力），取消/收尾即 drop——连接的推送立即停止。
 - **连接**（`flux-provider`，`Connection` trait 在 flux-core）：每 chat 一个有状态会话（prefix cache），单接口——`open(pending, sink) → StreamHandle`（解析后的事件推进回路输入通道；stall 看门狗与 EOF 截断判定都在连接内）。连接活到下一次机器门触发——真相源变更时消费者在门处**原地 re-begin**（新连接，旧连接随替换 Drop）。
 - **工具飞行**（`flux-chat/src/tool_exec.rs`，监督库——由轮次消费者在其 select 循环内直接驱动，**无独立任务、无命令通道**）：`ToolDispatched` 事实 → `tool_start` wire + 受监督 flight（协作 token → 5s 宽限 → 强制 drop，Drop 清理照跑）；完成臂把恰好一个 `ToolFinished` 反馈推回内核输入 FIFO（panic 结构性捕获；结果由监督层统一打 `INTERRUPTED_MARK`）。
-- **轮次消费者**（`flux-chat/src/round.rs`，事实迹线的 fold）：每 chat 一个任务（活整个 chat 生命周期）按序解释迹线——持久化 fold（`TranscriptCommitted` → 落库，内联 await 保持 persist-before-announce；单条用户消息的提交额外公告 `message_persisted` 携带所分配的行 id，发送方客户端得以命名自己的 live 气泡）、路由 fold（`Wire` 事实 → router）、provider 触发（`ModelInputRequested` → `connection.open`）、工具派发与飞行监督（见上条；`InterruptTools` → 同一折叠循环内取消在飞 token）、**引擎重建**（唯一的控制命令：`Rebuild` 到达即向内核发 `Hold`——Idle 立即触发、活轮次武装到收尾（其后排队的轮先跑完）——在 `GateReleased` 处**原地重建**：以与 spawn 相同的装配函数重装注册表（当前全局注册表），以携带的新 provider 实例在全量持久历史上 re-begin 连接）。消费者**从不改写运行中的轮次**——重建只落在机器声明的边界上，任务永不因重建退出。
+- **轮次消费者**（`flux-chat/src/round.rs`，事实迹线的 fold）：每 chat 一个任务（活整个 chat 生命周期）按序解释迹线——持久化 fold（`TranscriptCommitted` → 写入数据库，内联 await 保持 persist-before-announce；单条用户消息的提交额外公告 `message_persisted` 携带所分配的行 id，发送方客户端得以命名自己的 live 气泡）、路由 fold（`Wire` 事实 → router）、provider 触发（`ModelInputRequested` → `connection.open`）、工具派发与飞行监督（见上条；`InterruptTools` → 同一折叠循环内取消在飞 token）、**引擎重建**（唯一的控制命令：`Rebuild` 到达即向内核发 `Hold`——Idle 立即触发、活轮次武装到收尾（其后排队的轮先跑完）——在 `GateReleased` 处**原地重建**：以与 spawn 相同的装配函数重装注册表（当前全局注册表），以携带的新 provider 实例在全量持久历史上 re-begin 连接）。消费者**从不改写运行中的轮次**——重建只落在机器声明的边界上，任务永不因重建退出。
 
 ```mermaid
 sequenceDiagram
@@ -208,7 +208,7 @@ sequenceDiagram
  P-->>RT: StreamChunk + StreamHandle（经输入 FIFO）
  RT-->>R: Wire(TextDelta / ReasoningDelta / Usage) → 广播 viewers
  alt 无工具调用
-  RT->>C: TranscriptCommitted + Wire(StreamEnd)（先落库后宣布）+ RoundEnded(Completed)
+  RT->>C: TranscriptCommitted + Wire(StreamEnd)（先写库后宣布）+ RoundEnded(Completed)
   C-->>R: stream_end
  else 有工具调用
   RT->>C: ToolDispatched
@@ -227,7 +227,7 @@ sequenceDiagram
 - **工具顺序单飞**：一轮内多个工具调用严格按序逐个派发（可观察的确定语义）；
 - **取消 = 普通队列事件**：`Input::Cancel` 与消息共用一条 FIFO 通道。流式中 → `Cancelled` wire 事件收尾；工具飞行中 → 中断在飞工具 + `cancelled` 吸收标志（剩余批次 void），中断结果双写后 `Cancelled` 收尾；Idle 时静默 no-op；队列随取消清空（停即全停——R1 interrupt-send 保证先 cancel 后发消息：服务端把两个输入背靠背写进同一 FIFO，取消后发送的轮照常运行）；
 - **轮次队列（mid-round 用户轮）**：`UserMessage` 在流式/工具飞行中到达**入队而非丢弃**（FIFO）——在收尾当前轮的**同一步**内开新轮，边界以步内事实补报（`RoundState(Idle)`——loop 的转换检测发不出，因该步重新进入 Streaming；随后的 `RoundState(Streaming)` 恢复快照真相）。内核自己串行化用户轮：R1 interrupt-send 把 cancel+消息融进单个 RPC，顺序依赖架构性消失。不变量：机器从不带着非空队列停在 Idle——武装的门顺延到排队轮的收尾（该轮属于重建前上下文），门只在队列排空后触发；
-- **引擎重建（通用重启原语，机器门）**：内核的全部认知收缩为一个门原语——`Hold`（Idle 立即触发并发 `GateReleased`——门触发即排空：决策前发送的一切都按 FIFO 先于 Hold 入队；活轮次武装到收尾）与 `GateReleased`（门触发的事实；队列排空后门才触发，排队轮先跑完）。选择与语义全在轮次消费者（见 3.3 轮次消费者 bullet）：变更方（session 层的 SwitchProvider / MCP 管理）**先写真相源**（请求时持久化 pin、变更全局注册表）并公告 wire 通知，再 `Rebuild`（provider 换乘携带新实例）；消费者在门触发处**原地重建**——以与 spawn/hydration 同一条装配路径重装注册表与连接（全量持久历史 + 携带实例 + 当前全局注册表），随后注入待落的 follow-up。活轮次永不中断；变更与生效解耦；引擎永不因重建而死亡，重建期间到达的发送直接入内核队列（旧连接上跑完，语义 FIFO 自洽）。**从某条消息重启对话 = fork**（见 ChatService）：新会话复制源 transcript 至该用户消息**之前**（重做轮在用户重发时才回到 fork——客户端把其内容预填进 fork 的输入框），源原样不动——没有原地归档；
+- **引擎重建（通用重启原语，机器门）**：内核的全部认知收缩为一个门原语——`Hold`（Idle 立即触发并发 `GateReleased`——门触发即排空：决策前发送的一切都按 FIFO 先于 Hold 入队；活轮次武装到收尾）与 `GateReleased`（门触发的事实；队列排空后门才触发，排队轮先跑完）。选择与语义全在轮次消费者（见 3.3 轮次消费者 bullet）：变更方（session 层的 SwitchProvider / MCP 管理）**先写真相源**（请求时持久化 pin、变更全局注册表）并公告 wire 通知，再 `Rebuild`（provider 切换携带新实例）；消费者在门触发处**原地重建**——以与 spawn/hydration 同一条装配路径重装注册表与连接（全量持久历史 + 携带实例 + 当前全局注册表），随后注入待写入的 follow-up。活轮次永不中断；变更与生效解耦；引擎永不因重建而死亡，重建期间到达的发送直接入内核队列（旧连接上跑完，语义 FIFO 自洽）。**从某条消息重启对话 = fork**（见 ChatService）：新会话复制源 transcript 至该用户消息**之前**（重做轮在用户重发时才回到 fork——客户端把其内容预填进 fork 的输入框），源原样不动——没有原地归档；
 - **`stream_end` 表示**：本轮助手消息完整流出并已持久化，前端据此收尾渲染；可选 `finish_reason` 携带提供方结束原因（`length`/`content_filter` 表示回答被截断，前端显示中性提示而非视为完整）。reason 只在轮末宣布一次：工具轮次首条流 `End` 后继续执行，其 reason 按设计丢弃，最终 `StreamEnd` 携带后续流自身的 reason（正常收尾为 `"stop"`）。
 
 ### 3.4 工具系统
@@ -252,13 +252,13 @@ graph TB
 ```
 
 - **工具上下文 + 纯执行（无审批直接执行）**：沙箱边界（`workdir` / `current_dir`）经 `ToolCtx` 作为**调用上下文**到达工具——内核构造 ctx 时只填取消令牌与 call_id（内核边界无关）；`Chat`（ToolPort 适配器）在派发点从权威 state 填充边界字段后调 `tool.call`。工具内经 `ctx.resolve(path)` 解析路径参数（绝对路径必须落在边界内，相对路径拼接边界；不存在路径走最深已存在祖先 + 尾部拼接）。解析/执行失败都是工具结果字符串（`Error: {reason}`），模型可见并自纠——**不阻塞轮次**。工具是纯执行器：不接触 state 存储；schema 不携带任何边界参数，LLM 传入的多余键不参与解析——伪造路径参数结构上无效。
-- **协作取消契约**：`Tool::call(arguments, ctx: ToolCtx)` 携带内核所有的 `CancellationToken`——用户中断时工具应尽快停止并返回手头的部分输出（bash 透传给 subprocess 跑者：杀进程组 + drain 保留部分输出；MCP 停止等待请求）。忽略 token 的工具由内核宽限期后强制终止。工具结果永不自述取消——中断标记由内核统一添加。derive 宏把 ctx 透传给 `execute(ctx)`。
+- **协作取消契约**：`Tool::call(arguments, ctx: ToolCtx)` 携带内核所有的 `CancellationToken`——用户中断时工具应尽快停止并返回手头的部分输出（bash 转发给 subprocess 执行器：杀进程组 + drain 保留部分输出；MCP 停止等待请求）。忽略 token 的工具由内核宽限期后强制终止。工具结果永不自述取消——中断标记由内核统一添加。derive 宏把 ctx 透传给 `execute(ctx)`。
 - **Value 参数管道**：args 全程 `HashMap<String, Value>`——JSON 解析一步到位，数字/嵌套对象原样保留（MCP 嵌套参数直达）；工具结构体保持强类型字段（`read_file` 的 `offset`/`limit` 仍为 `usize`，schema 仍为 `integer`），LLM 契约零变化。宏 body 经 `Value::Object(args)` 一步反序列化。
 - **schema/解析单源**：8 个内置工具都是字段结构体，宏从字段（含 doc comment）推断 JSON Schema，`call` 自动反序列化参数（失败 → `CoreError::InvalidArguments`）并透传 `ToolCtx`；`#[tool(skip)]` / `#[tool(required)]` / `Vec<T>` 推断保留；`#[serde(default)]` 字段不进 `required`。
 - **glob 以 `current_dir` 为基**：glob 的搜索根 = ctx 的 `current_dir`（与 bash 的 shell cwd 语义一致——模型用 `state_set current_dir` 挪动后 glob 跟随）；bash 的 cwd = `ctx.current_dir`（空 → `InvalidArguments`，fail-closed）。
 - **Agent Skills（skill_list / skill_read，工具式渐进披露）**：skill = 自包含能力包（含 `SKILL.md` 的目录：frontmatter `name`/`description`，正文为指令）。**无任何 prompt 注入**——工具自身的 description（随每请求的 `tools` 数组对模型可见）是唯一常驻面；`skill_list` 每次调用即时扫描（无重启语义），`skill_read` 才加载内容。位置：项目 `<workdir>/.flux/skills/`（边界内）+ 全局 `~/.flux/skills/`（用户安装的可信内容，同 MCP 服务器的信任层级）；同名时项目覆盖全局。`skill_read` **按名寻址**——模型永不传路径，请求文件相对技能根做严格包含检查（canonicalize + 前缀，symlink 安全），读取结构上不可能离开技能目录；
 - **输出溢出缓冲（集中式、锚定、持久化）**：所有工具结果经 `Chat::bounded_output` 统一截断——超 8000 chars **写穿透传**至每-chat `buf_entries` 表（按产生它的 tool call id 锚定，`ToolCtx::call_id`），返回 head + 该 call id 引用；模型用 `buf_read {ref, offset, limit}`（字符制分页，页 ≤ 6000 chars，无递归；读穿 store）读取余下。**从不覆盖、无代际清空**：引用自描述且稳定（transcript 里的就是同一 id），跨引擎重建与进程重启可读，无需任何外壳传递（内存缓冲已删，store 是唯一真相）；生命周期 = chat 生命周期（transcript 只增不减，无归档边界，无需 GC）；fork 复制其副本携带的调用条目，`buf_read` 引用在 fork 内继续可读；chat 删除级联。entry ≤ 1M chars。per-tool 上限并入集中层：bash 8KB / read_file 行长与总量截断删除；grep 保留匹配窗口塑形 + 匹配数 500；glob 500 条。grep 路径以搜索根为基准；read_file 页脚 `end` 为最后展示行（含），恰好剩 `limit+1` 行时必触发；
-- **MCP**：自由函数 `connect_with_peer` 拉起外部 MCP 服务器（stdio 子进程，30s 初始化超时），拉取其工具列表包装为 `McpToolWrapper`（单次调用 60s 超时）；`McpSession` 为 RAII 保活守卫。启动列表在服务端数据库（UI 管理，persist-first + 即时应用：`McpManager` 持全局注册表引用——连接成功即注册、移除即按 owner 精确注销，随后扇出引擎重建；spawn 失败随 ack 内联、行保留，启动时 warn 跳过不阻塞——UI 始终可达可修）。
+- **MCP**：自由函数 `connect_with_peer` 启动外部 MCP 服务器（stdio 子进程，30s 初始化超时），获取其工具列表包装为 `McpToolWrapper`（单次调用 60s 超时）；`McpSession` 为 RAII 保活守卫。启动列表在服务端数据库（UI 管理，persist-first + 即时应用：`McpManager` 持全局注册表引用——连接成功即注册、移除即按 owner 精确注销，随后扇出引擎重建；spawn 失败随 ack 内联、行保留，启动时以 warn 跳过、不阻塞——管理入口始终可用，可修改后重试）。
 
 ### 3.5 工具上下文与边界（无审批直接执行）
 
@@ -281,7 +281,7 @@ flux 的设计立场：**工具执行零审批**——没有确认弹窗、没�
 - **`workdir` = 沙箱边界（只读 state）**：chat 创建时携带、canonicalize 后持久化进 state 表（`list_chats` join 它下发给 `ChatInfo.workdir`）；`StateManager` 加载时把 `workdir` 提取为**固定字段**，可变 map 中不存在——`set("workdir", …)` 在唯一写入点直接拒绝。`state_get` 经固定字段只读透出（模型自省）；跨项目 = 开新 chat。
 - **`current_dir` = 瞬态 shell cwd（可写 state）**：播种值 = workdir；模型用 `state_set` 挪动，影响 bash（执行 cwd）与 glob（搜索根）。**规范化在写入点**：`state_set` 工具经 `ctx.resolve`（边界包含检查）+ canonicalize（必须已存在——它要当 spawn cwd），存储值与后续使用都落在 resolved 路径上（裸 symlinked 路径在 macOS /Users 会让文件工具的词法比对全部误拒——写入时 canonical 化消除这类分歧）。
 - **路径解析安全语义**（`boundary::resolve_path`，flux-core 单一实现，flux-tools 与 flux-chat 共用）：存在路径直接 canonicalize；不存在路径走「最深已存在祖先 + 尾部拼接」——回溯中显式拒绝 `..`/`.` 尾部件（`starts_with` 不归一化 `..`，不能依赖 `file_name` 对 `..` 结尾返回 None 的附带行为）并拒绝悬空 symlink（`symlink_metadata` 区分「存在」与「缺失部件」——否则后续写操作会顺着链接把文件建到边界外），覆盖**不存在路径的 `..` 越界**（如 `a/../../../../etc/new`）与 **symlink 祖先逃逸**（如 `escape_link/newfile.txt`）。
-- **`state_set` 的 key 空间是开放的（设计意图，勿当缺陷修）**：schema `enum` 只列出已知键作 LLM 引导，执行器不拒绝未知键——`state_set` 同时是给 AI 的跨轮次通用 KV 持久化通道（任意 key 读写；`state_get` 未知 key 返回空串而非错误，读写对称）。边界语义只由 `workdir`（只读）/ `current_dir`（写入点规范化）两个权威键承担，新键是惰性数据。
+- **`state_set` 的 key 空间是开放的（设计意图，不应作为缺陷修复）**：schema `enum` 只列出已知键作 LLM 引导，执行器不拒绝未知键——`state_set` 同时是给 AI 的跨轮次通用 KV 持久化通道（任意 key 读写；`state_get` 未知 key 返回空串而非错误，读写对称）。边界语义只由 `workdir`（只读）/ `current_dir`（写入点规范化）两个权威键承担，新键是惰性数据。
 - **fail-closed 缺省**：ctx 边界为空（理论上仅测试场景——生产 `create_chat` 在 workdir 持久化失败时中止创建）时，`resolve` 与 bash/glob 的空边界检查直接报错，绝不回退到服务器进程 cwd。
 ### 3.7 持久化
 
@@ -355,7 +355,7 @@ erDiagram
 - `append_messages` 为事务批写（消息 + tool_calls 一次提交）；
 - `messages` 带 `(chat_id, id)` 索引；
 - state 以预序列化 JSON 字符串存储，加载时容错反序列化；
-- 用量不落库：`usage` 事件随每轮送达，前端累计为紧凑的 ↑/↓/R/W 总量。
+- 用量不写入数据库：`usage` 事件随每轮送达，前端累计为紧凑的 ↑/↓/R/W 总量。
 
 ### 3.8 Connect 协议与背压
 
@@ -386,7 +386,7 @@ erDiagram
 | McpService | ListServers · AddServer · RemoveServer |
 | SkillService | ListSkills · AddSkill · RemoveSkill |
 
-**流元素**（`SubscribeResponse {chat_seq, chat_id, kind}`，22 变体）：`ready{session_id, leases}`（首帧）· `keepalive` · `text_delta` / `reasoning_delta` / `stream_end{finish_reason?}` / `stream_cancelled` · `tool_start` / `tool_result`（前置 `tool_call_preview`——模型仍在成形调用时的身份+参数流预告，客户端先渲染 pending 卡，`tool_start` 原位升级；轮终未升级即作废，不持久化）· `usage` · `question_required`（控制车道）· `chat_history` / `chat_state`（claim/open 快照**走流单点投递**——与需对账的事件同源有序）· `error` · `provider_switched` · `message_persisted{id, content}`（用户消息刚落库，受理时即公告——发送方客户端按内容匹配自己的 live 气泡并挂上 fork 入口，行 id 即 ForkChatRequest.fork_point）· 全局广播 `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills`。
+**流元素**（`SubscribeResponse {chat_seq, chat_id, kind}`，22 变体）：`ready{session_id, leases}`（首帧）· `keepalive` · `text_delta` / `reasoning_delta` / `stream_end{finish_reason?}` / `stream_cancelled` · `tool_start` / `tool_result`（前置 `tool_call_preview`——模型仍在成形调用时的身份+参数流预告，客户端先渲染 pending 卡，`tool_start` 原位升级；轮终未升级即作废，不持久化）· `usage` · `question_required`（控制车道）· `chat_history` / `chat_state`（claim/open 快照**走流单点投递**——与需对账的事件同源有序）· `error` · `provider_switched` · `message_persisted{id, content}`（用户消息写入数据库后受理时即公告——发送方客户端按内容匹配自己的 live 气泡并附加 fork 入口，行 id 即 ForkChatRequest.fork_point）· 全局广播 `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills`。
 
 **R2 序号对账**：每 chat 单调 `seq`，router fanout 消耗（fetch_add 旧值，所有 viewer 同帧同号）、claim/open 快照窥视（peek 不消耗）。客户端记录快照 seq 后丢弃**严格小于**它的受控内容元素（快照后首个事件复用同值——等于快照序的元素是快照后第一个活元素）；错误/提问/快照/全局广播不参与门控（类型作用域）。
 
@@ -587,7 +587,7 @@ sequenceDiagram
 | 不崩溃承诺 | 无监督机制；崩溃语义收敛为轮次结束 + 默认错误码 |
 | 无认证层 | bind 面默认 127.0.0.1 是唯一边界声明 |
 | 会话 UI 细节 | 对话列单一宽度源；固定装饰色文件图标；右坞可调宽 |
-| 终端侧信道 | 独立 WS + e4pty；会话身份复用（宽限重连）；不进内核不落库 |
+| 终端侧信道 | 独立 WS + e4pty；会话身份复用（宽限重连）；不进内核、不写数据库 |
 | 前端框架 | React 19 + Radix + Tailwind v4 + zustand + Vite；热路径框架无关 |
 | web 单包 | 唯一前端 `clients/web`；对话框第一方组件化 |
 | 流式渲染管线 | rAF 合帧 + append-only 段落 + 增量切分 + 粘滞滚动状态机 |

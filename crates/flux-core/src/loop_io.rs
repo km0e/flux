@@ -115,11 +115,15 @@ pub enum LoopFact {
     /// A client-visible wire event (deltas, usage, tool wire events,
     /// stream end, cancellation, errors) — the router's translation input.
     Wire(WireEvent),
-    /// Messages committed to the conversation transcript (the round's user
-    /// message at round start; the whole transcript at round end). The
-    /// persistence fold appends these to the store — awaiting it before
-    /// forwarding the round's `Wire(StreamEnd)` preserves the
-    /// persist-before-announce guarantee.
+    /// Messages committed to the conversation transcript — the round's
+    /// user message at round start; each tool batch atomically at its
+    /// boundary (the assistant tool_calls message plus the batch's
+    /// results, before the continuation stream opens); the final segment
+    /// at round end. The persistence fold appends these to the store —
+    /// awaiting it before forwarding the round's `Wire(StreamEnd)`
+    /// preserves the persist-before-announce guarantee, and the batch
+    /// boundaries bound the crash window to the live segment (a finished
+    /// batch is never lost, the tail never carries a dangling tool_call).
     TranscriptCommitted(Vec<Message>),
     /// The round needs model input over `pending` — the chat layer opens
     /// its provider connection, which pushes `Stream` inputs and a

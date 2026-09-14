@@ -734,7 +734,7 @@ dependencies = [
 
 [[package]]
 name = "flux-chat"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -753,7 +753,7 @@ dependencies = [
 
 [[package]]
 name = "flux-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "futures",
@@ -769,7 +769,7 @@ dependencies = [
 
 [[package]]
 name = "flux-loop"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -782,7 +782,7 @@ dependencies = [
 
 [[package]]
 name = "flux-macros"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -796,7 +796,7 @@ dependencies = [
 
 [[package]]
 name = "flux-mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -810,7 +810,7 @@ dependencies = [
 
 [[package]]
 name = "flux-proto"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "flux-core",
  "prost",
@@ -821,7 +821,7 @@ dependencies = [
 
 [[package]]
 name = "flux-provider"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -839,7 +839,7 @@ dependencies = [
 
 [[package]]
 name = "flux-server"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "flux-session"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "flux-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "flux-core",
@@ -915,7 +915,7 @@ dependencies = [
 
 [[package]]
 name = "flux-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "flux-core",

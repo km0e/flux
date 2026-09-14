@@ -66,7 +66,7 @@ flux/
 │ │ ├── fs.rs # read_file, edit_file (str_replace), write_file, replace_lines, list_directory
 │ │ ├── shell.rs # bash
 │ │ ├── search.rs # glob, grep
-│ │ ├── subprocess.rs # Shared command runner (kill-hygiene: process-group timeout)
+│ │ ├── subprocess.rs # Shared command runner (kill-hygiene: process-group timeout + kernel parent-death signal)
 │ │ ├── test_util.rs # Test-only helpers (cfg(test))
 │ ├── flux-mcp/ # MCP client bridge
 │ │ └── src/lib.rs
@@ -249,7 +249,13 @@ the contract layer.
   `RoundState`, `GateReleased`, `RoundEnded(RoundOutcome)` — the round's
   semantic terminal classification (Completed / Cancelled / Failed),
   emitted at the single wrap-up point so consumers fold semantics
-  instead of scraping wire events.
+  instead of scraping wire events. The transcript commits are
+  BATCH-ATOMIC: the user message at round start, each tool batch
+  (assistant tool_calls message + the batch's results) at its boundary —
+  BEFORE the continuation stream opens — and the final segment at round
+  end. A crash (SIGKILL/OOM — no graceful path involved) therefore loses
+  at most the live segment, and the persisted tail never carries a
+  dangling tool_call (OpenAI-compatible APIs reject those with 400).
 - **Connection** (`flux-provider`, the `Connection` trait in flux-core) —
   one stateful session per chat (the prefix cache); a single interface:
   `open(pending, sink) -> StreamHandle` pushes parsed stream events into
@@ -293,7 +299,7 @@ never-upgraded preview is voided client-side at round end (never
 persisted). The chat boundary (`workdir`/`current_dir`) fills the
 invocation `ToolCtx` inside the adapter's execute pipeline; tools resolve
 paths via `ToolCtx::resolve` and any failure is the tool's result string,
-never a round-level block. A cancel is just another queue event: the
+never a round-level block. A cancel is an ordinary queue event: the
 machine drops the stream handle or emits `InterruptTools`, stale cancels
 are absorbed in every state. A user turn arriving mid-round is QUEUED
 (machine turn queue), not dropped — it starts in the same step that wraps
@@ -391,7 +397,7 @@ carry seq 0 + empty chat_id):
 | `chat_history` / `chat_state` | The claim/open snapshots THROUGH the stream (single-point delivery with the events they reconcile against) |
 | `error {code, message}` | App-level error channel (round errors, demotion, gap) |
 | `provider_switched` | Hot-swap landing notice |
-| `message_persisted {id, content}` | A user message just persisted (announced at turn acceptance) — the sender's client matches `content` against its own un-id'd live user bubbles and attaches the fork affordance (the id is the ForkChatRequest.fork_point) without waiting for the next history snapshot; a cancelled turn never persisted, so its bubble never gains an id |
+| `message_persisted {id, content}` | A user message persisted (announced at turn acceptance) — the sender's client matches `content` against its own live user bubbles that do not yet carry an id and attaches the fork affordance (the id is the fork point carried by ForkChatRequest) without waiting for the next history snapshot; a cancelled turn was never persisted, so its bubble never gains an id |
 | `chats` / `chat_created` / `providers` / `models` / `mcp_servers` / `skills` | Global broadcasts (session-level) |
 
 ### Terminal side channel (`/ws/term`)
@@ -585,7 +591,7 @@ ONLY where the content is machine output); `styles/app.css` is the Tailwind entr
 whose `@theme inline` maps tokens into utilities (`bg-panel`, `text-muted`, …),
 owns the ID-addressed shell layout (`#sidebar-layer`/`#sidebar` width/
 `#sidebar-resizer`/backdrop + the <768px drawer media query) — layout rules for ids
-Tailwind can't target live there — and carries the FLUX LINE (the composer's
+Tailwind cannot target live there — and carries the FLUX LINE (the composer's
 top-edge sweep, the one non-user-triggered animation, encoding round state);
 `styles/stream.css` styles the imperative streaming DOM (bubbles/tool cards with
 their status rail/prose/hljs via the `--fx-code-*` voice + the empty-state prompt
@@ -596,7 +602,7 @@ card `.fx-empty-*`) which cannot carry utilities. Control primitives in
 
 | Tool | Purpose |
 |------|---------|
-| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads just the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first Files-tab activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
+| Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads only the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first Files-tab activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
 | Tailwind v4 (@tailwindcss/vite) | Utility CSS generated at build; tokens bridged via `@theme inline` (no config JS). |
 | tsc --noEmit | Type-checks all frontend source (wired into `npm run build`). |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer-capture, scrollIntoView). |
@@ -682,14 +688,19 @@ container/VM.
  shared markdown pipeline (`renderMarkdown` + `.prose` typography + code-copy chrome) with a
  Raw toggle; the truncated badge carries a size hint (server reports the full `size`).
 - **Assets resolution**: `--web-assets-dir` > `web-ui/` next to the binary (packaged) >
- none (WS-only, no CWD-relative repo guess). The web UI is served BY
- DEFAULT (`--no-web` runs headless); `run-server` builds the UI
- when the dist is missing and pins the repo dist via `--web-assets-dir`.
+ `$HOME/.flux/web-ui` (script-installer layout) > none (headless; no CWD-relative repo
+ guess). The web UI is served BY DEFAULT (`--no-web` runs headless); `run-server` builds
+ the UI when the dist is missing and pins the repo dist via `--web-assets-dir`.
 - Packaging: `scripts/package-web.sh` assembles the servable root; the dist pipeline
  (`dist-workspace.toml` → `.github/workflows/release.yml`, tag-driven) builds each target
  natively on its runner and stages the root as `web-ui/` next to the binary inside every
  archive (`include = ["web-ui/"]`, produced per-runner by `.github/build-setup.yml`).
- Local release-shaped artifacts: `dist build [--target …]`.
+ Local release-shaped artifacts: `dist build [--target …]`. The shell/powershell
+ installers carry BINARIES ONLY (`include` reaches archives, not binary installers —
+ upstream #307/#543): script installs run headless (`GET /` 404s, no error). The UI is
+ published standalone via extra-artifacts (`flux-web-ui.tar.gz`, built ONCE in the global
+ job by `package-web.sh --tar`) for script-installer users to fetch into `~/.flux/web-ui`;
+ README documents the two commands.
 
 ## Working conventions
 

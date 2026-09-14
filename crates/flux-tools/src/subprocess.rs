@@ -161,6 +161,37 @@ async fn read_capped<R: AsyncRead + Unpin>(
     }
 }
 
+/// Arm the kernel's parent-death signal on a child (unix): the child gets
+/// SIGKILL the moment THIS process dies — even by SIGKILL/OOM/crash, where
+/// no in-process cleanup can run. Complements the in-process hygiene
+/// (`kill_on_drop`, the group guard, cooperative cancel): those cover
+/// every teardown while the server lives; this one is enforced by the
+/// kernel on ANY death mode, so a hard kill can never orphan a running
+/// build/test/clone. The `getppid` re-check closes the classic
+/// fork→prctl race (the parent died in that window — the child would
+/// otherwise never receive the signal). Well-behaved stdio children that
+/// exit on stdin EOF don't need this; long-running tool children do.
+#[cfg(unix)]
+pub fn arm_parent_death_signal(cmd: &mut tokio::process::Command) {
+    let pid = std::process::id() as i32;
+    // SAFETY: the closure runs in the forked child before exec; prctl and
+    // getppid are async-signal-safe. An error aborts the spawn (the child
+    // never execs).
+    unsafe {
+        cmd.pre_exec(move || {
+            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            if libc::getppid() != pid {
+                // Orphaned in the fork→prctl window — die like the signal
+                // would have made us.
+                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+            }
+            Ok(())
+        });
+    }
+}
+
 /// Run a command with a hard timeout and capture its output. The child runs
 /// in its own process group so `kill_on_drop` plus the group guard kill the
 /// whole tree on timeout, abort, or user interrupt (bash `-c` descendants,
@@ -194,7 +225,13 @@ pub(crate) async fn run_command_with_timeout(
     command.args(args).current_dir(dir);
     command.kill_on_drop(true);
     #[cfg(unix)]
-    command.process_group(0);
+    {
+        command.process_group(0);
+        // The group kill above covers every IN-PROCESS teardown path; the
+        // kernel-side parent-death signal covers the ones where this
+        // process itself dies mid-flight (crash, OOM, SIGKILL).
+        arm_parent_death_signal(&mut command);
+    }
 
     let mut child = command
         .stdout(std::process::Stdio::piped())

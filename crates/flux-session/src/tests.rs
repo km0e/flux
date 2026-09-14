@@ -7,8 +7,8 @@ use crate::ops::ClaimOutcome;
 use crate::ops::ForkFailure;
 use crate::ops::SwitchOutcome;
 use crate::test_util::{
-    DummyProvider, RecordingProvider, ScriptItem, ScriptedProvider, hang_script, kinds, register,
-    sess, wait_for, wait_for_kind,
+    DummyProvider, RecordingProvider, ScriptItem, ScriptedProvider, kinds, register, sess,
+    wait_for, wait_for_kind,
 };
 use flux_chat::ResolvedPin;
 use flux_core::{ChatStateKind, CoreError, Provider, Role, StreamChunk, ToolRegistry};
@@ -1033,21 +1033,38 @@ async fn send_with_a_client_msg_id_dedups_resends() {
     );
 }
 
-// ── graceful-shutdown drain ─────────────────────────────────────────────
+// ── batch-atomic persistence (crash-only durability) ─────────────────
 
+/// The persistence fold commits at EVERY batch boundary, not only at the
+/// round's end: by the time the continuation stream opens, the assistant
+/// tool_calls message and its batch's results are already on disk. A crash
+/// (SIGKILL, OOM — no graceful path involved) therefore loses at most the
+/// LIVE segment, never a finished batch — and the tail is always
+/// provider-valid (no dangling tool_calls, which OpenAI-compatible APIs
+/// reject with 400). Regression for the crash-only durability contract:
+/// under the old round-end-only commit this assertion fails (the store
+/// holds only the user message while the continuation stream stalls).
 #[tokio::test]
-async fn drain_returns_immediately_without_live_tasks() {
-    let (state, _store) = instance_state().await;
-    let start = std::time::Instant::now();
-    state.drain(std::time::Duration::from_secs(5)).await;
-    assert!(start.elapsed() < std::time::Duration::from_secs(1));
-}
-
-#[tokio::test]
-async fn drain_cancels_a_live_round_and_lands_it_on_the_boundary() {
+async fn tool_batch_persists_before_the_round_ends() {
     let (state, store) = instance_state().await;
     register(&state, "a").await;
-    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::once(hang_script()));
+    // The empty tool registry makes the flight fail fast — an error RESULT,
+    // which is exactly what the batch commit needs (the transcript never
+    // carries a dangling tool_call). The second segment hangs: the round
+    // stays live while we inspect the store.
+    let provider: Arc<dyn Provider> = Arc::new(ScriptedProvider::once(vec![
+        vec![
+            ScriptItem::Chunk(Ok(StreamChunk::ToolCalls(vec![flux_core::ToolCall {
+                id: "t1".into(),
+                name: "bash".into(),
+                arguments: "{}".into(),
+            }]))),
+            ScriptItem::Chunk(Ok(StreamChunk::End {
+                finish_reason: None,
+            })),
+        ],
+        vec![ScriptItem::Hang],
+    ]));
     let info = state
         .create_chat(
             &sess(&state, "a").await,
@@ -1067,19 +1084,24 @@ async fn drain_cancels_a_live_round_and_lands_it_on_the_boundary() {
         .send_message(&sess(&state, "a").await, &cid, "hi".into())
         .await
         .unwrap();
-    // The hang script pushed one delta then stalls — the round is live.
-    wait_for(|| task_streaming(&state, &cid)).await;
 
-    state.drain(std::time::Duration::from_secs(5)).await;
-
-    // The round landed on the machine's boundary (cancel → commit → Idle).
-    assert!(task_idle(&state, &cid));
-    // The cancelled round's partial assistant text persisted — the
-    // transcript commit is round-atomic, so the rebirth history is
-    // provider-valid (user + assistant, no dangling tool_calls).
-    let messages = store.load_messages(&cid).await.unwrap();
-    assert_eq!(messages.len(), 2);
+    // The batch commit lands while the round is still live (hung on the
+    // continuation segment) — persistence is NOT deferred to round end.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let messages = loop {
+        let msgs = store.load_messages(&cid).await.unwrap();
+        if msgs.len() >= 3 {
+            break msgs;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the tool batch never committed mid-round"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    };
     assert_eq!(messages[0].role, Role::User);
-    assert_eq!(messages[1].role, Role::Assistant);
-    assert_eq!(messages[1].content, "started");
+    assert!(!messages[1].tool_calls.is_empty(), "assistant tool_calls");
+    assert_eq!(messages[2].tool_call_id.as_deref(), Some("t1"));
+    // Still live — the round has NOT ended; the commit was the batch's.
+    assert!(task_streaming(&state, &cid));
 }

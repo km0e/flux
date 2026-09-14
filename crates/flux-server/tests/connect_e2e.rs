@@ -1799,26 +1799,32 @@ async fn terminal_killed_by_reaper_reports_exited_to_attached_client() {
     let _ = s.next_response().await; // stream drained before the drop
 }
 
-// ── graceful shutdown (SIGTERM → drain → clean exit) ─────────────────────
+// ── shutdown (crash-only: SIGTERM kills the process outright) ─────────────
 
-/// SIGTERM must exit THROUGH the drain, not via the default terminate:
-/// the handler resolves on the first signal, the listener closes, the
-/// (here empty) drain runs, and main returns Ok — process exit code 0.
-/// Without the handler the default behavior kills the process with the
-/// signal (status.success() == false), so this assertion catches a
-/// regression where the signal handler stops being installed.
+/// SIGTERM must kill the server PROMPTLY even with a live Subscribe stream
+/// open. No graceful-shutdown handling exists on purpose (the crash-only
+/// contract): no signal handler is installed, so the default terminate
+/// applies — the process dies by the signal. The old graceful path waited
+/// for open connections to finish, and a Subscribe body NEVER finishes on
+/// its own (the keepalive pump runs forever), which wedged shutdown behind
+/// every open frontend. Durability is the storage layer's contract
+/// (transactional, batch-atomic commits) — any death mode lands on the
+/// same recoverable state.
 #[cfg(unix)]
 #[tokio::test]
-async fn sigterm_exits_cleanly_through_the_drain() {
+async fn sigterm_kills_the_server_promptly_even_with_a_live_stream() {
     let mut server = Server::start().await;
+    // Hold a Subscribe stream open — the exact shape that wedged the old
+    // graceful shutdown (a response body that never completes).
+    let stream = Stream::open(&server.base, None).await;
     let pid = server.child.id().expect("server pid") as i32;
     // tokio::process has no signal API — deliver SIGTERM directly.
     unsafe {
         assert_eq!(libc::kill(pid, libc::SIGTERM), 0, "kill failed");
     }
-    // No live rounds → the drain returns immediately; the ceiling only
-    // guards against a hang regression in the shutdown path.
-    let status = timeout(Duration::from_secs(30), async {
+    // The ceiling only guards against a hang regression: the default
+    // disposition kills the process on the spot, stream or no stream.
+    let status = timeout(Duration::from_secs(15), async {
         loop {
             match server.child.try_wait() {
                 Ok(Some(status)) => break status,
@@ -1828,9 +1834,12 @@ async fn sigterm_exits_cleanly_through_the_drain() {
         }
     })
     .await
-    .expect("server did not exit within 30s of SIGTERM");
-    assert!(
-        status.success(),
-        "SIGTERM must exit through the drain (code 0), got: {status}"
+    .expect("server did not die within 15s of SIGTERM");
+    use std::os::unix::process::ExitStatusExt;
+    assert_eq!(
+        status.signal(),
+        Some(libc::SIGTERM),
+        "SIGTERM must kill via the default disposition (no handler), got: {status}"
     );
+    drop(stream);
 }

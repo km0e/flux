@@ -67,7 +67,9 @@ pub struct Machine {
     state: State,
     /// Provider-bound messages: the next stream request body.
     pending: Vec<Message>,
-    /// Round transcript: persisted once at round end.
+    /// Round transcript: committed at every batch boundary (the batch's
+    /// assistant message plus its results, atomically) and at round end
+    /// (the final segment).
     transcript: Vec<Message>,
     /// The active stream's cancellation handle (delivered by the chat
     /// layer via `LoopInput::StreamHandle` after it opened the
@@ -302,9 +304,19 @@ impl Machine {
                             call,
                         });
                     } else {
-                        // Batch done: the continuation stream carries every
-                        // tool result to the provider.
+                        // Batch done: commit the transcript ATOMICALLY per
+                        // batch — the assistant tool_calls message and every
+                        // result of its batch land on disk together, BEFORE
+                        // the continuation stream opens. This bounds the
+                        // crash window (SIGKILL/OOM — no graceful path) to
+                        // the live segment: a finished batch is never lost,
+                        // and the persisted tail never carries a dangling
+                        // tool_call (OpenAI-compatible APIs reject those
+                        // with 400).
                         let pending = std::mem::take(&mut self.pending);
+                        facts.push(LoopFact::TranscriptCommitted(std::mem::take(
+                            &mut self.transcript,
+                        )));
                         self.state = State::Streaming {
                             output: StreamOutput::default(),
                         };
@@ -412,7 +424,9 @@ impl Machine {
     /// the chat layer's persistence fold awaits the append BEFORE the
     /// client sees the wrap-up (persist-before-announce), and the semantic
     /// [`RoundOutcome`] classification follows — the consumer folds it
-    /// instead of scraping wire events (cancel handling).
+    /// instead of scraping wire events (cancel handling). The transcript
+    /// here is the FINAL segment only — earlier batches committed at their
+    /// own boundaries.
     /// The active stream handle drops — the connection stops pushing
     /// (residual chunks, if any, are absorbed by Idle). An armed
     /// control-plane gate fires here — but a turn queued BEFORE the gate
