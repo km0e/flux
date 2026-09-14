@@ -161,35 +161,35 @@ async fn read_capped<R: AsyncRead + Unpin>(
     }
 }
 
-/// Arm the kernel's parent-death signal on a child (unix): the child gets
-/// SIGKILL the moment THIS process dies — even by SIGKILL/OOM/crash, where
-/// no in-process cleanup can run. Complements the in-process hygiene
-/// (`kill_on_drop`, the group guard, cooperative cancel): those cover
-/// every teardown while the server lives; this one is enforced by the
-/// kernel on ANY death mode, so a hard kill can never orphan a running
-/// build/test/clone. The `getppid` re-check closes the classic
-/// fork→prctl race (the parent died in that window — the child would
-/// otherwise never receive the signal). Well-behaved stdio children that
-/// exit on stdin EOF don't need this; long-running tool children do.
-#[cfg(unix)]
+/// Arm the kernel's parent-death signal on a child — Linux/Android only:
+/// `prctl(PR_SET_PDEATHSIG)` is not in other kernels' libc (macOS/BSD
+/// children die with the session anyway — SIGHUP on reparent — and the
+/// in-process hygiene covers every case where this process lives to run
+/// it). A NO-OP on other platforms; the fn itself is unconditional so
+/// callers and the re-export need no platform cfg.
 pub fn arm_parent_death_signal(cmd: &mut tokio::process::Command) {
-    let pid = std::process::id() as i32;
-    // SAFETY: the closure runs in the forked child before exec; prctl and
-    // getppid are async-signal-safe. An error aborts the spawn (the child
-    // never execs).
-    unsafe {
-        cmd.pre_exec(move || {
-            if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
-                return Err(std::io::Error::last_os_error());
-            }
-            if libc::getppid() != pid {
-                // Orphaned in the fork→prctl window — die like the signal
-                // would have made us.
-                return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
-            }
-            Ok(())
-        });
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let pid = std::process::id() as i32;
+        // SAFETY: the closure runs in the forked child before exec; prctl
+        // and getppid are async-signal-safe. An error aborts the spawn (the
+        // child never execs).
+        unsafe {
+            cmd.pre_exec(move || {
+                if libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGKILL) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                if libc::getppid() != pid {
+                    // Orphaned in the fork→prctl window — die like the
+                    // signal would have made us.
+                    return Err(std::io::Error::from_raw_os_error(libc::ESRCH));
+                }
+                Ok(())
+            });
+        }
     }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    let _ = cmd;
 }
 
 /// Run a command with a hard timeout and capture its output. The child runs
