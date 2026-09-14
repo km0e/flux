@@ -4,6 +4,9 @@
   "private": true,
   "description": "Flux web UI — the single frontend (served by flux-server's static layer). React 19 + Radix UI + Tailwind v4 + zustand on Vite.",
   "type": "module",
+  "engines": {
+    "node": ">=24 <25"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -14,8 +17,8 @@
     "ui-check": "node e2e/ui-check.mjs",
     "shots": "node e2e/shots.mjs",
     "gen:proto": "cd ../.. && buf generate proto --template buf.gen.yaml",
-    "prebuild": "npm run gen:proto",
-    "pretest": "npm run gen:proto",
+    "prebuild": "pnpm run gen:proto",
+    "pretest": "pnpm run gen:proto",
     "proto:check": "cd ../.. && buf lint proto && buf breaking proto --against .git#ref=origin/main,subdir=proto && buf generate proto"
   },
   "dependencies": {
@@ -40,6 +43,7 @@
     "zustand": "^5.0.8"
   },
   "devDependencies": {
+    "@bufbuild/buf": "^1.72.0",
     "@bufbuild/protoc-gen-es": "^2.14.1",
     "@tailwindcss/vite": "^4.1.17",
     "@testing-library/jest-dom": "^6.9.0",

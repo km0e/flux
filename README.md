@@ -29,6 +29,18 @@ flux/
 └── docs/
 ```
 
+## 环境要求
+
+| 工具 | 版本 | 说明 |
+|------|------|------|
+| Rust | stable 通道 | 仓库钉 `rust-toolchain.toml`（stable + rustfmt/clippy），rustup 自动就位 |
+| Node | **24 LTS** | 唯一支持线（`engines` 声明，pnpm 对其他版本告警）；推荐 nvm 管理；脚本对版本敏感的 flag 自带守卫 |
+| pnpm | 11.x | 版本钉在 `clients/package.json` 的 `packageManager`；脚本发现缺失会自动安装 |
+| protoc | 系统二进制 | `protobuf-compiler`（apt）/ `brew install protobuf`——`flux-proto` 编译期调用 |
+| Chrome | 较新版本即可 | 仅 headless e2e（`pnpm run ui-check`）需要 |
+
+buf 等前端契约工具全部走 `clients/web` 的 devDependencies（pnpm 严格布局解析），无需全局安装。
+
 ## 快速开始
 
 ```bash
@@ -72,6 +84,7 @@ UI 资产解析顺序：`--web-assets-dir` > 二进制旁 `web-ui/` > `~/.flux/w
 |-----|---------------------|
 | [`docs/architecture.md`](docs/architecture.md) | 内部如何工作？（当前架构，含图示；另有英文版） |
 | [`docs/decisions.md`](docs/decisions.md) | 既定取舍——我们刻意选择不改进什么 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本历次变更（dist 解析它作为 GitHub Release 说明） |
 | [`AGENTS.md`](AGENTS.md) | AI 编码助手的约定与上下文 |
 
 ## 线协议（Connect / gRPC-Web）
@@ -102,10 +115,10 @@ DOMPurify + highlight.js 驱动命令式 markdown/流式渲染管线（rAF 合�
 append-only 段落——见 `docs/architecture.md` §4）。
 
 ```bash
-cd clients && npm install   # npm workspace 根
+cd clients && pnpm install   # pnpm workspace 根
 cd web
-npm test                    # vitest 单元测试
-npm run build               # tsc --noEmit + vite build → dist/
+pnpm test                    # vitest 单元测试
+pnpm run build               # tsc --noEmit + vite build → dist/
 ```
 
 ## 脚本

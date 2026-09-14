@@ -1,0 +1,14 @@
+# The clients workspace — pnpm is the package manager (see AGENTS.md).
+# One member today: the web UI. The buf CLI lives in web's devDependencies
+# (it derives the TS contract), so `pnpm exec buf` resolves there.
+packages:
+  - web
+
+# Dependency build scripts pnpm may run (v11's allowBuilds map):
+# esbuild's postinstall verifies the platform binary (Vite's transformer),
+# @bufbuild/buf's wires the CLI to its platform binary (the TS contract
+# derivation). Both are first-party toolchain — everything else stays
+# scriptless by default.
+allowBuilds:
+  "@bufbuild/buf": true
+  esbuild: true

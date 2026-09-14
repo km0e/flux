@@ -699,7 +699,7 @@ thinking creates a new block, and text resuming after thinking starts a fresh bu
 |---|---|
 | Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads only the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
 | Tailwind v4 (@tailwindcss/vite) | Build-time utility CSS generation; `@theme inline` bridges the `--fx-*` tokens into utilities (`bg-panel`, `text-muted`, …), no config JS |
-| tsc --noEmit | Frontend-wide type check (`npm run build` runs it first) |
+| tsc --noEmit | Frontend-wide type check (`pnpm run build` runs it first) |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer capture, scrollIntoView) |
 
 Connection management (`ConnectConnection`): the session-scoped Subscribe stream anchors the identity (the stored token rides the open — adoption in the handshake; ready = authoritative identity + leases); stream elements translate onto the existing handler vocabulary (R2 snapshot reconciliation: gated content strictly below the snapshot's seq is dropped, type-scoped); ClientMessages translate onto the ChatService RPCs (lease-gate statuses synthesize the error frames — the handlers stay transport-blind). Reconnection: exponential backoff 2s→30s (5 retries), a `connecting` guard prevents concurrent connects, sends made while detached flush after ready; half-open detection = the frame deadline (90s vs the server's 30s keepalives).
@@ -748,18 +748,11 @@ These mechanisms are deliberate design choices. This section is an index plus pr
 ./scripts/test.sh
 
 # Frontend build artifacts (content-hashed JS/CSS → dist/assets/)
-cd clients/web && npm run build
+cd clients && pnpm install && cd web && pnpm run build
 
 # Run the server (development goes through run-server: it builds the UI when
 # missing and passes the assets path; --no-web runs headless)
 ./scripts/run-server.sh
 ```
 
-Scripts (`.sh` + `.ps1` pairs): `build`, `test`, `run-server` (CLI flags pass through;
-web default-on — builds the UI when the dist is missing and passes an absolute assets
-path; the database defaults to ~/.flux/flux.db), `package` (MSVC targets need
-cargo-xwin), `package-web` (assembles the servable web-ui directory). CI splits a rust job
-(fmt / test / clippy / audit) and a web job (tsc / vitest / build).
-
-Convention: npm/npx run only under `clients/` (the workspace root) and `clients/web` — never
-at the repo root (a polluted root `node_modules` resolves wrong versions).
+Scripts (`.sh` + `.ps1` pairs): `test` (full validation: fmt → clippy → cargo test → tsc → vitest → build), `run-server` (CLI flags pass through; web default-on — builds the UI when the dist is missing and passes an absolute assets path; the database defaults to ~/.flux/flux.db), `package-web` (builds and assembles the servable web-ui directory), `fetch-fonts` (refreshes the bundled fonts; manual upgrades only). CI splits a rust job (fmt / test / clippy / audit) and a web job (proto:check / tsc / vitest / build). The pnpm version is pinned via `packageManager` in `clients/package.json` and the scripts self-provision it when missing; frontend contract tools (buf) resolve from `clients/web` devDependencies — no global installs.

@@ -554,7 +554,7 @@ sequenceDiagram
 |---|---|
 | Vite + @vitejs/plugin-react | `src/main.tsx` → 代码切分的内容哈希 chunks：入口 ~149 KB min / ~48 KB gzip 仅装第一方代码；常载第三方代码走四个稳定 `manualChunks` 组（react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB），纯应用改动只需重下入口；highlight.js ~129 KB chunk 启动预取，Files 树 ~132 KB chunk 首次激活加载，xterm ~329 KB chunk 首次创建终端时加载，Settings 对话框 ~33 KB chunk 首次点齿轮加载，单个 CSS；`dynamic import` + `manualChunks` + `cssCodeSplit: false`，文件名带内容哈希 → 服务端 `immutable` 伺服 |
 | Tailwind v4 (@tailwindcss/vite) | 构建期生成工具类 CSS；`@theme inline` 把 `--fx-*` token 桥接进工具类（`bg-panel`、`text-muted`…），无配置 JS |
-| tsc --noEmit | 前端全源类型检查（`npm run build` 先跑） |
+| tsc --noEmit | 前端全源类型检查（`pnpm run build` 先跑） |
 | vitest + jsdom + RTL | 单元测试。jsdom 缺口在 `src/test/setup.ts` 补齐（ResizeObserver、PointerEvent、pointer-capture、scrollIntoView） |
 
 连接管理（`ConnectConnection`）：会话级 Subscribe 流锚定身份（存储 token 随流开采纳；ready 帧 = 权威身份 + leases，握手坍缩进流开）；流元素翻译到既有 handler 词汇（R2 快照对账：受控内容元素 seq 严格小于快照序即丢弃，类型作用域）；ClientMessage 翻译为 ChatService RPC（租约门 status 合成 error 帧——handler 层不感知传输）。重连：指数退避 2s→30s（5 次）、`connecting` 守卫防并发、断线期间的发送在 ready 后冲队；半开检测 = frame deadline（90s，服务端 30s keepalive）。
@@ -603,12 +603,10 @@ sequenceDiagram
 ./scripts/test.sh
 
 # 前端构建产物（内容哈希 JS/CSS → dist/assets/）
-cd clients/web && npm run build
+cd clients && pnpm install && cd web && pnpm run build
 
 # 运行服务器（开发推荐 run-server：UI 缺失时自动构建并传资产路径；--no-web 无头）
 ./scripts/run-server.sh
 ```
 
-脚本（`.sh` + `.ps1` 成对）：`build`、`test`、`run-server`（CLI flag 透传；web 默认开——dist 缺失时自动构建 UI 并传绝对 assets 路径；数据库默认 `~/.flux/flux.db`）、`package`（MSVC 目标需 cargo-xwin）、`package-web`（组装可伺服的 web-ui 目录）。CI 分 rust job（fmt / test / clippy / audit）与 web job（tsc / vitest / build）。
-
-约定：npm/npx 只在 `clients/`（workspace 根）与 `clients/web` 下运行——仓库根不允许出现 node_modules。
+脚本（`.sh` + `.ps1` 成对）：`test`（全量验证：fmt → clippy → cargo test → tsc → vitest → build）、`run-server`（CLI flag 透传；web 默认开——dist 缺失时自动构建 UI 并传绝对 assets 路径；数据库默认 `~/.flux/flux.db`）、`package-web`（构建并组装可伺服的 web-ui 目录）、`fetch-fonts`（刷新内置字体，手动升级时才跑）。CI 分 rust job（fmt / test / clippy / audit）与 web job（proto:check / tsc / vitest / build）。pnpm 版本钉在 `clients/package.json` 的 `packageManager`，脚本发现缺失会自装；前端契约工具（buf）走 `clients/web` 的 devDependencies，无需全局安装。

@@ -4,11 +4,15 @@
  *
  * The list is the truth: only real registry entries render (there is no
  * synthetic "server default" option — `chat_create` requires an explicit
- * provider pin). The model input carries a datalist fed from the store's
- * probed-catalog cache — populated by the Providers dialog (the ONE place
- * that probes). This picker never issues a probe: creating a chat must
- * not stall on upstream round-trips, and an uncached catalog degrades to
- * plain free-text (a model string is never gated on the probe).
+ * provider pin). The model input's datalist is the LOCAL SAVED registry
+ * only — an upstream probed catalog runs to hundreds of ids and would
+ * bury the handful the user actually deploys. Discovery/import lives in
+ * the Providers dialog (the ONE place that probes); the input stays
+ * free-text so an unsaved model string still pins (the registry is a
+ * convenience, never a gate — upstream defaults apply). This picker
+ * never issues a probe: creating a chat must not stall on upstream
+ * round-trips; the probed cache only powers the per-typed-id context
+ * hint.
  *
  * Provides: ProviderPicker
  * Depends: core/state.ts, services/providers.ts, components/ui/*
@@ -57,14 +61,11 @@ export function ProviderPicker(props: {
   const ctxHint = ctx ? fmtTokens(ctx) : undefined;
   const maxOut = savedHit?.params.max_tokens;
   const maxHint = maxOut ? fmtTokens(maxOut) : undefined;
-  // No cached catalog yet (or the probe failed) → free-text with a pointer
-  // to where catalogs are probed. NO live probe here, by design.
-  const uncataloged = catalog === undefined || catalog.length === 0;
-  // Datalist: saved rows first (star-marked), then catalog entries the
-  // user has NOT saved. Datalist options carry no styling — the label
-  // text is the only distinguishing voice.
-  const savedIds = new Set(saved.map((m) => m.model));
-  const catalogRest = (catalog ?? []).filter((m) => !savedIds.has(m.id));
+  // No saved rows for the picked provider → the datalist has nothing to
+  // offer; free-text still works, the pointer names the import surface.
+  const unimported = !!props.providerId && saved.length === 0;
+  // Datalist: the SAVED rows only (★ display name). The upstream catalog
+  // never rides here — see the module doc.
 
   return (
     <div className="flex flex-col gap-1.5">
@@ -97,7 +98,7 @@ export function ProviderPicker(props: {
         <span>
           Model
           <span className="ml-1 text-xs text-faint">
-            (required{uncataloged && props.providerId ? ' · catalog in Providers' : ''})
+            (required{unimported ? ' · import in Providers' : ''})
           </span>
         </span>
         <TextField
@@ -113,9 +114,6 @@ export function ProviderPicker(props: {
             <option key={m.model} value={m.model}>
               {`★ ${m.meta.name || m.model}`}
             </option>
-          ))}
-          {catalogRest.map((m) => (
-            <option key={m.id} value={m.id} />
           ))}
         </datalist>
         {(ctxHint || maxHint || savedHit) && (

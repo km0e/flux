@@ -115,11 +115,14 @@ function ProviderForm(props: {
   );
 }
 
-/** The probed catalog block — a bounded mono list (context length where
+/** The probed catalog block — a filterable mono list (context length where
  * the upstream reports one) with per-row IMPORT affordances: an unsaved
  * entry imports (the server auto-fills models.dev metadata on create),
  * a saved one shows a mark (the conflict rule: local wins, no overwrite).
- * Shared by the preview pane and the mobile row's expanded section. */
+ * The filter is the discovery surface now that the chat pickers list only
+ * SAVED models — upstream catalogs run to hundreds of ids and the picker
+ * datalist must stay lean. Shared by the preview pane and the mobile
+ * row's expanded section. */
 function CatalogBlock(props: {
   id: string;
   catalog: ProviderModelInfo[];
@@ -127,45 +130,67 @@ function CatalogBlock(props: {
   importing: string | null;
   onImport: (modelId: string) => void;
 }): React.ReactElement {
+  const [filter, setFilter] = useState('');
+  const needle = filter.trim().toLowerCase();
+  const shown = needle
+    ? props.catalog.filter((m) => m.id.toLowerCase().includes(needle))
+    : props.catalog;
   return (
-    <ul
-      className="m-0 flex max-h-44 list-none flex-col gap-px overflow-y-auto rounded-sm border border-border bg-bg p-1.5"
-      aria-label={`Models of ${props.id}`}
-    >
-      {props.catalog.map((m) => {
-        const saved = props.savedIds.has(m.id);
-        return (
-          <li
-            key={m.id}
-            className="flex items-baseline justify-between gap-3 px-1 py-0.5 font-mono text-xs text-fg"
-          >
-            <span className="min-w-0 truncate">{m.id}</span>
-            <span className="flex shrink-0 items-baseline gap-2">
-              {m.context_length !== undefined && (
-                <span className="text-2xs text-faint tabular-nums">
-                  {fmtTokens(m.context_length)} ctx
-                </span>
-              )}
-              {saved ? (
-                <Badge tone="default" title="Already saved locally — import skips it">
-                  saved
-                </Badge>
-              ) : (
-                <button
-                  type="button"
-                  className="cursor-pointer rounded-sm border border-border px-1.5 py-0.5 text-2xs text-muted transition-colors duration-fast hover:border-border-strong hover:text-fg"
-                  disabled={props.importing !== null}
-                  onClick={() => props.onImport(m.id)}
-                  title="Save this model (metadata auto-filled from models.dev)"
-                >
-                  {props.importing === m.id ? 'importing…' : 'Import'}
-                </button>
-              )}
-            </span>
-          </li>
-        );
-      })}
-    </ul>
+    <div className="flex flex-col gap-1">
+      <div className="flex items-center gap-2">
+        <TextField
+          value={filter}
+          onChange={(e) => setFilter(e.target.value)}
+          placeholder="filter models…"
+          aria-label={`Filter models of ${props.id}`}
+          className="font-mono text-xs"
+        />
+        <span className="shrink-0 text-2xs text-faint tabular-nums">
+          {shown.length === props.catalog.length
+            ? `${props.catalog.length}`
+            : `${shown.length} / ${props.catalog.length}`}
+        </span>
+      </div>
+      <ul
+        className="m-0 flex max-h-44 list-none flex-col gap-px overflow-y-auto rounded-sm border border-border bg-bg p-1.5"
+        aria-label={`Models of ${props.id}`}
+      >
+        {shown.map((m) => {
+          const saved = props.savedIds.has(m.id);
+          return (
+            <li
+              key={m.id}
+              className="flex items-baseline justify-between gap-3 px-1 py-0.5 font-mono text-xs text-fg"
+            >
+              <span className="min-w-0 truncate">{m.id}</span>
+              <span className="flex shrink-0 items-baseline gap-2">
+                {m.context_length !== undefined && (
+                  <span className="text-2xs text-faint tabular-nums">
+                    {fmtTokens(m.context_length)} ctx
+                  </span>
+                )}
+                {saved ? (
+                  <Badge tone="default" title="Already saved locally — import skips it">
+                    saved
+                  </Badge>
+                ) : (
+                  <button
+                    type="button"
+                    className="cursor-pointer rounded-sm border border-border px-1.5 py-0.5 text-2xs text-muted transition-colors duration-fast hover:border-border-strong hover:text-fg"
+                    disabled={props.importing !== null}
+                    onClick={() => props.onImport(m.id)}
+                    title="Save this model (metadata auto-filled from models.dev)"
+                  >
+                    {props.importing === m.id ? 'importing…' : 'Import'}
+                  </button>
+                )}
+              </span>
+            </li>
+          );
+        })}
+        {shown.length === 0 && <li className="px-1 py-1 text-2xs text-faint">no match</li>}
+      </ul>
+    </div>
   );
 }
 

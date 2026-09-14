@@ -13,11 +13,29 @@ cargo clippy --workspace --tests -- -D warnings
 echo "==> Running Rust tests..."
 cargo test --workspace
 
-echo "==> Installing frontend dependencies (npm workspaces)..."
-(cd clients && npm install)
+echo "==> Installing frontend dependencies (pnpm)..."
+# Silence pnpm 11's per-invocation ExperimentalWarning (its vendored
+# `debug` probes Node's experimental localStorage; newer Node exposes the
+# getter by default). Guarded: old Node rejects the flag and keeps the
+# warning instead of breaking the run.
+if node --disable-warning=ExperimentalWarning -e '' 2>/dev/null; then
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--disable-warning=ExperimentalWarning"
+fi
+if ! command -v pnpm >/dev/null 2>&1; then
+    echo "==> pnpm not found — installing globally via npm"
+    pnpm_major="$(node -p 'require(process.argv[1]).packageManager.match(/pnpm@(\d+)/)[1]' \
+        ./clients/package.json)"
+    npm install -g "pnpm@$pnpm_major"
+fi
+echo "==> toolchain: node $(node --version), pnpm $(pnpm --version)"
+(cd clients && pnpm install)
 
 echo "==> Proto contract checks (buf lint + TS freshness)..."
-export PATH="$(pwd)/clients/node_modules/.bin:$PATH"
+export PATH="$(pwd)/clients/web/node_modules/.bin:$PATH"
+command -v buf >/dev/null 2>&1 || {
+    echo "buf binary missing after install — is @bufbuild/buf in clients/web/package.json?" >&2
+    exit 1
+}
 buf lint proto
 buf generate proto
 test -z "$(git status --porcelain clients/web/src/gen)" || {
@@ -26,12 +44,12 @@ test -z "$(git status --porcelain clients/web/src/gen)" || {
 }
 
 echo "==> Typechecking the web UI..."
-(cd clients/web && npx tsc --noEmit)
+(cd clients/web && pnpm exec tsc --noEmit)
 
 echo "==> Running web UI tests (vitest)..."
-(cd clients/web && npm test)
+(cd clients/web && pnpm test)
 
 echo "==> Building the web UI..."
-(cd clients/web && npm run build)
+(cd clients/web && pnpm run build)
 
 echo "==> All checks passed."

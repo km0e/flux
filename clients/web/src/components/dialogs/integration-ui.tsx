@@ -136,10 +136,11 @@ export function RemoveControl(props: {
         size="sm"
         onClick={() => {
           void props.onRemove().then((err) => {
-            if (err) {
-              setError(err);
-              setConfirming(false);
-            }
+            if (err) setError(err);
+            // Success resets too: the fresh list unmounts the row via the
+            // broadcast, but until it lands the buttons must not stick in
+            // confirm mode.
+            setConfirming(false);
           });
         }}
       >

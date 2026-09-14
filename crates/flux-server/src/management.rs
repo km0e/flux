@@ -120,9 +120,16 @@ pub(crate) async fn save_model(
                     fill_params_from_meta(&mut params, &m);
                     meta = m;
                     enriched = true;
+                    tracing::info!(provider = %provider, model = %model,
+                        "models.dev enrichment landed");
                 }
-                Ok(None) => {}
+                Ok(None) => {
+                    tracing::debug!(provider = %provider, model = %model,
+                        "no models.dev match; saving without meta");
+                }
                 Err(e) => {
+                    // The fetch itself already warned at the source
+                    // (models_dev::catalog); this names the affected row.
                     tracing::warn!(provider = %provider, model = %model, error = %e,
                         "models.dev enrichment failed; saving without meta");
                 }

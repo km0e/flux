@@ -26,21 +26,47 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-echo "==> Installing client dependencies (npm workspaces)..."
-if [ ! -d "$repo/clients/node_modules" ]; then
-    (cd "$repo/clients" && npm install)
+echo "==> Installing client dependencies (pnpm)..."
+# pnpm 11's vendored `debug` lib probes Node's experimental localStorage on
+# startup; newer Node exposes webstorage by default (without a backing
+# file), so EVERY node/pnpm invocation prints an ExperimentalWarning.
+# Harmless noise — silence it for this script's node processes when the
+# Node in use supports the precise disable flag (guarded: old Node
+# rejects the option, keeping the warning instead of breaking the run).
+if node --disable-warning=ExperimentalWarning -e '' 2>/dev/null; then
+    export NODE_OPTIONS="${NODE_OPTIONS:+$NODE_OPTIONS }--disable-warning=ExperimentalWarning"
 fi
+# pnpm is the frontend package manager (see AGENTS.md). Provision it on
+# demand — a fresh machine (new CI runner, new ssh box) needs no manual
+# setup; the major tracks the packageManager pin in clients/package.json.
+if ! command -v pnpm >/dev/null 2>&1; then
+    echo "==> pnpm not found — installing globally via npm"
+    pnpm_major="$(node -p 'require(process.argv[1]).packageManager.match(/pnpm@(\d+)/)[1]' \
+        "$repo/clients/package.json")"
+    npm install -g "pnpm@$pnpm_major"
+fi
+# The build log self-documents the environment — mismatches (a machine on
+# the wrong Node line) are visible without any further digging.
+echo "==> toolchain: node $(node --version), pnpm $(pnpm --version)"
+# Unconditional install: pnpm is store-backed and a no-op when current —
+# and a stale/partial node_modules (the old skip-if-dir-exists check) is
+# exactly how `buf: command not found` happened on a fresh machine.
+(cd "$repo/clients" && pnpm install)
 
 # The TS contract is DERIVED, never committed (see AGENTS.md) — any clean
 # checkout lacks clients/web/src/gen, so derive it here or vite cannot
-# resolve "../gen/..." imports. buf resolves the protoc-gen-es plugin via
-# PATH: inject the npm-local bin (no global install required anywhere).
+# resolve "../gen/..." imports. buf lives in web's devDependencies; its
+# bin rides pnpm's package-local .bin — verified, not assumed.
 echo "==> Deriving the TS contract (buf generate)..."
-export PATH="$repo/clients/node_modules/.bin:$PATH"
+export PATH="$repo/clients/web/node_modules/.bin:$PATH"
+command -v buf >/dev/null 2>&1 || {
+    echo "buf binary missing after install — is @bufbuild/buf in clients/web/package.json?" >&2
+    exit 1
+}
 (cd "$repo" && buf generate proto)
 
 echo "==> Building web UI (vite)..."
-(cd "$repo/clients/web" && npm run build:fast)
+(cd "$repo/clients/web" && pnpm run build:fast)
 
 if [ "$out" != "$repo/clients/web/dist" ]; then
     echo "==> Assembling servable root at $out..."

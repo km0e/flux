@@ -108,4 +108,31 @@ describe('ProviderPicker', () => {
     fireEvent.change(screen.getByLabelText(/Provider/), { target: { value: 'alpha' } });
     expect(screen.getByText('★ m-a')).toBeTruthy();
   });
+
+  it('the datalist offers ONLY saved models — the probed catalog never bloats it', () => {
+    useFlux.setState({
+      providerModels: { alpha: [{ id: 'probe-1' }, { id: 'probe-2' }] },
+      savedModels: [{ provider: 'alpha', model: 'm-a', params: {}, meta: {} }],
+    });
+    render(<Harness />);
+    fireEvent.change(screen.getByLabelText(/Provider/), { target: { value: 'alpha' } });
+    // Unsaved probed entries stay OUT of the datalist; only the saved row
+    // is offered. Discovery lives in Providers, not here.
+    const values = [...document.querySelectorAll('datalist option')].map((o) =>
+      o.getAttribute('value'),
+    );
+    expect(values).toEqual(['m-a']);
+  });
+
+  it('no saved rows → empty datalist + import pointer; free text still pins', () => {
+    useFlux.setState({ providerModels: { alpha: [{ id: 'probe-1' }] } });
+    render(<Harness />);
+    fireEvent.change(screen.getByLabelText(/Provider/), { target: { value: 'alpha' } });
+    expect(screen.getByText(/import in Providers/)).toBeTruthy();
+    expect(document.querySelectorAll('datalist option').length).toBe(0);
+    // The registry is a convenience, never a gate — an unsaved model
+    // string still pins (upstream defaults apply).
+    fireEvent.change(screen.getByLabelText(/Model/), { target: { value: 'any-unsaved' } });
+    expect(screen.getByTestId('model').textContent).toBe('any-unsaved');
+  });
 });

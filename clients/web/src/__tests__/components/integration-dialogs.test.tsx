@@ -149,6 +149,27 @@ describe('integration panels', () => {
     });
   });
 
+  it('providers: the upstream catalog block filters by id (import discovery)', async () => {
+    useFlux.setState({ providers: [{ id: 'main', url: 'https://x/v1' }] });
+    vi.mocked(probeProvider).mockImplementation(async (pid) => {
+      const r = { models: [{ id: 'alpha' }, { id: 'beta' }, { id: 'gamma' }], error: undefined };
+      actualProviders.mod?.handleProviderModelsReply(pid, r.models, r.error);
+      return r;
+    });
+    render(<ProvidersPanel />);
+    await waitFor(() => expect(screen.getByText('3 models')).toBeTruthy());
+    // The filter narrows the import candidates live; the count shows the
+    // shown/total split.
+    fireEvent.change(screen.getByLabelText('Filter models of main'), {
+      target: { value: 'gam' },
+    });
+    const list = screen.getByRole('list', { name: 'Models of main' });
+    expect(list.textContent).toContain('gamma');
+    expect(list.textContent).not.toContain('alpha');
+    // The shown/total count rides the filter row above the list.
+    expect(screen.getByText('1 / 3')).toBeTruthy();
+  });
+
   it('providers: deleting the selected entry falls selection to the next one', async () => {
     useFlux.setState({
       providers: [

@@ -9,12 +9,15 @@
 //! a fetch failure never blocks a save/import — the row simply lands
 //! without enrichment.
 //!
-//! Matching is two-layer: a static host→provider table disambiguates which
+//! Matching is layered: a static host→provider table disambiguates which
 //! models.dev section to search first (registry ids like "main" never
 //! match models.dev provider keys; base urls often do), then the model id
-//! is matched exactly with two normalization fallbacks (a `vendor/` prefix
-//! and a `:tag` suffix are stripped). Determinism: the global fallback
-//! walks provider keys in sorted order.
+//! goes through a best-effort ladder — exact (with `vendor/` prefix and
+//! `:tag` suffix stripped), then canonical equality (case + `.`/`-`
+//! spelling folded), then canonical `-`-bounded prefix (dated snapshots
+//! like "-260828" extend a catalog base id). Determinism: sections walk
+//! in host-first/sorted order; within a section canonical matches pick
+//! the longest (ties lexicographically smallest) catalog id.
 
 use serde::Deserialize;
 use serde_json::json;
@@ -104,12 +107,18 @@ impl ModelsDev {
     /// user sync). The fetch failure surfaces as Err — the CALLER decides
     /// it is non-fatal.
     pub async fn catalog(&self, force: bool) -> Result<Catalog, String> {
+        // Cache hit — the fresh-download story stays in the info log; this
+        // debug line names the local-cache existence explicitly for diagnosis.
         if !force {
             let cached = self.cache.read().await;
             if let Some(c) = cached
                 .as_ref()
                 .filter(|c| c.fetched_at.elapsed() < CATALOG_TTL)
             {
+                tracing::debug!(
+                    age_secs = c.fetched_at.elapsed().as_secs(),
+                    "models.dev catalog served from local cache"
+                );
                 return Ok(c.catalog.clone());
             }
         }
@@ -121,25 +130,51 @@ impl ModelsDev {
                 .as_ref()
                 .filter(|c| !force && c.fetched_at.elapsed() < CATALOG_TTL)
             {
+                tracing::debug!(
+                    age_secs = c.fetched_at.elapsed().as_secs(),
+                    "models.dev catalog served from local cache"
+                );
                 return Ok(c.catalog.clone());
             }
         }
-        let response = self
-            .client
-            .get(MODELS_DEV_URL)
-            .send()
-            .await
-            .map_err(|e| format!("models.dev request failed: {e}"))?;
+        let started = Instant::now();
+        let response = match self.client.get(MODELS_DEV_URL).send().await {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "models.dev download failed"
+                );
+                return Err(format!("models.dev request failed: {e}"));
+            }
+        };
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .map_err(|e| format!("models.dev read failed: {e}"))?;
+        let body = match response.text().await {
+            Ok(b) => b,
+            Err(e) => {
+                tracing::warn!(error = %e, "models.dev download failed reading the body");
+                return Err(format!("models.dev read failed: {e}"));
+            }
+        };
         if !status.is_success() {
             let excerpt: String = body.chars().take(256).collect();
+            tracing::warn!(http_status = %status, "models.dev download rejected");
             return Err(format!("models.dev HTTP {status}: {excerpt}"));
         }
-        let catalog = parse_catalog(&body)?;
+        let catalog = match parse_catalog(&body) {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "models.dev catalog parse failed");
+                return Err(e);
+            }
+        };
+        tracing::info!(
+            providers = catalog.len(),
+            models = catalog.values().map(|m| m.len()).sum::<usize>(),
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "models.dev catalog downloaded"
+        );
         *self.cache.write().await = Some(Cached {
             fetched_at: Instant::now(),
             catalog: catalog.clone(),
@@ -193,6 +228,11 @@ fn provider_for_host(base_url: &str) -> Option<&'static str> {
         ("api.fireworks.ai", "fireworks-ai"),
         ("api.moonshot.cn", "moonshotai"),
         ("generativelanguage.googleapis.com", "google"),
+        // The zhipu/z.ai family — the GLM sections (dot-spelled catalog
+        // ids like "glm-5.3-flash" against dash-spelled endpoint ids).
+        ("api.z.ai", "zai"),
+        ("open.bigmodel.cn", "zhipuai"),
+        ("api.zhipu.ai", "zhipuai"),
     ];
     let host = base_url
         .trim_start_matches("http://")
@@ -222,10 +262,32 @@ fn id_candidates(model_id: &str) -> Vec<&str> {
     out
 }
 
+/// Canonical comparison form: lowercase with `.` folded to `-`. Vendors
+/// swap the two spellings freely for the same model ("glm-5.3-flash" vs
+/// "glm-5-3-flash", "claude-sonnet-4-5" vs "claude-sonnet-4.5") — the
+/// catalog and an endpoint's /models listing regularly disagree. Never
+/// surfaced: a match reports the CATALOG's own key.
+fn canonical(id: &str) -> String {
+    id.to_ascii_lowercase().replace('.', "-")
+}
+
 /// Match (base_url, model id) → (provider key, matched id, entry).
-/// Deterministic: host-scoped section first, then the global walk in
-/// sorted provider order; exact id before case-insensitive before
-/// normalized variants.
+/// A three-stage best-effort ladder, each stage across all sections in
+/// host-first/sorted order before the next may fire:
+/// 1. literal forms — exact, then `vendor/`-stripped, then `:tag`-stripped,
+///    then both;
+/// 2. canonical equality — same id, different spelling (case, `.`/`-`);
+/// 3. canonical `-`-bounded prefix — the requested id extends a catalog
+///    id with a dash tail (dated snapshots "-260828" / "-2024-08-06",
+///    quantization variants "-hf", …); the LONGEST catalog id wins within
+///    a section (a "glm-5" key must not shadow "glm-5.3-flash" for
+///    "glm-5-3-flash-260828"), ties by lexicographically smallest id.
+///
+/// Stage 3 knowingly aliases an unknown VARIANT onto its family base id
+/// when the catalog carries no key of its own ("o1-preview" → "o1") —
+/// accepted because the fallback fires only after every literal form
+/// missed and the UI reports the matched entry, so the alias is visible.
+///
 /// Returns (provider key, matched model id, entry) — the key/id are owned
 /// (candidates derived from `model_id` do not borrow from the catalog).
 pub fn match_entry<'a>(
@@ -240,6 +302,7 @@ pub fn match_entry<'a>(
     if let Some(hp) = host_provider {
         keys.sort_by_key(|k| (*k != hp, (*k).clone()));
     }
+    // Stage 1 — literal forms.
     for candidate in id_candidates(model_id) {
         for key in &keys {
             let section = &catalog[*key];
@@ -250,6 +313,48 @@ pub fn match_entry<'a>(
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(candidate))
             {
+                return Some(((*key).clone(), id.clone(), entry));
+            }
+        }
+    }
+    // Stage 2 — canonical equality (deterministic: smallest key on a tie).
+    for candidate in id_candidates(model_id) {
+        let canon = canonical(candidate);
+        for key in &keys {
+            if let Some((id, entry)) = catalog[*key]
+                .iter()
+                .filter(|(k, _)| canonical(k) == canon)
+                .min_by_key(|(k, _)| (*k).clone())
+            {
+                return Some(((*key).clone(), id.clone(), entry));
+            }
+        }
+    }
+    // Stage 3 — canonical prefix: catalog id + `-` + tail.
+    for candidate in id_candidates(model_id) {
+        let canon = canonical(candidate);
+        for key in &keys {
+            let mut best: Option<(&String, &ModelEntry)> = None;
+            for (k, e) in &catalog[*key] {
+                let ck = canonical(k);
+                let bounded = canon.len() > ck.len()
+                    && canon.starts_with(&ck)
+                    && canon.as_bytes()[ck.len()] == b'-';
+                if !bounded {
+                    continue;
+                }
+                let takes = match &best {
+                    None => true,
+                    Some((bk, _)) => {
+                        let bck = canonical(bk);
+                        ck.len() > bck.len() || (ck.len() == bck.len() && k.as_str() < bk.as_str())
+                    }
+                };
+                if takes {
+                    best = Some((k, e));
+                }
+            }
+            if let Some((id, entry)) = best {
                 return Some(((*key).clone(), id.clone(), entry));
             }
         }
@@ -319,8 +424,15 @@ mod tests {
                             "temperature": true, "attachment": true,
                             "limit": {"context": 128000, "output": 16384},
                             "cost": {"input": 2.5, "output": 10.0, "cache_read": 1.25}},
+                "gpt-4o-2024-08-06": {"name": "GPT-4o (2024-08-06)",
+                                      "limit": {"context": 128000, "output": 16384}},
                 "o1": {"name": "o1", "reasoning": true, "temperature": false,
                        "limit": {"context": 200000, "output": 100000}}
+            }},
+            "anthropic": {"models": {
+                // Dashed catalog spelling — dotted endpoint ids must still hit it.
+                "claude-sonnet-4-5": {"name": "Claude Sonnet 4.5",
+                                      "limit": {"context": 200000}}
             }},
             "deepseek": {"models": {
                 "deepseek-chat": {"name": "DeepSeek-V3", "tool_call": true,
@@ -328,6 +440,16 @@ mod tests {
             }},
             "openrouter": {"models": {
                 "deepseek/deepseek-chat": {"name": "OR DeepSeek", "limit": {"context": 65536}}
+            }},
+            "zai": {"models": {
+                "glm-5.3-flash": {"name": "GLM-5.3 Flash (zai)",
+                                  "limit": {"context": 128000}},
+                "glm-5": {"name": "GLM-5", "limit": {"context": 128000}}
+            }},
+            "zhipuai": {"models": {
+                "glm-5.3-flash": {"name": "GLM-5.3 Flash (zhipuai)",
+                                  "limit": {"context": 128000}},
+                "glm-5": {"name": "GLM-5 (zhipuai)", "limit": {"context": 128000}}
             }}
         });
         parse_catalog(&body.to_string()).unwrap()
@@ -368,6 +490,72 @@ mod tests {
     fn miss_is_none_never_fatal() {
         let cat = catalog();
         assert!(match_entry(&cat, "https://api.openai.com/v1", "no-such-model").is_none());
+        // An id sharing no dash-bounded prefix with any catalog key stays
+        // unmatched. (An unknown VARIANT like "o1-preview" WOULD alias onto
+        // its family base "o1" — the accepted stage-3 tradeoff, see the
+        // match_entry doc; the UI names the match.)
+        assert!(match_entry(&cat, "https://api.openai.com/v1", "totally-different").is_none());
+    }
+
+    #[test]
+    fn dated_snapshot_suffix_matches_the_canonical_base() {
+        let cat = catalog();
+        // The GLM snapshot shape: dash-spelled base + YYMMDD tail against
+        // the dot-spelled catalog id. Host-anchored to zhipuai, and the
+        // LONGEST prefix ("glm-5.3-flash") must win over "glm-5".
+        let (key, id, entry) = match_entry(
+            &cat,
+            "https://open.bigmodel.cn/api/paas/v4",
+            "glm-5-3-flash-260828",
+        )
+        .unwrap();
+        assert_eq!(key, "zhipuai");
+        assert_eq!(id, "glm-5.3-flash");
+        assert_eq!(entry.name.as_deref(), Some("GLM-5.3 Flash (zhipuai)"));
+        // Calendar-style tails land the same way.
+        let (_, id, _) = match_entry(
+            &cat,
+            "https://open.bigmodel.cn/api/paas/v4",
+            "glm-5-3-flash-2026-08-28",
+        )
+        .unwrap();
+        assert_eq!(id, "glm-5.3-flash");
+    }
+
+    #[test]
+    fn dot_and_dash_spellings_are_equivalent() {
+        let cat = catalog();
+        // Dash-spelled request against the dot-spelled zai/zhipuai keys —
+        // global walk (no host anchor) picks the sorted-first section.
+        let (key, id, _) = match_entry(&cat, "https://x.invalid/v1", "glm-5-3-flash").unwrap();
+        assert_eq!(key, "zai");
+        assert_eq!(id, "glm-5.3-flash");
+        // …and the reverse direction: dotted request, dashed catalog key.
+        let (key, id, _) = match_entry(&cat, "https://x.invalid/v1", "claude-sonnet-4.5").unwrap();
+        assert_eq!(key, "anthropic");
+        assert_eq!(id, "claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn exact_dated_entry_beats_the_prefix_fallback() {
+        let cat = catalog();
+        // When the catalog carries the snapshot itself, stage 1 wins —
+        // the fallback never gets a chance to land on the base id.
+        let (_, id, entry) =
+            match_entry(&cat, "https://api.openai.com/v1", "gpt-4o-2024-08-06").unwrap();
+        assert_eq!(id, "gpt-4o-2024-08-06");
+        assert_eq!(entry.name.as_deref(), Some("GPT-4o (2024-08-06)"));
+    }
+
+    #[test]
+    fn zhipu_hosts_anchor_their_sections() {
+        let cat = catalog();
+        // api.z.ai anchors the zai section even though zhipuai carries the
+        // same id under a different name.
+        let (key, _, entry) =
+            match_entry(&cat, "https://api.z.ai/api/paas/v4", "glm-5.3-flash").unwrap();
+        assert_eq!(key, "zai");
+        assert_eq!(entry.name.as_deref(), Some("GLM-5.3 Flash (zai)"));
     }
 
     #[test]

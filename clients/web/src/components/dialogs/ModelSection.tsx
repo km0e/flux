@@ -172,11 +172,16 @@ function ModelEditForm(props: {
   );
 }
 
-/** One saved-model row: identity + capability/price badges + edit/remove. */
+/** One saved-model row: identity + capability/price badges + edit/remove.
+ * When the models.dev snapshot matched a DIFFERENT catalog id (spelling
+ * or snapshot-suffix normalization), the matched entry is named inline —
+ * a wrong match is always visible, never silent. */
 function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.ReactElement {
   const [editing, setEditing] = useState(false);
   const meta = props.row.meta;
   const cost = meta.cost;
+  const matched = meta.models_dev;
+  const aliased = matched !== undefined && matched.model !== props.row.model;
 
   return (
     <li className="flex flex-col gap-1.5 rounded-md border border-border bg-inset px-2.5 py-2">
@@ -186,7 +191,14 @@ function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.
         </span>
         {meta.name && <RowSub>{meta.name}</RowSub>}
         {meta.source === 'models.dev' && (
-          <Badge tone="accent" title="Metadata auto-filled from models.dev">
+          <Badge
+            tone="accent"
+            title={
+              matched
+                ? `Metadata from models.dev — matched ${matched.provider}/${matched.model}`
+                : 'Metadata auto-filled from models.dev'
+            }
+          >
             models.dev
           </Badge>
         )}
@@ -220,6 +232,11 @@ function SavedModelRow(props: { provider: string; row: SavedModelInfo }): React.
         {meta.reasoning && <Badge tone="accent">reasoning</Badge>}
         {meta.tool_call && <Badge tone="default">tools</Badge>}
         {meta.knowledge && <RowSub>knowledge {meta.knowledge}</RowSub>}
+        {aliased && (
+          <RowSub title={`models.dev entry: ${matched.provider}/${matched.model}`}>
+            matched: {matched.provider}/{matched.model}
+          </RowSub>
+        )}
       </div>
       {cost && (
         <RowSub>

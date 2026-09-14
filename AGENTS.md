@@ -8,10 +8,11 @@ This file contains project-specific context for AI coding agents working on Flux
 |-----|------|---------------------|
 | `README.md` | What the project is, quick start (Chinese) | "What is this?" |
 | `README-en.md` | English README (mirrors `README.md`) | English mirror |
+| `CHANGELOG.md` | Release-by-release changes (Keep a Changelog; dist parses it as the GitHub release notes) | "What changed, when?" |
 | `docs/architecture.md` / `architecture-en.md` | The current architecture (the "what"), with Mermaid diagrams | "How does it work inside?" |
 | `docs/decisions.md` / `decisions-en.md` | **Accepted tradeoffs** (`T-xx`) — existing compromises that are explicitly accepted and must not be "fixed" as defects | "What did we deliberately choose NOT to improve?" |
 
-Maintenance rules: rationale lives where it belongs — the architecture doc carries the current "what", code comments carry local "why"; `docs/decisions.md` is reserved for accepted tradeoffs. The architecture doc describes only the present tense.
+Maintenance rules: rationale lives where it belongs — the architecture doc carries the current "what", code comments carry local "why"; `docs/decisions.md` is reserved for accepted tradeoffs; `CHANGELOG.md` gains one section per release (its `[x.y.z]` heading feeds dist's GitHub release notes). The architecture doc describes only the present tense.
 
 ## Project overview
 
@@ -123,7 +124,7 @@ flux/
 │ │ └── grpc/ # The Connect surface serialization shims: mod.rs (routes), chats.rs, events.rs (the event plane: Subscribe anchors identity + keepalive pump), fs.rs, management.rs
 │ └── tests/
 │ └── connect_e2e.rs # Connect-protocol E2E (real binary, gRPC-Web framing + the /ws/term WS client)
-├── clients/ # npm workspace root (flux-clients; workspaces: [web])
+├── clients/ # pnpm workspace root (flux-clients; pnpm-workspace.yaml: web)
 │ └── web/ # @flux/web — THE frontend (React 19 + Radix + Tailwind v4 + zustand on Vite)
 │ ├── index.html # Vite source (served no-store, read per request; the page connects back same-origin — no template injection)
 │ ├── vite.config.ts # build (content-hashed code-split chunks) + vitest config
@@ -168,11 +169,11 @@ cargo run -p flux-server
 cargo run -p flux-server -- --port 8081 --host 0.0.0.0
 
 # Web frontend (clients/web — the single frontend)
-cd clients && npm install # npm workspace root (hoists to clients/node_modules)
+cd clients && pnpm install # pnpm workspace root (pnpm-workspace.yaml: web)
 cd web
-npm run build # tsc --noEmit + vite build → dist/
-npm test # vitest frontend unit tests
-npm run ui-check # headless-browser e2e smoke (e2e/, needs node ≥ 22 + Chrome)
+pnpm run build # tsc --noEmit + vite build → dist/
+pnpm test # vitest frontend unit tests
+pnpm run ui-check # headless-browser e2e smoke (e2e/, needs node 24 + Chrome)
 
 # Full validation suite
 ./scripts/test.sh # fmt → clippy → cargo test → tsc → vitest → build
@@ -181,6 +182,26 @@ npm run ui-check # headless-browser e2e smoke (e2e/, needs node ≥ 22 + Chrome)
 # the same config tag-driven via .github/workflows/release.yml)
 dist build # local release-shaped artifact (host target: archive + web-ui + checksums)
 ```
+
+### Toolchain environment (the supported surface)
+
+- **Rust**: the `stable` channel, pinned by `rust-toolchain.toml` (stable + rustfmt +
+  clippy; rustup installs it on demand).
+- **Node**: **24 LTS** (Active LTS since 2025-10, maintenance until 2028-04) — the ONE
+  supported line, declared as `engines` (`">=24 <25"`) in `clients/package.json` and
+  `clients/web/package.json`; pnpm warns on any other version without breaking. CI and
+  the release pipeline pin Node 24. Rationale: Node releases drift ahead of the
+  toolchain — odd-numbered Current lines (25) expose experimental surfaces early (25's
+  always-on webstorage getter makes pnpm's vendored `debug` print an
+  ExperimentalWarning on every invocation; the scripts suppress it where the Node
+  supports the disable flag, guarded so other Nodes never break), and older LTS lines
+  age out of the tools' own floors.
+- **pnpm**: the exact version is pinned via `packageManager` in `clients/package.json`;
+  the scripts self-provision it when missing. The buf CLI rides web's devDependencies —
+  no global tool installs beyond pnpm itself.
+- **protoc**: a system binary (`protobuf-compiler` on apt, `brew install protobuf`) —
+  flux-proto's build.rs shells out to it at compile time.
+- **Chrome** (headless): only for `pnpm run ui-check`.
 
 ## Architecture
 
@@ -604,7 +625,7 @@ card `.fx-empty-*`) which cannot carry utilities. Control primitives in
 |------|---------|
 | Vite + @vitejs/plugin-react | Bundles `src/main.tsx` → code-split content-hashed chunks: the entry (~149 KB min / ~48 KB gzip) carries FIRST-PARTY code only; always-loaded vendor code rides four stable `manualChunks` groups (react ~196 / rpc ~116 / radix ~96 / markdown ~70 KB), so an app-only deploy re-downloads only the entry; highlight.js ~129 KB chunk prefetched at bootstrap, Files tree ~132 KB chunk on first Files-tab activation, xterm ~329 KB chunk on first terminal creation, Settings dialog ~33 KB chunk on first gear click, one CSS. `dynamic import` + `manualChunks` + `cssCodeSplit: false`; names carry content hashes → the server serves `immutable`. |
 | Tailwind v4 (@tailwindcss/vite) | Utility CSS generated at build; tokens bridged via `@theme inline` (no config JS). |
-| tsc --noEmit | Type-checks all frontend source (wired into `npm run build`). |
+| tsc --noEmit | Type-checks all frontend source (wired into `pnpm run build`). |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer-capture, scrollIntoView). |
 
 **Connection (Connect plane)**: `ConnectConnection` opens the session-scoped
@@ -706,8 +727,8 @@ container/VM.
 
 - Comments are written in **English**; rationale lives in code comments next to the code it explains (no separate decision/CHANGELOG docs — `docs/decisions.md` records only accepted tradeoffs).
 - **`proto/flux/v1` is the single contract source** — the wire is the generated `flux.v1` surface (Rust: `crates/flux-proto`, tonic/prost at build time, OUT_DIR; TS: `clients/web/src/gen`, derived by `buf generate` via the web package's prebuild/pretest hooks — NOT committed, never hand-edit). `buf lint` (STANDARD) is the naming authority (no per-rule exemptions; names change to satisfy the lint, not the reverse); CI re-derives the TS, runs `buf breaking` against origin/main, and checks generation freshness. The frontend's internal handler vocabulary (core/types.ts ServerMessage shapes) is a UI-side adapter fed by core/grpc-connection.ts's translation — protocol changes touch ONLY the proto + the translation/mappers.
-- npm/node commands run **only under `clients/`** (the npm workspace root) — never at the repo root (a polluted root `node_modules` resolves wrong versions and breaks jsdom). Dependencies install hoisted into `clients/node_modules` (workspaces: `[web]`).
-- `vitest` does NOT typecheck — run `npx tsc --noEmit` (or `npm run build`, which typechecks first) after protocol/type changes.
+- The frontend package manager is **pnpm** (`clients/package.json` pins the exact version via `packageManager`; the scripts self-provision it when missing). npm/node commands run **only under `clients/`** — never at the repo root. pnpm's strict, symlinked layout replaces npm's hoisting: undeclared imports fail at resolve time (no more phantom-dependency/`node_modules`-pollution class of breakage), so anything web code imports must be declared in `clients/web/package.json`. Dependency build scripts are deny-by-default (`allowBuilds` in `clients/pnpm-workspace.yaml` allowlists esbuild + @bufbuild/buf — pnpm 11's build allowlist; the pre-11 name `onlyBuiltDependencies` is inert).
+- `vitest` does NOT typecheck — run `pnpm exec tsc --noEmit` (or `pnpm run build`, which typechecks first) after protocol/type changes.
 - Large refactors prove equivalence by migrating existing tests unchanged and keeping them green; semantic changes are listed explicitly and pinned by tests, never smuggled in.
 - Deletions are justified by zero-consumer evidence (grep + compiler exhaustiveness), not vibes.
 

@@ -61,32 +61,40 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          # The version comes from the packageManager pin.
+          package_json_file: clients/package.json
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 22
-          cache: npm
-          cache-dependency-path: clients/package-lock.json
+          # Node 24 LTS — THE supported line (see AGENTS.md "Toolchain
+          # environment"); matches the `engines` declaration.
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/pnpm-lock.yaml
 
-      - name: Install dependencies (npm workspaces)
+      - name: Install dependencies (pnpm)
         working-directory: clients
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       # The TS contracts are generated, never committed: lint + breaking +
       # derive them here so every later step (tsc/test/build) sees fresh
       # output and a stale checkout cannot ship a stale contract.
       - name: Proto contract checks
         working-directory: clients/web
-        run: npm run proto:check
+        run: pnpm run proto:check
 
       - name: Typecheck
         working-directory: clients/web
-        run: npx tsc --noEmit
+        run: pnpm exec tsc --noEmit
 
       - name: Run frontend tests
         working-directory: clients/web
-        run: npm test
+        run: pnpm test
 
       - name: Build the web UI
         working-directory: clients/web
-        run: npm run build:fast
+        run: pnpm run build:fast

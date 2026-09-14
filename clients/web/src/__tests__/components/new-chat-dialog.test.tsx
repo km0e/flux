@@ -93,9 +93,9 @@ describe('NewChatDialog inheritance', () => {
     useFlux.setState({
       connectionStatus: 'connected',
       providers: [{ id: 'alpha', url: 'https://a/v1' }],
-      // A catalog for the seeded provider keeps the Model label suffix-free
-      // (the "catalog in Providers" pointer is uncataloged-only).
-      providerModels: { alpha: [{ id: 'm-a' }] },
+      // A saved row for the seeded pin keeps the Model label suffix-free
+      // (the "import in Providers" pointer is no-saved-rows-only).
+      savedModels: [{ provider: 'alpha', model: 'm-a', params: {}, meta: {} }],
       chats: [
         {
           id: 'c1',
@@ -115,7 +115,9 @@ describe('NewChatDialog inheritance', () => {
       expect(listCalls()[0]).toBe('/tmp/proj');
     });
     // The provider pin + model are seeded too (everything but the name).
-    expect((screen.getByLabelText(/Provider/) as HTMLSelectElement).value).toBe('alpha');
+    // (^Provider — the Model label may carry an import pointer whose text
+    // also contains "Providers".)
+    expect((screen.getByLabelText(/^Provider/) as HTMLSelectElement).value).toBe('alpha');
     expect((screen.getByLabelText(/^Model/) as HTMLInputElement).value).toBe('m-a');
   });
 
@@ -139,7 +141,7 @@ describe('NewChatDialog inheritance', () => {
     render(<NewChatDialog onCreate={() => {}} onCancel={() => {}} />);
     // The select cannot hold a value its options don't carry — the pin
     // clears so Create stays gated on an explicit pick.
-    expect((screen.getByLabelText(/Provider/) as HTMLSelectElement).value).toBe('');
+    expect((screen.getByLabelText(/^Provider/) as HTMLSelectElement).value).toBe('');
     expect((screen.getByLabelText(/^Model/) as HTMLInputElement).value).toBe('');
   });
 });

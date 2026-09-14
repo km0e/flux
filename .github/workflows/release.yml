@@ -131,6 +131,14 @@ jobs:
         uses: "arduino/setup-protoc@v3"
         with:
           "repo-token": "${{ secrets.GITHUB_TOKEN }}"
+      - name: "Setup pnpm"
+        uses: "pnpm/action-setup@v4"
+        with:
+          "package_json_file": "clients/package.json"
+      - name: "Setup Node.js"
+        uses: "actions/setup-node@v4"
+        with:
+          "node-version": 24
       - name: "Build web UI → web-ui/"
         run: |
           ./scripts/package-web.sh --out "$PWD/web-ui"

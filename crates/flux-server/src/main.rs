@@ -123,7 +123,14 @@ struct Args {
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        // RUST_LOG wins when set; without it the filter defaults to INFO
+        // (an empty EnvFilter shows ERRORS only, hiding the startup and
+        // models.dev status logs the operator is told to look at).
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(tracing_subscriber::filter::LevelFilter::INFO.into())
+                .from_env_lossy(),
+        )
         .with_writer(std::io::stderr)
         .init();
 

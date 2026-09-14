@@ -29,6 +29,18 @@ flux/
 └── docs/
 ```
 
+## Environment
+
+| Tool | Version | Notes |
+|------|---------|-------|
+| Rust | stable channel | Pinned by `rust-toolchain.toml` (stable + rustfmt/clippy); rustup provisions it |
+| Node | **24 LTS** | The ONE supported line (`engines` declares it; pnpm warns on anything else); nvm recommended; the scripts guard their version-sensitive flags |
+| pnpm | 11.x | Version pinned via `packageManager` in `clients/package.json`; the scripts self-provision it when missing |
+| protoc | system binary | `protobuf-compiler` (apt) / `brew install protobuf` — called at compile time by `flux-proto` |
+| Chrome | any recent build | Only for the headless e2e smoke (`pnpm run ui-check`) |
+
+Frontend contract tools (buf etc.) all resolve from `clients/web` devDependencies (pnpm's strict layout) — no global installs needed.
+
 ## Quick start
 
 ```bash
@@ -73,6 +85,7 @@ UI assets resolve as `--web-assets-dir` > `web-ui/` next to the binary >
 |-----|---------------------|
 | [`docs/architecture.md`](docs/architecture.md) | How does it work inside? (current architecture, with diagrams; English version alongside) |
 | [`docs/decisions.md`](docs/decisions.md) | Accepted tradeoffs — what we deliberately chose NOT to improve |
+| [`CHANGELOG.md`](CHANGELOG.md) | What changed in each release (dist feeds it to the GitHub release notes) |
 | [`AGENTS.md`](AGENTS.md) | Conventions & context for AI coding agents |
 
 ## Wire protocol (Connect / gRPC-Web)
@@ -104,10 +117,10 @@ marked + DOMPurify + highlight.js drive the imperative markdown/streaming pipeli
 (rAF-coalesced, append-only paragraphs — see `docs/architecture.md` §4).
 
 ```bash
-cd clients && npm install   # npm workspace root
+cd clients && pnpm install   # pnpm workspace root
 cd web
-npm test                    # vitest unit tests
-npm run build               # tsc --noEmit + vite build → dist/
+pnpm test                    # vitest unit tests
+pnpm run build               # tsc --noEmit + vite build → dist/
 ```
 
 ## Scripts

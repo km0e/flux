@@ -10,6 +10,18 @@
   with:
     repo-token: ${{ secrets.GITHUB_TOKEN }}
 
+# The web build (package-web.sh) needs the supported toolchain: pnpm from
+# the packageManager pin + Node 24 LTS (see AGENTS.md "Toolchain
+# environment"). Runner-default node is whatever the image ships — pin it.
+- name: Setup pnpm
+  uses: pnpm/action-setup@v4
+  with:
+    package_json_file: clients/package.json
+- name: Setup Node.js
+  uses: actions/setup-node@v4
+  with:
+    node-version: 24
+
 - name: Build web UI → web-ui/
   shell: bash
   run: |

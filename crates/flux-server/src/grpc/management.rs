@@ -192,6 +192,16 @@ impl ModelService for ModelManagement {
         let req = request.into_inner();
         let m =
             management::remove_model(&self.registry, req.provider.clone(), req.model.clone()).await;
+        // Same post-reply side effects as save: the fresh list broadcast
+        // (a removal must vanish from every open dialog WITHOUT a refetch)
+        // and the rebuild of the chats pinned to the row (their params
+        // default back to unset).
+        if m.error.is_none() {
+            management::broadcast_models(&self.state, &self.registry).await;
+            self.state
+                .restart_chats_matching(&req.provider, &req.model)
+                .await;
+        }
         Ok(tonic::Response::new(RemoveModelResponse {
             provider: m.provider,
             model: m.model,
@@ -475,6 +485,130 @@ mod tests {
         assert_eq!(trailer_grpc_status(trailer), Some(0));
         let out = ListServersResponse::decode(frames[0]).unwrap();
         assert!(out.servers.is_empty());
+    }
+
+    /// A removal must broadcast the fresh model list — the UI unmounts the
+    /// deleted row from the broadcast (no refetch), so a missing broadcast
+    /// leaves the row visible until the dialog is reopened.
+    #[tokio::test]
+    async fn model_remove_broadcasts_the_fresh_list() {
+        use flux_proto::flux::v1::subscribe_response::Kind;
+        use flux_proto::flux::v1::{
+            ModelsBroadcast, RemoveModelRequest, RemoveModelResponse, SubscribeRequest,
+            SubscribeResponse,
+        };
+        use futures_util::StreamExt;
+        use std::time::Duration;
+
+        /// One length-prefixed frame from the session stream.
+        async fn next_frame(
+            buf: &mut Vec<u8>,
+            stream: &mut (impl futures_util::Stream<Item = reqwest::Result<bytes::Bytes>> + Unpin),
+        ) -> Vec<u8> {
+            loop {
+                if buf.len() >= 5 {
+                    let len = u32::from_be_bytes(buf[1..5].try_into().unwrap()) as usize;
+                    if buf.len() >= 5 + len {
+                        let frame = buf[5..5 + len].to_vec();
+                        buf.drain(..5 + len);
+                        return frame;
+                    }
+                }
+                let chunk = tokio::time::timeout(Duration::from_secs(10), stream.next())
+                    .await
+                    .expect("stream chunk timed out")
+                    .expect("stream ended unexpectedly")
+                    .expect("stream chunk error");
+                buf.extend_from_slice(chunk.as_ref());
+            }
+        }
+
+        // Seed the row through the registry DIRECTLY — the management save
+        // path would fetch models.dev on a fresh row (no network in tests).
+        let (state, registry, mcp) = super::super::test_support::fixture_parts().await;
+        registry
+            .add(flux_store::providers::ProviderRow {
+                id: "main".into(),
+                protocol: "openai".into(),
+                url: Some("http://127.0.0.1:9/v1".into()),
+                api_key: Some("k".into()),
+            })
+            .await
+            .unwrap();
+        registry
+            .save_model(
+                "main",
+                "gpt-test",
+                &serde_json::json!({}),
+                &serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let url = serve(super::super::routes(state, registry, mcp)).await;
+
+        // Open the session stream the broadcast must reach.
+        let resp = post(
+            &url,
+            "/flux.v1.EventService/Subscribe",
+            lp_frame(&SubscribeRequest { session_id: None }.encode_to_vec()),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let mut stream = resp.bytes_stream();
+        let mut buf: Vec<u8> = Vec::new();
+        let token = loop {
+            let frame = next_frame(&mut buf, &mut stream).await;
+            if let Ok(el) = SubscribeResponse::decode(frame.as_slice())
+                && let Some(Kind::Ready(ready)) = el.kind
+            {
+                break ready.session_id;
+            }
+        };
+
+        // Remove → the ack is clean AND the stream carries the fresh list.
+        let resp = post(
+            &url,
+            "/flux.v1.ModelService/RemoveModel",
+            lp_frame(
+                &RemoveModelRequest {
+                    provider: "main".into(),
+                    model: "gpt-test".into(),
+                }
+                .encode_to_vec(),
+            ),
+            Some(&token),
+        )
+        .await;
+        assert_eq!(resp.status(), 200);
+        let bytes = resp.bytes().await.unwrap();
+        let (frames, trailer) = parse_frames(&bytes);
+        assert_eq!(trailer_grpc_status(trailer), Some(0));
+        let out = RemoveModelResponse::decode(frames[0]).unwrap();
+        assert!(out.error.is_none(), "remove failed: {out:?}");
+
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "no models broadcast"
+            );
+            let frame = next_frame(&mut buf, &mut stream).await;
+            let Ok(el) = SubscribeResponse::decode(frame.as_slice()) else {
+                continue;
+            };
+            match el.kind {
+                Some(Kind::Models(ModelsBroadcast { models })) => {
+                    assert!(
+                        models.is_empty(),
+                        "removed row must leave the broadcast: {models:?}"
+                    );
+                    break;
+                }
+                Some(Kind::Keepalive(_)) | Some(Kind::Ready(_)) => continue,
+                other => panic!("unexpected element: {other:?}"),
+            }
+        }
     }
 
     #[tokio::test]

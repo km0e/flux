@@ -22,12 +22,17 @@ packages = ["flux-server"]
 # Extra files/directories copied into the ROOT of every archive, next to the
 # binary — matches flux-server's static-layer lookup (`web-ui/` next to the
 # binary). The directory is produced per-runner by .github/build-setup.yml
-# (npm build → web-ui/); it is a build artifact and gitignored.
+# (pnpm build → web-ui/); it is a build artifact and gitignored. dist also
+# auto-includes the doc files (README/CHANGELOG/LICENSE) in every archive.
 include = ["web-ui/"]
 # Prerequisites injected into EVERY build job before the cargo build
 # (.github/build-setup.yml, path relative to .github/workflows/):
 # protoc for flux-proto's build.rs + the web-ui/ bundle that `include` packs.
 github-build-setup = "../build-setup.yml"
+# Path that installers should place binaries in
+install-path = "CARGO_HOME"
+# Whether to install an updater program
+install-updater = false
 # NOTE on Linux glibc floors: linux-gnu targets build NATIVELY on the
 # default runners (ubuntu-22.04 / ubuntu-22.04-arm → glibc 2.35), and dist
 # auto-detects that floor for its installer compat checks. dist's
