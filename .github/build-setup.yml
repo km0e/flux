@@ -1,6 +1,9 @@
 # Steps injected into every dist build job (.github/workflows/release.yml
 # references this via dist's `github-build-setup` setting, path relative to
-# .github/workflows/). Two prerequisites every platform needs before the
+# .github/workflows/). NOTE: dist INLINES this fragment into the generated
+# release.yml at `dist generate` time — editing this file REQUIRES a
+# `dist generate` to refresh that copy, or the plan job's freshness check
+# kills the run (`dist generate --check` catches it locally). Two prerequisites every platform needs before the
 # cargo build:
 #   1. protoc — flux-proto's build.rs compiles proto/ via prost-build.
 #   2. web-ui/ — the browser UI bundle, built here so dist's

@@ -130,7 +130,18 @@ jobs:
       - name: "Install protoc (Linux)"
         if: "runner.os == 'Linux'"
         run: |
-          sudo apt-get update && sudo apt-get install -y protobuf-compiler
+          PROTOC_VERSION=29.3
+          case "$(uname -m)" in
+            x86_64) PROTOC_ARCH=x86_64 ;;
+            aarch64) PROTOC_ARCH=aarch_64 ;;  # the release asset's spelling
+            *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+          esac
+          curl -fsSL --retry 3 -o /tmp/protoc.zip \
+            "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+          sudo unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+          sudo chmod +x /usr/local/bin/protoc
+          protoc --version
+        shell: "bash"
       - name: "Install protoc (macOS)"
         if: "runner.os == 'macOS'"
         run: |
