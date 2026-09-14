@@ -238,6 +238,9 @@ pub(crate) struct McpMutation {
     pub id: String,
     pub error: Option<String>,
     pub apply_error: Option<String>,
+    /// Per-tool registration outcomes (a successful live apply — partial
+    /// success included; empty on any failure path).
+    pub results: Vec<crate::mcp::ToolRegistration>,
 }
 
 /// Add an MCP server: persist FIRST (the row is the launch list — a failed
@@ -253,26 +256,28 @@ pub(crate) async fn add_mcp_server(
     let id = row.id.clone();
     match crate::mcp::add(&state.store, row.clone()).await {
         Ok(_) => {
-            let apply_error = match mcp.apply_add(&id, &row).await {
-                Ok(()) => {
+            let (apply_error, results) = match mcp.apply_add(&id, &row).await {
+                Ok(outcomes) => {
                     state.restart_all_chats().await;
-                    None
+                    (None, outcomes)
                 }
                 Err(e) => {
                     tracing::warn!(id = %id, error = %e, "MCP live apply failed; the row stays");
-                    Some(e.to_string())
+                    (Some(e.to_string()), Vec::new())
                 }
             };
             McpMutation {
                 id,
                 error: None,
                 apply_error,
+                results,
             }
         }
         Err(e) => McpMutation {
             id,
             error: Some(e.to_string()),
             apply_error: None,
+            results: Vec::new(),
         },
     }
 }
@@ -297,12 +302,14 @@ pub(crate) async fn remove_mcp_server(
                 id,
                 error: None,
                 apply_error: None,
+                results: Vec::new(),
             }
         }
         Err(e) => McpMutation {
             id,
             error: Some(e.to_string()),
             apply_error: None,
+            results: Vec::new(),
         },
     }
 }
@@ -420,7 +427,7 @@ pub(crate) async fn broadcast_models(state: &ServerState, registry: &ProviderReg
 /// successful add/remove.
 pub(crate) async fn broadcast_mcp_servers(state: &ServerState, mcp: &crate::mcp::McpManager) {
     use flux_proto::flux::v1::subscribe_response::Kind;
-    match crate::mcp::summaries(&state.store, &mcp.states()).await {
+    match crate::mcp::summaries(&state.store, &mcp.states(), &mcp.tool_names()).await {
         Ok(servers) => {
             let el = flux_proto::flux::v1::SubscribeResponse {
                 chat_seq: 0,
@@ -433,6 +440,26 @@ pub(crate) async fn broadcast_mcp_servers(state: &ServerState, mcp: &crate::mcp:
         }
         Err(e) => tracing::warn!(error = %e, "failed to load MCP servers for broadcast"),
     }
+}
+
+/// Broadcast one rate-limited MCP server notice (F-10b) to every session.
+pub(crate) async fn broadcast_mcp_notice(
+    state: &ServerState,
+    server_id: &str,
+    level: &str,
+    message: &str,
+) {
+    use flux_proto::flux::v1::subscribe_response::Kind;
+    let el = flux_proto::flux::v1::SubscribeResponse {
+        chat_seq: 0,
+        chat_id: String::new(),
+        kind: Some(Kind::McpNotice(flux_proto::flux::v1::McpNotice {
+            server_id: server_id.to_string(),
+            level: level.to_string(),
+            message: message.to_string(),
+        })),
+    };
+    state.broadcast_element(el).await;
 }
 
 /// Broadcast the fresh global skill list to every session after a

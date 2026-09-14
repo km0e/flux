@@ -978,3 +978,19 @@
     min-height: 46vh;
   }
 }
+
+/* ── Round-artifacts jump highlight (F-11) ──────────────────────────────
+   One-shot pulse on the tool card the Round tab jumped to. Rides the
+   card's own radius; removed on the next jump so it can re-fire. */
+.tool.artifact-flash {
+  animation: artifact-flash 1.4s ease-out 1;
+}
+
+@keyframes artifact-flash {
+  0% {
+    box-shadow: 0 0 0 2px var(--fx-accent);
+  }
+  100% {
+    box-shadow: 0 0 0 2px transparent;
+  }
+}

@@ -40,6 +40,9 @@ struct McpEntry {
     tool_names: Vec<String>,
     state: McpLiveState,
     cancel: Arc<dyn Fn() + Send + Sync>,
+    /// Re-lists the live session's tools (the tools/list_changed path);
+    /// None for test fakes.
+    relist: Option<flux_mcp::RelistFn>,
 }
 
 /// Supervisor-visible liveness (rendered into the wire summary).
@@ -68,6 +71,13 @@ pub enum McpEvent {
     /// A respawn succeeded with a live tool set — the chats must rebuild
     /// (the old tool wrappers bind to the DEAD peer).
     ToolsChanged(String),
+    /// A rate-limited logging notification from one server — forwarded
+    /// to the UI (toast for warning+, notification center for all).
+    Notice {
+        id: String,
+        level: String,
+        message: String,
+    },
 }
 
 /// Opaque live-session handle, owned by the supervisor task. Death
@@ -99,19 +109,32 @@ pub struct ConnectedServer {
     pub handle: Box<dyn McpSessionHandle>,
     pub cancel: Arc<dyn Fn() + Send + Sync>,
     pub tools: Vec<Arc<dyn Tool>>,
+    /// Re-lists the live session's current tool set (the
+    /// tools/list_changed path). None for test fakes.
+    pub relist: Option<flux_mcp::RelistFn>,
 }
 
-/// The connect function (injection seam for tests).
-pub type Connect = Arc<dyn Fn(flux_mcp::McpServerConfig) -> ConnectFuture + Send + Sync>;
+/// The connect function (injection seam for tests). The sink receives
+/// the server notifications flux forwards (tools/list_changed, logging);
+/// a test fake can drop it.
+pub type Connect = Arc<
+    dyn Fn(
+            flux_mcp::McpServerConfig,
+            tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>,
+        ) -> ConnectFuture
+        + Send
+        + Sync,
+>;
 pub type ConnectFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ConnectedServer>> + Send>>;
 
 /// The production connect: spawn the child, handshake, list tools, wrap
 /// each as a registry tool bound to the peer.
 pub fn production_connect() -> Connect {
-    Arc::new(|cfg| {
+    Arc::new(|cfg, notices| {
         Box::pin(async move {
-            let (session, external_cancel, peer, metas) = flux_mcp::connect_with_peer(&cfg).await?;
+            let (session, external_cancel, peer, metas) =
+                flux_mcp::connect_with_peer(&cfg, Some(notices)).await?;
             let tools = metas
                 .into_iter()
                 .map(|meta| {
@@ -125,6 +148,7 @@ pub fn production_connect() -> Connect {
                 // the handle) cancels the SAME inner token.
                 cancel: external_cancel,
                 tools,
+                relist: Some(flux_mcp::relist_for_peer(&peer)),
             })
         })
     })
@@ -142,6 +166,55 @@ pub struct McpManager {
     /// Respawn backoff shape — crate-visible so tests collapse the clock.
     pub(crate) backoff_base: Duration,
     pub(crate) backoff_max: Duration,
+    /// Per-server notice gates (F-10b): token-bucket rate limiting so a
+    /// chatty server can never flood the UI. Keyed by id; cleared on
+    /// remove.
+    notice_gates: std::sync::Mutex<HashMap<String, NoticeGate>>,
+}
+
+/// Token-bucket for one server's logging notifications: a small burst
+/// then a sustained 10/min, drops counted and folded into a synthetic
+/// "suppressed" notice when the gate reopens. Shape constants live in
+/// [`NOTICE_BURST`]/[`NOTICE_REFILL_PER_TOKEN`].
+#[derive(Debug)]
+struct NoticeGate {
+    tokens: u32,
+    last: Option<std::time::Instant>,
+    suppressed: u32,
+}
+
+impl Default for NoticeGate {
+    /// A fresh gate opens at FULL burst — the first notice from a server
+    /// must never be the one that gets dropped.
+    fn default() -> Self {
+        Self {
+            tokens: NOTICE_BURST,
+            last: None,
+            suppressed: 0,
+        }
+    }
+}
+
+const NOTICE_BURST: u32 = 5;
+const NOTICE_REFILL_PER_TOKEN: Duration = Duration::from_secs(6);
+const NOTICE_MESSAGE_MAX: usize = 500;
+
+impl NoticeGate {
+    /// Take one token if available; otherwise count the drop. Returns
+    /// `(pass, suppressed_since_last_pass)`.
+    fn admit(&mut self) -> (bool, u32) {
+        let now = std::time::Instant::now();
+        let elapsed = self.last.map(|l| now.duration_since(l)).unwrap_or_default();
+        self.last = Some(now);
+        let refill = (elapsed.as_secs_f64() / NOTICE_REFILL_PER_TOKEN.as_secs_f64()) as u32;
+        self.tokens = NOTICE_BURST.min(self.tokens.saturating_add(refill));
+        if self.tokens == 0 {
+            self.suppressed = self.suppressed.saturating_add(1);
+            return (false, 0);
+        }
+        self.tokens -= 1;
+        (true, std::mem::take(&mut self.suppressed))
+    }
 }
 
 impl McpManager {
@@ -160,6 +233,7 @@ impl McpManager {
                 events,
                 backoff_base: BACKOFF_BASE,
                 backoff_max: BACKOFF_MAX,
+                notice_gates: std::sync::Mutex::new(HashMap::new()),
             },
             events_rx,
         )
@@ -183,14 +257,15 @@ impl McpManager {
                 args: row.args.clone(),
                 env: row.env.clone(),
             };
-            let result = (self.connect)(cfg).await;
+            let result = (self.connect)(cfg, self.wire_notices(&row.id)).await;
             (row, result)
         });
         for (row, result) in futures_util::future::join_all(connects).await {
             match result {
                 Ok(connected) => {
                     let id = row.id.clone();
-                    let names = register_tools(&self.registry, &id, &connected.tools);
+                    let outcomes = register_tools(&self.registry, &id, &connected.tools);
+                    let names = registered_names(&outcomes);
                     tracing::info!(id = %id, tools = names.len(), "MCP connected");
                     self.entries.write().unwrap().insert(
                         id.clone(),
@@ -199,6 +274,7 @@ impl McpManager {
                             tool_names: names,
                             state: McpLiveState::Running,
                             cancel: connected.cancel,
+                            relist: connected.relist,
                         },
                     );
                     self.spawn_supervisor(id, connected.handle);
@@ -213,7 +289,11 @@ impl McpManager {
     /// Apply one persisted add: connect + register into the global
     /// registry + record the entry. Failure = the row stays on disk (the
     /// next restart retries) and the error rides back to the UI inline.
-    pub async fn apply_add(self: &Arc<Self>, id: &str, row: &McpServerRow) -> anyhow::Result<()> {
+    pub async fn apply_add(
+        self: &Arc<Self>,
+        id: &str,
+        row: &McpServerRow,
+    ) -> anyhow::Result<Vec<ToolRegistration>> {
         if self.entries.read().unwrap().contains_key(id) {
             anyhow::bail!("MCP server '{id}' is already running");
         }
@@ -222,19 +302,20 @@ impl McpManager {
             args: row.args.clone(),
             env: row.env.clone(),
         };
-        let connected = (self.connect)(cfg).await?;
-        let names = register_tools(&self.registry, id, &connected.tools);
+        let connected = (self.connect)(cfg, self.wire_notices(id)).await?;
+        let outcomes = register_tools(&self.registry, id, &connected.tools);
         self.entries.write().unwrap().insert(
             id.to_string(),
             McpEntry {
                 row: row.clone(),
-                tool_names: names,
+                tool_names: registered_names(&outcomes),
                 state: McpLiveState::Running,
                 cancel: connected.cancel,
+                relist: connected.relist,
             },
         );
         self.spawn_supervisor(id.to_string(), connected.handle);
-        Ok(())
+        Ok(outcomes)
     }
 
     /// Apply one persisted remove: cancel the session (the supervisor's
@@ -252,6 +333,7 @@ impl McpManager {
         for name in &entry.tool_names {
             self.registry.unregister(name);
         }
+        self.notice_gates.lock().unwrap().remove(id);
         Ok(!entry.tool_names.is_empty())
     }
 
@@ -265,9 +347,119 @@ impl McpManager {
             .collect()
     }
 
+    /// Live tool-name sets for the wire summaries (absent = no live
+    /// session — the summary distinguishes that via the state).
+    pub fn tool_names(&self) -> HashMap<String, Vec<String>> {
+        self.entries
+            .read()
+            .unwrap()
+            .iter()
+            .map(|(id, e)| (id.clone(), e.tool_names.clone()))
+            .collect()
+    }
+
     fn spawn_supervisor(self: &Arc<Self>, id: String, handle: Box<dyn McpSessionHandle>) {
         let mgr = Arc::clone(self);
         tokio::spawn(mgr.supervise(id, handle));
+    }
+
+    /// Wire the notice forwarder for one connection: the handler's sink
+    /// is a fresh channel whose receiver maps notices onto the manager's
+    /// event loop, tagged with the server id. Lives while the connection
+    /// does — the handler drops the sender when the session dies.
+    fn wire_notices(
+        self: &Arc<Self>,
+        id: &str,
+    ) -> tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice> {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let mgr = Arc::clone(self);
+        let id = id.to_string();
+        tokio::spawn(async move {
+            while let Some(notice) = rx.recv().await {
+                match notice {
+                    flux_mcp::ServerNotice::ToolsListChanged => {
+                        mgr.handle_tools_list_changed(&id).await;
+                    }
+                    flux_mcp::ServerNotice::Log { level, message } => {
+                        mgr.handle_log(&id, level, message);
+                    }
+                }
+            }
+        });
+        tx
+    }
+
+    /// `tools/list_changed` (F-10a): re-list the live session's tool set
+    /// and re-register it over the old one. The old wrappers are
+    /// unregistered only AFTER a successful re-list (a failed re-list
+    /// keeps the old, possibly-stale set — still callable). The chats
+    /// ALWAYS rebuild: the registry now binds fresh wrappers and a name
+    /// may have vanished entirely.
+    async fn handle_tools_list_changed(self: &Arc<Self>, id: &str) {
+        let relist = self
+            .entries
+            .read()
+            .unwrap()
+            .get(id)
+            .and_then(|e| e.relist.clone());
+        let Some(relist) = relist else {
+            tracing::debug!(id = %id, "tools/list_changed for a fake entry; ignored");
+            return;
+        };
+        tracing::info!(id = %id, "MCP server tool list changed; re-listing");
+        let tools = match relist().await {
+            Ok(tools) => tools,
+            Err(e) => {
+                tracing::warn!(id = %id, error = %e, "MCP tool re-list failed; keeping the old set");
+                return;
+            }
+        };
+        {
+            let mut entries = self.entries.write().unwrap();
+            let Some(entry) = entries.get_mut(id) else {
+                return; // removed mid-re-list
+            };
+            for name in std::mem::take(&mut entry.tool_names) {
+                self.registry.unregister(&name);
+            }
+            let outcomes = register_tools(&self.registry, id, &tools);
+            entry.tool_names = registered_names(&outcomes);
+        }
+        self.emit(McpEvent::ToolsChanged(id.to_string()));
+    }
+
+    /// A logging notification (F-10b): cap the message, pass the
+    /// per-server token bucket, and forward. Drops are folded into a
+    /// synthetic "suppressed" notice when the gate reopens — the UI
+    /// never sees a flood, but knows one happened.
+    fn handle_log(self: &Arc<Self>, id: &str, level: String, message: String) {
+        let mut message = message;
+        if message.chars().count() > NOTICE_MESSAGE_MAX {
+            message = message.chars().take(NOTICE_MESSAGE_MAX).collect::<String>() + "…";
+        }
+        let (pass, suppressed) = {
+            let mut gates = self.notice_gates.lock().unwrap();
+            gates.entry(id.to_string()).or_default().admit()
+        };
+        if !pass {
+            return;
+        }
+        if suppressed > 0 {
+            self.events
+                .send(McpEvent::Notice {
+                    id: id.to_string(),
+                    level: "info".to_string(),
+                    message: format!("…{suppressed} earlier notices suppressed"),
+                })
+                .ok();
+        }
+        self.events
+            .send(McpEvent::Notice {
+                id: id.to_string(),
+                level,
+                message,
+            })
+            .ok();
     }
 
     /// The self-healing loop: await rmcp's quit signal; a CLOSED/FAILED
@@ -314,9 +506,13 @@ impl McpManager {
                     args: row.args.clone(),
                     env: row.env.clone(),
                 };
-                match (self.connect)(cfg).await {
+                match (self.connect)(cfg, self.wire_notices(&id)).await {
                     Ok(connected) => {
-                        let names = register_tools(&self.registry, &id, &connected.tools);
+                        let names = registered_names(&register_tools(
+                            &self.registry,
+                            &id,
+                            &connected.tools,
+                        ));
                         {
                             let mut entries = self.entries.write().unwrap();
                             let Some(entry) = entries.get_mut(&id) else {
@@ -325,6 +521,7 @@ impl McpManager {
                             entry.tool_names = names;
                             entry.state = McpLiveState::Running;
                             entry.cancel = connected.cancel;
+                            entry.relist = connected.relist;
                         }
                         tracing::info!(id = %id, attempt, "MCP respawned");
                         // ALWAYS a rebuild: the old tool wrappers bind to
@@ -356,22 +553,64 @@ impl McpManager {
 /// collision rules (reserved chat-owned names and existing tools are
 /// skipped — an external tool can never shadow them). Returns the names
 /// that REGISTERED (the removal set).
-fn register_tools(registry: &ToolRegistry, id: &str, tools: &[Arc<dyn Tool>]) -> Vec<String> {
+/// One tool's registration outcome — the add ack's per-tool detail: a
+/// name collision is visible in the UI, never only in the server log.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct ToolRegistration {
+    pub name: String,
+    pub registered: bool,
+    /// Why a tool was skipped — absent when registered.
+    pub reason: Option<String>,
+}
+
+/// The names that actually registered (the entry's truth set).
+fn registered_names(outcomes: &[ToolRegistration]) -> Vec<String> {
+    outcomes
+        .iter()
+        .filter(|r| r.registered)
+        .map(|r| r.name.clone())
+        .collect()
+}
+
+fn register_tools(
+    registry: &ToolRegistry,
+    id: &str,
+    tools: &[Arc<dyn Tool>],
+) -> Vec<ToolRegistration> {
     tools
         .iter()
-        .filter(|tool| {
-            let registered = !flux_chat::reserved::is_reserved_tool_name(tool.name())
-                && registry.register_if_absent(Arc::clone(tool));
-            if !registered {
+        .map(|tool| {
+            let name = tool.name().to_string();
+            if flux_chat::reserved::is_reserved_tool_name(&name) {
                 tracing::error!(
                     server = %id,
-                    tool = %tool.name(),
+                    tool = %name,
                     "MCP tool name collides with a built-in/reserved tool; skipping",
                 );
+                ToolRegistration {
+                    name,
+                    registered: false,
+                    reason: Some("reserved by flux (built-in/state/question tools)".to_string()),
+                }
+            } else if registry.register_if_absent(Arc::clone(tool)) {
+                ToolRegistration {
+                    name,
+                    registered: true,
+                    reason: None,
+                }
+            } else {
+                tracing::error!(
+                    server = %id,
+                    tool = %name,
+                    "MCP tool name already registered; skipping",
+                );
+                ToolRegistration {
+                    name,
+                    registered: false,
+                    reason: Some("name already registered".to_string()),
+                }
             }
-            registered
         })
-        .map(|tool| tool.name().to_string())
         .collect()
 }
 
@@ -394,7 +633,7 @@ pub(crate) async fn add(
     if !store.insert_mcp_server(&row).await? {
         anyhow::bail!("duplicate MCP server id: {}", row.id);
     }
-    Ok(summary(row, McpState::Unspecified))
+    Ok(summary(row, McpState::Unspecified, Vec::new()))
 }
 
 /// Remove one MCP server row (the live apply is the caller's next step).
@@ -410,6 +649,7 @@ pub(crate) async fn remove(store: &Arc<Store>, id: &str) -> anyhow::Result<()> {
 pub(crate) async fn summaries(
     store: &Arc<Store>,
     states: &HashMap<String, McpState>,
+    tool_names: &HashMap<String, Vec<String>>,
 ) -> anyhow::Result<Vec<McpServerSummary>> {
     let mut out: Vec<McpServerSummary> = store
         .list_mcp_servers()
@@ -419,14 +659,15 @@ pub(crate) async fn summaries(
             // A row with no live entry never came up (failed startup
             // connect) — OFFLINE, per the persist-first contract.
             let state = states.get(&row.id).copied().unwrap_or(McpState::Offline);
-            summary(row, state)
+            let names = tool_names.get(&row.id).cloned().unwrap_or_default();
+            summary(row, state, names)
         })
         .collect();
     out.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(out)
 }
 
-fn summary(row: McpServerRow, state: McpState) -> McpServerSummary {
+fn summary(row: McpServerRow, state: McpState, tool_names: Vec<String>) -> McpServerSummary {
     let mut env_keys: Vec<String> = row.env.into_keys().collect();
     env_keys.sort();
     McpServerSummary {
@@ -435,6 +676,7 @@ fn summary(row: McpServerRow, state: McpState) -> McpServerSummary {
         args: row.args,
         env_keys,
         state: state as i32,
+        tool_names,
     }
 }
 
@@ -458,6 +700,9 @@ pub(crate) async fn consume_events(
             McpEvent::Changed(id) => {
                 tracing::info!(id = %id, "MCP state changed");
                 broadcast_mcp_servers(&state, &mcp).await;
+            }
+            McpEvent::Notice { id, level, message } => {
+                crate::management::broadcast_mcp_notice(&state, &id, &level, &message).await;
             }
         }
     }
@@ -519,18 +764,22 @@ mod tests {
             .into_iter()
             .map(|(id, tools)| (id.to_string(), tools))
             .collect();
-        Arc::new(move |cfg: flux_mcp::McpServerConfig| {
-            let tools = map.get(&cfg.command).cloned();
-            let quits = Arc::clone(&quits);
-            Box::pin(async move {
-                let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
-                Ok(ConnectedServer {
-                    handle: Box::new(FakeHandle { quits }),
-                    cancel: Arc::new(|| {}),
-                    tools,
-                })
-            }) as ConnectFuture
-        })
+        Arc::new(
+            move |cfg: flux_mcp::McpServerConfig,
+                  _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
+                let tools = map.get(&cfg.command).cloned();
+                let quits = Arc::clone(&quits);
+                Box::pin(async move {
+                    let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
+                    Ok(ConnectedServer {
+                        handle: Box::new(FakeHandle { quits }),
+                        cancel: Arc::new(|| {}),
+                        tools,
+                        relist: None,
+                    })
+                }) as ConnectFuture
+            },
+        )
     }
 
     /// A connect that succeeds for `ok` ids with the given tools and fails
@@ -541,17 +790,21 @@ mod tests {
             .into_iter()
             .map(|(id, tools)| (id.to_string(), tools))
             .collect();
-        Arc::new(move |cfg: flux_mcp::McpServerConfig| {
-            let tools = map.get(&cfg.command).cloned();
-            Box::pin(async move {
-                let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
-                Ok(ConnectedServer {
-                    handle: Box::new(FakeHandle::default()),
-                    cancel: Arc::new(|| {}),
-                    tools,
-                })
-            }) as ConnectFuture
-        })
+        Arc::new(
+            move |cfg: flux_mcp::McpServerConfig,
+                  _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
+                let tools = map.get(&cfg.command).cloned();
+                Box::pin(async move {
+                    let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
+                    Ok(ConnectedServer {
+                        handle: Box::new(FakeHandle::default()),
+                        cancel: Arc::new(|| {}),
+                        tools,
+                        relist: None,
+                    })
+                }) as ConnectFuture
+            },
+        )
     }
 
     /// Scripted session handle: `quits` holds queued outcomes (empty =
@@ -599,7 +852,13 @@ mod tests {
         let sum = add(&store, row("  fs  ", "npx")).await.unwrap();
         assert_eq!(sum.id, "fs");
         assert_eq!(sum.env_keys, vec!["B_KEY"]);
-        assert_eq!(summaries(&store, &HashMap::new()).await.unwrap().len(), 1);
+        assert_eq!(
+            summaries(&store, &HashMap::new(), &HashMap::new())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         // Duplicate id rejects.
         let err = add(&store, row("fs", "npx")).await.unwrap_err();
         assert!(err.to_string().contains("duplicate MCP server id"));
@@ -610,7 +869,12 @@ mod tests {
         let store = test_store().await;
         add(&store, row("fs", "npx")).await.unwrap();
         remove(&store, "fs").await.unwrap();
-        assert!(summaries(&store, &HashMap::new()).await.unwrap().is_empty());
+        assert!(
+            summaries(&store, &HashMap::new(), &HashMap::new())
+                .await
+                .unwrap()
+                .is_empty()
+        );
         let err = remove(&store, "fs").await.unwrap_err();
         assert!(err.to_string().contains("unknown MCP server id"));
     }
@@ -630,15 +894,35 @@ mod tests {
         let manager = Arc::new(manager);
 
         add(&store, row("echo", "echo")).await.unwrap();
-        manager
+        let outcomes = manager
             .apply_add("echo", &row("echo", "echo"))
             .await
             .unwrap();
 
-        // mcp_echo registered; the built-in and the reserved name skipped.
+        // mcp_echo registered; the built-in and the reserved name skipped —
+        // each with its reason on the ack-visible outcome (the UI shows
+        // what landed instead of grepping the log).
         assert!(registry.get("mcp_echo").is_some());
         assert!(registry.get("bash").is_some(), "built-in untouched");
         assert!(registry.get("state_get").is_none(), "reserved name skipped");
+        assert_eq!(outcomes.len(), 3);
+        let by_name: HashMap<&str, &ToolRegistration> =
+            outcomes.iter().map(|r| (r.name.as_str(), r)).collect();
+        assert!(by_name["mcp_echo"].registered);
+        assert_eq!(by_name["mcp_echo"].reason, None);
+        assert!(!by_name["bash"].registered);
+        assert_eq!(
+            by_name["bash"].reason.as_deref(),
+            Some("name already registered")
+        );
+        assert!(!by_name["state_get"].registered);
+        assert!(
+            by_name["state_get"]
+                .reason
+                .as_deref()
+                .unwrap()
+                .contains("reserved")
+        );
 
         // A duplicate live add rejects without touching the registry.
         let err = manager
@@ -669,7 +953,13 @@ mod tests {
             .unwrap_err();
         assert!(err.to_string().contains("spawn failed"));
         // The row stays (the next restart retries); the registry is clean.
-        assert_eq!(summaries(&store, &HashMap::new()).await.unwrap().len(), 1);
+        assert_eq!(
+            summaries(&store, &HashMap::new(), &HashMap::new())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         assert!(registry.entries().is_empty());
     }
 
@@ -687,7 +977,13 @@ mod tests {
         manager.restore(&store).await;
         assert!(registry.get("mcp_a").is_some());
         // The failed row stays on the launch list (retry at next restart).
-        assert_eq!(summaries(&store, &HashMap::new()).await.unwrap().len(), 2);
+        assert_eq!(
+            summaries(&store, &HashMap::new(), &HashMap::new())
+                .await
+                .unwrap()
+                .len(),
+            2
+        );
     }
 
     #[tokio::test]
@@ -747,22 +1043,107 @@ mod tests {
         let count = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let quits = Arc::new(std::sync::Mutex::new(std::collections::VecDeque::new()));
         let connect_quits = Arc::clone(&quits);
-        let connect = Arc::new(move |_cfg: flux_mcp::McpServerConfig| {
-            let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let tools = tools.clone();
-            let quits = Arc::clone(&connect_quits);
-            Box::pin(async move {
-                if n > 0 {
-                    anyhow::bail!("respawn failed");
-                }
-                Ok(ConnectedServer {
-                    handle: Box::new(FakeHandle { quits }),
-                    cancel: Arc::new(|| {}),
-                    tools,
-                })
-            }) as ConnectFuture
-        });
+        let connect = Arc::new(
+            move |_cfg: flux_mcp::McpServerConfig,
+                  _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
+                let n = count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                let tools = tools.clone();
+                let quits = Arc::clone(&connect_quits);
+                Box::pin(async move {
+                    if n > 0 {
+                        anyhow::bail!("respawn failed");
+                    }
+                    Ok(ConnectedServer {
+                        handle: Box::new(FakeHandle { quits }),
+                        cancel: Arc::new(|| {}),
+                        tools,
+                        relist: None,
+                    })
+                }) as ConnectFuture
+            },
+        );
         (quits, connect)
+    }
+
+    #[tokio::test]
+    async fn tools_list_changed_relists_and_reregisters_exactly() {
+        let store = test_store().await;
+        let registry = Arc::new(ToolRegistry::new());
+        let tools = fake_tools(&["old_tool"]);
+        // The fake's relist returns the NEW server-side set (a rename).
+        let relist_tools = fake_tools(&["new_tool"]);
+        let relist: flux_mcp::RelistFn = {
+            let relist_tools = std::sync::Mutex::new(relist_tools);
+            Arc::new(move || {
+                let tools = relist_tools.lock().unwrap().clone();
+                Box::pin(async move { Ok(tools) })
+            })
+        };
+        let map: HashMap<String, (Vec<Arc<dyn Tool>>, flux_mcp::RelistFn)> =
+            HashMap::from([("echo".to_string(), (tools, Arc::clone(&relist)))]);
+        let connect: Connect = Arc::new(
+            move |cfg: flux_mcp::McpServerConfig,
+                  _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
+                let entry = map.get(&cfg.command).cloned();
+                Box::pin(async move {
+                    let (tools, relist) = entry.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
+                    Ok(ConnectedServer {
+                        handle: Box::new(FakeHandle::default()),
+                        cancel: Arc::new(|| {}),
+                        tools,
+                        relist: Some(relist),
+                    })
+                }) as ConnectFuture
+            },
+        );
+        let (manager, mut rx) = McpManager::new(Arc::clone(&registry), connect);
+        let manager = Arc::new(manager);
+        add(&store, row("echo", "echo")).await.unwrap();
+        manager
+            .apply_add("echo", &row("echo", "echo"))
+            .await
+            .unwrap();
+        assert!(registry.get("old_tool").is_some());
+
+        manager.handle_tools_list_changed("echo").await;
+
+        // The old wrapper is unregistered, the fresh set registered, and
+        // the chats rebuild (the registry re-bound).
+        assert!(registry.get("old_tool").is_none());
+        assert!(registry.get("new_tool").is_some());
+        assert_eq!(
+            manager.tool_names().get("echo").map(|v| v.as_slice()),
+            Some(&["new_tool".to_string()][..])
+        );
+        assert!(matches!(rx.recv().await, Some(McpEvent::ToolsChanged(id)) if id == "echo"));
+    }
+
+    #[tokio::test]
+    async fn notice_gate_admits_the_burst_then_folds_the_flood() {
+        let registry = Arc::new(ToolRegistry::new());
+        let (manager, _rx) = McpManager::new(
+            Arc::clone(&registry),
+            fake_connect(vec![("echo", fake_tools(&["mcp_a"]))]),
+        );
+        let manager = Arc::new(manager);
+        manager
+            .apply_add("echo", &row("echo", "echo"))
+            .await
+            .unwrap();
+
+        // The burst passes; everything after is dropped (a fast test's
+        // elapsed time never refills a token).
+        for i in 0..NOTICE_BURST {
+            manager.handle_log("echo", "info".into(), format!("m{i}"));
+        }
+        manager.handle_log("echo", "info".into(), "flood".into());
+        assert_eq!(manager.notice_gates.lock().unwrap()["echo"].suppressed, 1);
+        // Other servers have their own gate.
+        manager.handle_log("other", "info".into(), "m".into());
+        assert!(manager.notice_gates.lock().unwrap().contains_key("other"));
+        // Removal clears the gate.
+        manager.apply_remove("echo").unwrap();
+        assert!(!manager.notice_gates.lock().unwrap().contains_key("echo"));
     }
 
     #[tokio::test]

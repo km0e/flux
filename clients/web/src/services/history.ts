@@ -16,6 +16,7 @@ import { getPane, getPaneIfExists, hideEmptyState } from './panes';
 import { stashForkDraft } from './forkDraft';
 import { takePaneStale } from './stream-handler';
 import { disposeController } from './stream';
+import { rebuildRoundFromHistory } from './artifacts';
 import { bridge } from '../core/bridge';
 import {
   buildForkButton,
@@ -64,6 +65,11 @@ export async function renderHistoryMessages(
   }
   // Dispose any active stream controller for this chat
   disposeController(chatId);
+
+  // The round artifact list rebuilds from the same snapshot (F-11): the
+  // last user message starts the current round. Same skip rule as the
+  // DOM above — a live round's list is already authoritative.
+  rebuildRoundFromHistory(chatId, messages);
 
   const pane = getPane(chatId);
 

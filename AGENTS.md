@@ -133,8 +133,8 @@ flux/
 │ ├── main.tsx # entry: log level + mountChat
 │ ├── mount.tsx # mountChat: flushSync render-first init, restore, lease-switch subscription
 │ ├── components/ # React UI: App, TopBar, ChatHeader, Sidebar, ChatView, MessageList, ChatInput,
-│ │ # UsageStats, Explorer (react-arborist), RightDock (file tabs + terminal), FileTabView,
-│ │ # TerminalPanel, FileIcon, ErrorBoundary
+│ │ # UsageStats, Explorer (react-arborist), RightDock (round-artifacts tab + file tabs + terminal),
+│ │ # RoundPanel, FileTabView, TerminalPanel, FileIcon, Toasts, ErrorBoundary
 │ │ ├── ui.tsx # control primitives (Button/IconButton/TextField/Badge/Spinner) — styling authority
 │ │ ├── ui/ # Radix wrappers (shadcn conventions): dialog, dropdown-menu, tooltip, tabs
 │ │ └── dialogs/ # first-party dialogs: impl (service registration), ConfirmDialog,
@@ -145,7 +145,8 @@ flux/
 │ │ # rail + preview/form detail; mobile stacked; integration-ui = shared building blocks)
 │ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
 │ ├── services/ # panes, stream, stream-handler, history, dispatch, handlers,
-│ │ # code-copy, lease, forkDraft, fs, new-chat, dialogs (promise-shaped impls), providers, models, mcp, skills, terminal
+│ │ # artifacts (per-round touched files + invocations, F-11), filePreview, code-copy, lease, forkDraft,
+│ │ # fs, new-chat, dialogs (promise-shaped impls), providers, models, mcp, skills, terminal
 │ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, follow, highlight (+hljs-bundle), cn (clsx+twMerge), fileIcons, clipboard, format, id
 │ ├── styles/ # app.css (tailwind entry + @theme bridge + the flux line), tokens.css (--fx-* light-dark),
 │ │ # stream.css (imperative DOM), fonts.css (@font-face for the bundled fonts)
@@ -469,7 +470,10 @@ behavior — the streaming pipeline is imperative DOM.
 **State (zustand)**: one store (`core/state.ts` `useFlux`) holds chats, activeChatId,
 streaming flags, usage totals, readonly marks, UI prefs, the provider registry
 (`providers`) with its probed model catalogs (`providerModels` + `providerProbeErrors`),
-and the MCP launch list (`mcpServers`). Components subscribe via
+the MCP launch list (`mcpServers`) + the forwarded MCP notice bell
+(`mcpNotices` + `mcpNoticesUnread`), and the current round's artifacts
+(`roundArtifacts` — written by `services/artifacts.ts`, the dock's Round tab reads it).
+Components subscribe via
 selectors (`useFlux((s) => s.chats)`); the imperative services read/write through
 `useFlux.getState` / store actions — no React, no hooks below the component layer.
 **`DispatchContext.state` MUST be wired as a getter** — zustand `setState` replaces
@@ -482,7 +486,8 @@ React roots; the question renders as an inline card inside the active chat pane)
 Tests inject stubs via `setDialogImpls`.
 
 **TopBar** (`components/TopBar.tsx`): the GLOBAL bar — toggle (Menu icon) → brand mark →
-spacer → streaming indicator (click = cancel) → connection (reconnect button when down) →
+spacer → streaming indicator (click = cancel) → MCP notice bell (warning+ log notices,
+unread badge, cap 100) → connection (reconnect button when down) →
 Settings menu (Providers / MCP / Skills — one dropdown whose items open the one tabbed
 SettingsDialog on the chosen section) → theme
 toggle (auto/dark/light, persisted in localStorage, applied pre-paint by an inline script
@@ -574,7 +579,9 @@ service layer only sets the flag and sends `chat_open` (pinned by handlers.test)
 
 **File explorer**: `components/Explorer.tsx` on react-arborist — nodes addressed by
 absolute path (id IS the path), directories lazy-load children via `fs_list` on first
-expand (`onToggle`), files open as TABS in the right dock (`RightDock`: multi-file
+expand (`onToggle`), files open as TABS in the right dock (`RightDock`: the round-
+artifacts tab (present only while the current round has artifacts — file rows open
+previews, invocation rows pulse their tool card) + multi-file
 preview tabs + a pinned Terminal tab; drag-resizable, persisted width; `.md` renders
 markdown + Raw toggle, truncated badge carries a size hint; wrap support removed —
 file bodies always scroll horizontally). Entries carry

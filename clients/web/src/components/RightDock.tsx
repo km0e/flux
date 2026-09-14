@@ -21,7 +21,7 @@
  *          components/FileIcon.tsx
  */
 import { useEffect, useState } from 'react';
-import { Plus, SquareTerminal, X } from 'lucide-react';
+import { ListChecks, Plus, SquareTerminal, X } from 'lucide-react';
 import { useFlux } from '../core/state';
 import { storePreviewWidth, PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH } from '../core/prefs';
 import { createTerminal, killTerminal, terminalSession } from '../services/terminal';
@@ -31,7 +31,13 @@ import { cn } from '../lib/cn';
 import { copyText } from '../lib/clipboard';
 import { FileIcon } from './FileIcon';
 import { FileTabView } from './FileTabView';
+import { RoundPanel } from './RoundPanel';
 import { TerminalPanel } from './TerminalPanel';
+
+/** The round-artifacts tab's reserved strip id (a file tab's id is an
+ * absolute path, so no collision). Present only while the active chat's
+ * round has artifacts. */
+const ROUND_TAB_ID = 'round';
 
 export function RightDock(): React.ReactElement | null {
   const open = useFlux((s) => s.dockOpen);
@@ -39,6 +45,11 @@ export function RightDock(): React.ReactElement | null {
   const terminalTabs = useFlux((s) => s.terminalTabs);
   const activeTab = useFlux((s) => s.activeDockTab);
   const activeChatId = useFlux((s) => s.activeChatId);
+  // The Round tab exists only while the active chat's round has artifacts
+  // — the strip stays clean otherwise (empty rounds need no surface).
+  const roundCount = useFlux((s) =>
+    s.activeChatId ? (s.roundArtifacts[s.activeChatId]?.length ?? 0) : 0,
+  );
   if (!open) return null;
 
   const activeFile = openFiles.find((t) => t.id === activeTab);
@@ -102,6 +113,22 @@ export function RightDock(): React.ReactElement | null {
           the dock close. */}
       <div className="flex items-center gap-1 border-b border-border bg-panel px-1.5 py-1.5">
         <div className="flex min-w-0 flex-1 items-stretch gap-0.5 overflow-x-auto rounded-md bg-inset p-0.5">
+          {roundCount > 0 && (
+            <DockTab
+              label={`Round · ${roundCount}`}
+              title="This round's artifacts — files changed and tools invoked since your last message"
+              active={activeTab === ROUND_TAB_ID}
+              icon={<ListChecks size={13} aria-hidden="true" className="text-accent" />}
+              onSelect={() => useFlux.setState({ activeDockTab: ROUND_TAB_ID, dockOpen: true })}
+              onClose={() =>
+                useFlux.setState((s) => ({
+                  activeDockTab: s.activeDockTab === ROUND_TAB_ID ? null : s.activeDockTab,
+                }))
+              }
+              closeLabel="Hide round artifacts"
+              closable={false}
+            />
+          )}
           {openFiles.map((t) => (
             <DockTab
               key={t.id}
@@ -184,8 +211,11 @@ export function RightDock(): React.ReactElement | null {
         </IconButton>
       </div>
 
-      {/* Content: the active file tab, or the terminal session. */}
-      {activeTab && terminalTabs.some((t) => t.id === activeTab) ? (
+      {/* Content: the round artifacts, the active file tab, or the
+          terminal session. */}
+      {activeTab && roundCount > 0 && activeTab === ROUND_TAB_ID ? (
+        <RoundPanel />
+      ) : activeTab && terminalTabs.some((t) => t.id === activeTab) ? (
         <TerminalPanel tabId={activeTab} />
       ) : activeTab && openFiles.some((t) => t.id === activeTab) ? (
         <FileTabView tabId={activeTab} />
@@ -263,7 +293,9 @@ function CopyStripButton(props: { text: string }): React.ReactElement {
   );
 }
 
-/** One strip tab: select on click, independent close button. */
+/** One strip tab: select on click, optional close button (the Round tab
+ * is a view, not a resource — it deactivates instead of closing; it
+ * disappears with the round itself). */
 function DockTab(props: {
   label: string;
   title: string;
@@ -272,6 +304,7 @@ function DockTab(props: {
   onSelect: () => void;
   onClose: () => void;
   closeLabel: string;
+  closable?: boolean;
 }): React.ReactElement {
   return (
     <div
@@ -296,18 +329,20 @@ function DockTab(props: {
     >
       <span className="flex shrink-0 items-center">{props.icon}</span>
       <span className="min-w-0 truncate">{props.label}</span>
-      <button
-        type="button"
-        aria-label={props.closeLabel}
-        title={props.closeLabel}
-        className="ml-0.5 hidden size-4 shrink-0 cursor-pointer place-items-center rounded-sm text-faint hover:bg-hover hover:text-fg group-hover:grid touch:grid touch:size-9"
-        onClick={(e) => {
-          e.stopPropagation();
-          props.onClose();
-        }}
-      >
-        <X size={10} aria-hidden="true" />
-      </button>
+      {props.closable !== false && (
+        <button
+          type="button"
+          aria-label={props.closeLabel}
+          title={props.closeLabel}
+          className="ml-0.5 hidden size-4 shrink-0 cursor-pointer place-items-center rounded-sm text-faint hover:bg-hover hover:text-fg group-hover:grid touch:grid touch:size-9"
+          onClick={(e) => {
+            e.stopPropagation();
+            props.onClose();
+          }}
+        >
+          <X size={10} aria-hidden="true" />
+        </button>
+      )}
     </div>
   );
 }

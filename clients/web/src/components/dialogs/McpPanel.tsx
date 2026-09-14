@@ -33,6 +33,7 @@ import { useFlux } from '../../core/state';
 import { addMcpServer, fetchMcpServers, removeMcpServer } from '../../services/mcp';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { Badge, Button, Spinner, TextArea, TextField } from '../ui';
+import type { McpServerSummary, McpState, McpToolRegistration } from '../../core/types';
 import {
   DetailPane,
   DialogHint,
@@ -72,8 +73,6 @@ function StateBadge({ state }: { state: McpState }): React.ReactElement {
     </span>
   );
 }
-
-import type { McpServerSummary, McpState } from '../../core/types';
 
 /** Parse a "one per line" textarea into a trimmed non-empty list. */
 function parseLines(text: string): string[] {
@@ -142,11 +141,14 @@ function McpForm(props: {
           onChange={(e) => props.setArgsText(e.target.value)}
         />
       </FormField>
-      <FormField label="Environment" hint="KEY=VALUE per line — values stored, never shown back">
+      <FormField
+        label="Environment"
+        hint="KEY=VALUE per line — the child gets ONLY these (nothing inherited); values are stored server-side and never echoed back"
+      >
         <TextArea
           aria-label="Environment"
           rows={3}
-          placeholder="SOME_VAR=value"
+          placeholder={'SOME_VAR=value\nAPI_TOKEN=… (the value never leaves the server)'}
           value={props.envText}
           onChange={(e) => props.setEnvText(e.target.value)}
         />
@@ -162,6 +164,51 @@ function McpForm(props: {
   );
 }
 
+/** The per-tool outcome block for a fresh add — the debugging surface
+ * that keeps third-party integration off the server log: registered
+ * tools ride the summary's tool_names, the SKIPPED ones (name
+ * collisions) carry their reason here. */
+function AddResults({ results }: { results: McpToolRegistration[] }): React.ReactElement {
+  const skipped = results.filter((r) => !r.registered);
+  if (results.length === 0) return <></>;
+  return (
+    <div className="flex flex-col gap-0.5 rounded-sm border border-border bg-bg px-2 py-1.5" role="status">
+      <span className="text-2xs text-faint">
+        Last add: {results.length - skipped.length} registered
+        {skipped.length > 0 ? ` · ${skipped.length} skipped` : ''}
+      </span>
+      {skipped.map((r) => (
+        <span key={r.name} className="text-2xs text-warn" title={r.reason}>
+          ⊘ {r.name} — {r.reason}
+        </span>
+      ))}
+    </div>
+  );
+}
+
+/** The tool-name chips of one live entry, with the empty-state words the
+ * state implies (no live session ≠ connected but toolless). */
+function ToolChips({ server }: { server: McpServerSummary }): React.ReactElement {
+  if (server.tool_names.length > 0) {
+    return (
+      <div className="flex flex-wrap gap-1" aria-label={`Tools of ${server.id}`}>
+        {server.tool_names.map((t) => (
+          <Badge key={t} title="Registered into the global tool registry">
+            {t}
+          </Badge>
+        ))}
+      </div>
+    );
+  }
+  const word =
+    server.state === 'offline'
+      ? 'No live session — nothing registered yet (retried at the next server start).'
+      : server.state === 'backoff'
+        ? 'Reconnecting — tools resume when the session is back.'
+        : 'Connected; the server registered no tools.';
+  return <span className="text-2xs text-faint">{word}</span>;
+}
+
 /** Mobile row: compact, with the inline actions the stacked layout needs. */
 function McpRow(props: {
   id: string;
@@ -169,6 +216,7 @@ function McpRow(props: {
   args: string[];
   envKeys: string[];
   state: McpState;
+  toolNames: string[];
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
   const launch = [props.command, ...props.args].join(' ');
@@ -182,6 +230,9 @@ function McpRow(props: {
             {k}
           </Badge>
         ))}
+        {props.toolNames.length > 0 && (
+          <Badge title={props.toolNames.join(', ')}>{props.toolNames.length} tools</Badge>
+        )}
         <span className="flex-1" />
         <RemoveControl label={`Remove ${props.id}`} onRemove={props.onRemove} />
       </div>
@@ -191,9 +242,12 @@ function McpRow(props: {
 }
 
 /** Desktop detail: the selected entry's preview. Keyed by id so the
- * two-step confirm state resets per selection. */
+ * two-step confirm state resets per selection. `lastAdd` carries the
+ * fresh add's per-tool outcomes for THIS selection (panel-level state,
+ * cleared on remove). */
 function McpPreview(props: {
   id: string;
+  lastAdd?: McpToolRegistration[];
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
   const server = useFlux((s) => s.mcpServers.find((x) => x.id === props.id));
@@ -213,6 +267,8 @@ function McpPreview(props: {
         <RemoveControl label={`Remove ${server.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={launch}>{launch}</RowSub>
+      <ToolChips server={server} />
+      {props.lastAdd && <AddResults results={props.lastAdd} />}
       <span className="text-2xs text-faint">Applies live — running conversations pick the tools up when their current round ends.</span>
     </div>
   );
@@ -236,6 +292,12 @@ export function McpPanel(): React.ReactElement {
   const [envText, setEnvText] = useState('');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+  // The fresh add's per-tool outcomes (the debugging surface — a skipped
+  // tool's reason rides the ack, never only the server log). Cleared when
+  // that entry is removed.
+  const [lastAdd, setLastAdd] = useState<{ id: string; results: McpToolRegistration[] } | null>(
+    null,
+  );
 
   // The list may be cold — pull on section show.
   useEffect(() => {
@@ -253,28 +315,42 @@ export function McpPanel(): React.ReactElement {
     setAdding(true);
     setAddError(null);
     const added = id.trim();
-    void addMcpServer({ id, command, args: parseLines(argsText), env }).then((addErr) => {
-      setAdding(false);
-      if (addErr) {
-        setAddError(addErr);
-        return;
-      }
-      // Success: the broadcast refreshes the list (and lands the pending
-      // selection) — reset the form.
-      markPending(added);
-      setId('');
-      setCommand('');
-      setArgsText('');
-      setEnvText('');
-      useFlux.getState().pushToast('info', `MCP server "${added}" added — applied to new rounds`);
-    });
+    void addMcpServer({ id, command, args: parseLines(argsText), env }).then(
+      ({ error: addErr, results }) => {
+        setAdding(false);
+        if (addErr) {
+          setAddError(addErr);
+          return;
+        }
+        // Success: the broadcast refreshes the list (and lands the pending
+        // selection) — reset the form.
+        markPending(added);
+        setLastAdd({ id: added, results });
+        setId('');
+        setCommand('');
+        setArgsText('');
+        setEnvText('');
+        const skipped = results.filter((r) => !r.registered).length;
+        useFlux
+          .getState()
+          .pushToast(
+            'info',
+            skipped > 0
+              ? `MCP server "${added}" added — ${results.length - skipped} tools registered, ${skipped} skipped`
+              : `MCP server "${added}" added — applied to new rounds`,
+          );
+      },
+    );
   };
 
   /** Shared by the preview pane and the mobile rows. */
   const remove = (sid: string): Promise<string | undefined> => {
     noteRemoved(sid);
     return removeMcpServer(sid).then((error) => {
-      if (!error) useFlux.getState().pushToast('info', `MCP server "${sid}" removed — applied to new rounds`);
+      if (!error) {
+        setLastAdd((l) => (l?.id === sid ? null : l));
+        useFlux.getState().pushToast('info', `MCP server "${sid}" removed — applied to new rounds`);
+      }
       return error;
     });
   };
@@ -297,7 +373,16 @@ export function McpPanel(): React.ReactElement {
           ) : (
             <ul aria-label="MCP servers" className="m-0 flex list-none flex-col gap-2 p-0">
               {servers.map((s) => (
-                <McpRow key={s.id} id={s.id} command={s.command} args={s.args} envKeys={s.env_keys} state={s.state} onRemove={() => remove(s.id)} />
+                <McpRow
+                  key={s.id}
+                  id={s.id}
+                  command={s.command}
+                  args={s.args}
+                  envKeys={s.env_keys}
+                  state={s.state}
+                  toolNames={s.tool_names}
+                  onRemove={() => remove(s.id)}
+                />
               ))}
             </ul>
           )}
@@ -347,6 +432,7 @@ export function McpPanel(): React.ReactElement {
             <McpPreview
               key={selectedServer.id}
               id={selectedServer.id}
+              lastAdd={lastAdd?.id === selectedServer.id ? lastAdd.results : undefined}
               onRemove={() => remove(selectedServer.id)}
             />
           ) : (

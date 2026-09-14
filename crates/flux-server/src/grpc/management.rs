@@ -250,7 +250,13 @@ impl McpService for McpManagement {
     ) -> Result<tonic::Response<ListServersResponse>, tonic::Status> {
         // Same contract as everywhere else: a listing failure degrades to an
         // empty list + a warn (the dialog renders nothing to retry against).
-        let servers = match crate::mcp::summaries(&self.state.store, &self.mcp.states()).await {
+        let servers = match crate::mcp::summaries(
+            &self.state.store,
+            &self.mcp.states(),
+            &self.mcp.tool_names(),
+        )
+        .await
+        {
             Ok(servers) => servers,
             Err(e) => {
                 tracing::warn!(error = %e, "failed to list MCP servers");
@@ -266,6 +272,7 @@ impl McpService for McpManagement {
                     args: s.args,
                     env_keys: s.env_keys,
                     state: s.state,
+                    tool_names: s.tool_names,
                 })
                 .collect(),
         }))
@@ -290,6 +297,15 @@ impl McpService for McpManagement {
         Ok(tonic::Response::new(AddServerResponse {
             id: m.id,
             error: m.error.or(m.apply_error),
+            results: m
+                .results
+                .into_iter()
+                .map(|r| flux_proto::flux::v1::ToolRegistrationResult {
+                    name: r.name,
+                    registered: r.registered,
+                    reason: r.reason,
+                })
+                .collect(),
         }))
     }
 

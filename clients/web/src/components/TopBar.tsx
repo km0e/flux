@@ -20,6 +20,7 @@ import { useTheme } from '../hooks/useTheme';
 import { Button, IconButton, Spinner } from './ui';
 import { Tooltip } from './ui/tooltip';
 import {
+  Bell,
   Menu,
   Monitor,
   Moon,
@@ -27,6 +28,12 @@ import {
   Sun,
   WifiOff,
 } from 'lucide-react';
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from './ui/dropdown-menu';
 import { cn } from '../lib/cn';
 
 const STATUS_LABEL: Record<string, string> = {
@@ -56,6 +63,75 @@ const THEME_LABEL: Record<ThemeChoice, string> = {
 const SettingsDialog = lazy(() =>
   import('./dialogs/SettingsDialog').then((m) => ({ default: m.SettingsDialog })),
 );
+
+/** The MCP notice bell (F-10b): the notification center over the
+ * rate-limited server notices. Session-level, fire-and-forget — a
+ * page refresh clears the ring (the server keeps no history), which is
+ * honest for transient status. Opening the menu marks it read. */
+function McpNoticeBell(): React.ReactElement {
+  const notices = useFlux((s) => s.mcpNotices);
+  const unread = useFlux((s) => s.mcpNoticesUnread);
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <span className="relative inline-flex">
+          <IconButton
+            id="notice-bell"
+            label={`Notifications${unread > 0 ? ` (${unread} unread)` : ''}`}
+            className="size-7"
+            onClick={() => useFlux.getState().markMcpNoticesRead()}
+          >
+            <Bell size={14} />
+          </IconButton>
+          {unread > 0 && (
+            <span
+              aria-hidden="true"
+              className="pointer-events-none absolute -top-0.5 -right-0.5 grid size-3.5 place-items-center rounded-full bg-accent text-[8px] font-bold text-accent-fg"
+            >
+              {unread > 9 ? '9+' : unread}
+            </span>
+          )}
+        </span>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-80 max-md:w-[calc(100vw-2rem)]">
+        <DropdownMenuItem disabled className="text-2xs text-faint">
+          MCP server notices
+        </DropdownMenuItem>
+        {notices.length === 0 ? (
+          <DropdownMenuItem disabled className="text-xs text-muted">
+            Nothing yet — server logs land here when tools run.
+          </DropdownMenuItem>
+        ) : (
+          <div className="max-h-80 overflow-y-auto">
+            {notices.map((n) => (
+              <DropdownMenuItem key={n.id} disabled className="flex-col items-start gap-0.5">
+                <span className="flex w-full items-center gap-1.5">
+                  <span
+                    className={cn(
+                      'inline-block size-1.5 shrink-0 rounded-full',
+                      LOUD_LEVELS.has(n.level) ? 'bg-warn' : 'bg-faint',
+                    )}
+                    aria-hidden="true"
+                  />
+                  <span className="font-mono text-2xs text-muted">{n.server_id}</span>
+                  <span className="text-2xs text-faint">{n.level}</span>
+                  <span className="flex-1" />
+                  <span className="text-2xs text-faint tabular-nums">
+                    {new Date(n.at).toLocaleTimeString()}
+                  </span>
+                </span>
+                <span className="line-clamp-2 w-full text-xs text-fg">{n.message}</span>
+              </DropdownMenuItem>
+            ))}
+          </div>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
+  );
+}
+
+/** Levels that read as alerts (warn dot + error toast at arrival). */
+const LOUD_LEVELS = new Set(['warning', 'error', 'critical', 'alert', 'emergency']);
 
 export function TopBar(): React.ReactElement {
   const cid = useFlux((s) => s.activeChatId);
@@ -143,6 +219,7 @@ export function TopBar(): React.ReactElement {
       {/* Server-global settings — one gear, one dialog, three sections
           inside. The per-chat provider/model switch lives at the composer
           footer (ChatView). */}
+      <McpNoticeBell />
       <IconButton
         id="settings-button"
         label="Settings"

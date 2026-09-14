@@ -12,7 +12,7 @@ use tokio::time::timeout;
 use async_trait::async_trait;
 use flux_core::{CoreError, Tool, ToolCtx};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, ContentBlock};
-use rmcp::service::RoleClient;
+use rmcp::service::{MaybeSendFuture, NotificationContext, RoleClient};
 use rmcp::transport::TokioChildProcess;
 use rmcp::{ClientHandler, Peer};
 use serde::{Deserialize, Serialize};
@@ -51,13 +51,89 @@ pub enum McpError {
     Timeout(u64),
 }
 
-/// A no-op MCP client handler.
-#[derive(Debug, Clone, Default)]
-struct NoopClientHandler;
+/// A server→client notification that concerns flux. The handler forwards
+/// these to the manager's event loop; progress is deliberately NOT
+/// forwarded — it is request-scoped, the tool wrapper's own 60s timeout
+/// governs in-flight calls, and mapping progress tokens onto tool calls
+/// would be guesswork (see the module doc of the server's McpManager).
+#[derive(Debug, Clone)]
+pub enum ServerNotice {
+    /// `notifications/tools/list_changed` — the server's tool set changed;
+    /// the manager re-lists and re-registers.
+    ToolsListChanged,
+    /// `notifications/message` — a log record with its level. The level is
+    /// the MCP spec's lowercase string ("debug"/"info"/"warning"/…).
+    Log { level: String, message: String },
+}
 
-impl ClientHandler for NoopClientHandler {
+/// The notifying handler: forwards the notifications flux cares about to
+/// the manager's sink (one channel per connection — it dies with the
+/// session, so the forwarder never outlives a dead child).
+#[derive(Clone)]
+struct NoticeClientHandler {
+    sink: Option<tokio::sync::mpsc::UnboundedSender<ServerNotice>>,
+}
+
+impl ClientHandler for NoticeClientHandler {
     fn get_info(&self) -> ClientInfo {
         ClientInfo::default()
+    }
+
+    fn on_tool_list_changed(
+        &self,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        let sink = self.sink.clone();
+        async move {
+            if let Some(sink) = sink {
+                let _ = sink.send(ServerNotice::ToolsListChanged);
+            }
+        }
+    }
+
+    // SEP-2577 deprecated the logging notification protocol-side, but it
+    // remains what every deployed server emits — handling it is the
+    // pragmatic default until a replacement exists.
+    #[allow(deprecated)]
+    fn on_logging_message(
+        &self,
+        params: rmcp::model::LoggingMessageNotificationParam,
+        _context: NotificationContext<RoleClient>,
+    ) -> impl Future<Output = ()> + MaybeSendFuture + '_ {
+        let sink = self.sink.clone();
+        async move {
+            if let Some(sink) = sink {
+                let level = logging_level_str(params.level);
+                let message = notice_text(params.data);
+                let _ = sink.send(ServerNotice::Log { level, message });
+            }
+        }
+    }
+}
+
+/// The MCP spec's lowercase level spelling (serde lowercase — no Display).
+#[allow(deprecated)]
+fn logging_level_str(level: rmcp::model::LoggingLevel) -> String {
+    use rmcp::model::LoggingLevel::*;
+    match level {
+        Debug => "debug",
+        Info => "info",
+        Notice => "notice",
+        Warning => "warning",
+        Error => "error",
+        Critical => "critical",
+        Alert => "alert",
+        Emergency => "emergency",
+    }
+    .to_string()
+}
+
+/// The log data is arbitrary JSON: a string passes as-is, anything else
+/// serializes (bounded by the manager's message cap downstream).
+fn notice_text(data: serde_json::Value) -> String {
+    match data {
+        serde_json::Value::String(s) => s,
+        other => other.to_string(),
     }
 }
 
@@ -195,6 +271,37 @@ impl Tool for McpToolWrapper {
     }
 }
 
+/// A capability to re-list a live session's tools and wrap them fresh —
+/// the `tools/list_changed` path (the manager re-registers the returned
+/// set over the old one). Built per connection in
+/// [`production_connect`]; the wrapper's call bindings ride the same
+/// live peer.
+pub type RelistFn = Arc<
+    dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Result<Vec<Arc<dyn Tool>>, McpError>> + Send>>
+        + Send
+        + Sync,
+>;
+
+/// Build the relist capability for a live peer: list the current tool set
+/// (30s timeout, same as connect) and wrap each entry against that peer.
+pub fn relist_for_peer(peer: &Peer<RoleClient>) -> RelistFn {
+    let peer = peer.clone();
+    Arc::new(move || {
+        let peer = peer.clone();
+        Box::pin(async move {
+            let metas = timeout(Duration::from_secs(30), peer.list_all_tools())
+                .await
+                .map_err(|_| McpError::Timeout(30))??;
+            Ok(metas
+                .into_iter()
+                .map(|meta| {
+                    Arc::new(McpToolWrapper::from_rmcp_tool(meta, peer.clone())) as Arc<dyn Tool>
+                })
+                .collect())
+        })
+    })
+}
+
 /// Extract plain text from a `CallToolResult`.
 fn extract_text_from_result(result: CallToolResult) -> String {
     result
@@ -231,8 +338,24 @@ fn apply_mcp_env(cmd: &mut Command, env: &HashMap<String, String>) {
 /// an external cancel capability (a closure over the same inner token —
 /// usable while the session handle lives elsewhere, e.g. owned by a
 /// supervisor), the peer, and raw tool metadata (without wrapping).
+/// `notices` receives the server notifications flux forwards
+/// (tools/list_changed, logging); `None` disables forwarding.
+///
+/// Tool-list changes reach this client over TWO spec-dependent paths
+/// (verified against the official specs):
+/// - spec ≤ 2025-06-18 (the deployed stdio majority): the server pushes
+///   `notifications/tools/list_changed` unsolicited — it arrives at the
+///   handler hook;
+/// - spec 2026-07-28: the server only notifies clients that opened a
+///   `subscriptions/listen` stream — so we open one for
+///   `toolsListChanged` and pump it into the same sink. rmcp routes
+///   subscription-delivered notifications EXCLUSIVELY to the
+///   subscription channel (never the hook), so the two paths do not
+///   double-fire; a legacy server that rejects the listen request is
+///   logged and left on the hook path alone.
 pub async fn connect_with_peer(
     config: &McpServerConfig,
+    notices: Option<tokio::sync::mpsc::UnboundedSender<ServerNotice>>,
 ) -> Result<
     (
         McpSession,
@@ -251,7 +374,9 @@ pub async fn connect_with_peer(
     apply_mcp_env(&mut command, &config.env);
 
     let transport = TokioChildProcess::new(command)?;
-    let handler = NoopClientHandler;
+    let handler = NoticeClientHandler {
+        sink: notices.clone(),
+    };
     let service = timeout(
         Duration::from_secs(30),
         rmcp::ServiceExt::serve(handler, transport),
@@ -264,6 +389,52 @@ pub async fn connect_with_peer(
         .await
         .map_err(|_| McpError::Timeout(30))??;
     let peer = service.peer().clone();
+
+    // Spec 2026-07-28 path: opt in to tools/list_changed over a
+    // subscriptions/listen stream (see the doc above for why BOTH paths
+    // exist). A legacy server rejects the method — that is fine, its
+    // notifications ride the handler hook instead. The Subscription's
+    // Drop unregisters; the pump ends when the session does (next →
+    // None) or the transport dies (next → Err).
+    if notices.is_some() {
+        let sub_peer = peer.clone();
+        let sub_sink = notices.clone();
+        tokio::spawn(async move {
+            let mut subscription = match sub_peer
+                .listen(
+                    rmcp::model::SubscriptionFilter::builder()
+                        .tools_list_changed()
+                        .build(),
+                )
+                .await
+            {
+                Ok(sub) => sub,
+                Err(e) => {
+                    tracing::debug!(
+                        error = %e,
+                        "subscriptions/listen rejected (legacy server); \
+                         tools/list_changed rides the notification hook"
+                    );
+                    return;
+                }
+            };
+            loop {
+                match subscription.next().await {
+                    Ok(Some(rmcp::model::ServerNotification::ToolListChangedNotification(_))) => {
+                        if let Some(sink) = sub_sink.as_ref() {
+                            let _ = sink.send(ServerNotice::ToolsListChanged);
+                        }
+                    }
+                    Ok(Some(_)) => continue, // other subscribed categories: none requested
+                    Ok(None) => return,      // subscription ended (session over)
+                    Err(e) => {
+                        tracing::debug!(error = %e, "tools subscription stream ended");
+                        return;
+                    }
+                }
+            }
+        });
+    }
 
     for tool in &tools {
         tracing::info!(tool = %tool.name, "registered MCP tool");

@@ -112,7 +112,7 @@ graph LR
 | `flux-macros` | `#[derive(Tool)]` 过程宏：字段推断 JSON Schema + `call` 反序列化 |
 | `flux-provider` | OpenAI 兼容实现 + SSE 解析，实现 flux-core 的 `Provider` 会话工厂（实例按模型钉定；`begin` 开出 `Connection`） |
 | `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list / skill_read）+ 共享 subprocess 执行器 |
-| `flux-mcp` | MCP 客户端桥：启动外部 MCP 服务器子进程并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用） |
+| `flux-mcp` | MCP 客户端桥：启动外部 MCP 服务器子进程并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用）；接收 server 通知——`tools/list_changed` 走「通知钩子 + subscriptions/listen 订阅」双路径（覆盖 spec ≤ 2025-06-18 与 2026-07-28），`notifications/message` 日志转发到 UI |
 | `flux-store` | SQLite 持久化（sqlx，WAL：chats / messages / state / providers / mcp_servers） |
 | `flux-loop` | 对话内核：纯状态机（`machine.rs`）+ 纯泵驱动（`runtime.rs`：消费输入、步进、按序转发事实）——零 I/O、零 trait 对象 |
 | `flux-chat` | 会话层·数据平面：单 chat 任务机制（`chat` 实体 / `domain` 状态与 state 工具 / `handle` 控制句柄 / `spawn` 装配 / `round` 轮次消费者（事实 fold + 飞行监督；Rebuild → 机器门原地重建，任务不退出）/ `tool_exec` 飞行监督库（无独立任务）/ `buf` 溢出缓冲（store 支撑）/ `question` 提问工具 / `reserved` 保留工具名检查）。只依赖 flux-core 端口（`OutputPort`），对控制平面无反向依赖 |

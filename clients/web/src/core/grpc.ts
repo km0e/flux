@@ -20,7 +20,7 @@ import { createClient } from '@connectrpc/connect';
 import { createGrpcWebTransport } from '@connectrpc/connect-web';
 import { FileSystemService, FsEntryKind, GitStatus } from '../gen/flux/v1/fs_pb';
 import { readStoredSessionId } from './session';
-import type { McpState } from './types';
+import type { McpState, McpToolRegistration } from './types';
 import { ProviderService } from '../gen/flux/v1/providers_pb';
 import { ModelService } from '../gen/flux/v1/models_pb';
 import { McpService } from '../gen/flux/v1/mcp_pb';
@@ -299,6 +299,7 @@ export async function grpcFetchMcpServers(): Promise<void> {
       args: s.args,
       env_keys: s.envKeys,
       state: mcpStateOf(s.state),
+      tool_names: s.toolNames,
     })),
   });
 }
@@ -308,7 +309,7 @@ export async function grpcAddMcpServer(input: {
   command: string;
   args: string[];
   env: Record<string, string>;
-}): Promise<string | undefined> {
+}): Promise<{ error?: string; results: McpToolRegistration[] }> {
   const resp = await mcpClient.addServer(
     {
       id: input.id.trim(),
@@ -318,7 +319,14 @@ export async function grpcAddMcpServer(input: {
     },
     { timeoutMs: 15000, ...auth() },
   );
-  return resp.error ?? undefined;
+  return {
+    error: resp.error ?? undefined,
+    results: resp.results.map((r) => ({
+      name: r.name,
+      registered: r.registered,
+      reason: r.reason ?? undefined,
+    })),
+  };
 }
 
 export async function grpcRemoveMcpServer(id: string): Promise<string | undefined> {

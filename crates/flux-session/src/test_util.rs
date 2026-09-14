@@ -102,6 +102,7 @@ pub(crate) fn kind_name(k: &Kind) -> &'static str {
         Kind::Providers(_) => "providers",
         Kind::Models(_) => "models",
         Kind::McpServers(_) => "mcp_servers",
+        Kind::McpNotice(_) => "mcp_notice",
         Kind::Skills(_) => "skills",
     }
 }

@@ -147,6 +147,10 @@ message McpServerSummary {
   // failed startup connect — retried at the next restart, per the
   // persist-first contract).
   McpState state = 5;
+  // Tool names the live session registered into the global registry.
+  // Empty when no live session exists — distinguish that from
+  // "connected but registered nothing" via `state`.
+  repeated string tool_names = 6;
 }
 
 // Live state of one MCP server (self-healing supervisor).

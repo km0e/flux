@@ -107,12 +107,48 @@ export interface SavedModelInfo {
 /** Live state of one MCP server (the self-healing supervisor). */
 export type McpState = 'unspecified' | 'running' | 'backoff' | 'offline';
 
+/** One entry of the current round's artifacts (F-11). `file` = a path the
+ * round created/modified (extracted from the tool's declared path
+ * argument); `tool` = a shell command or an MCP invocation (no path to
+ * extract — the label IS the entry). `callId` is the LATEST touch's tool
+ * call — the jump anchor into the message stream. */
+export interface RoundArtifact {
+  kind: 'file' | 'tool';
+  callId: string;
+  /** file: the path; tool: the display label (command / tool name). */
+  target: string;
+  /** file only: how the tool touched the path. */
+  change?: 'write' | 'edit';
+  /** tool only: where the invocation came from. */
+  source?: 'shell' | 'mcp';
+}
+
 export interface McpServerSummary {
   id: string;
   command: string;
   args: string[];
   env_keys: string[];
   state: McpState;
+  /** Tool names the live session registered — empty when no live
+   * session (distinguish via state). */
+  tool_names: string[];
+}
+
+/** One tool's registration outcome (the add ack's per-tool detail). */
+export interface McpToolRegistration {
+  name: string;
+  registered: boolean;
+  reason?: string;
+}
+
+/** One forwarded MCP server log notification (the bell menu's ring). */
+export interface McpNoticeEntry {
+  id: number;
+  server_id: string;
+  level: string;
+  message: string;
+  /** Epoch ms — the bell renders relative time. */
+  at: number;
 }
 
 /** One installed skill (reply to `skills_list`, and the broadcast after a
@@ -204,6 +240,10 @@ export type ServerMessage =
   /** Reply to `mcp_list` (and the broadcast after an add/remove): the
    * registered MCP servers (env values redacted — keys only). */
   | { type: 'mcp_servers'; servers: McpServerSummary[] }
+  /** One rate-limited MCP server log notification (session-level,
+   * fire-and-forget — not part of the R2 snapshot reconciliation). The
+   * level is the MCP spec's lowercase string, passed through verbatim. */
+  | { type: 'mcp_notice'; server_id: string; level: string; message: string }
   /** Reply to `mcp_add` / `mcp_remove`: failures ride the inline `error`
    * while the row stays; a success is followed by the `mcp_servers`
    * broadcast, and the change is already LIVE (spawned + registered,

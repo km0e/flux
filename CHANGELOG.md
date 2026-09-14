@@ -6,6 +6,23 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 > parses this file); the full docs live in [`README.md`](README.md) and
 > [`docs/architecture.md`](docs/architecture.md).
 
+## [0.1.3] - 2026-09-15
+
+### Added
+
+- **MCP `tools/list_changed` → live re-sync** — a server's tool list change now lands without a restart. Two spec-dependent receive paths, verified against the official specs: spec ≤ 2025-06-18 pushes unsolicited (handler hook); spec 2026-07-28 notifies only subscriptions/listen streams — flux opens one for `toolsListChanged` and pumps it into the same sink (rmcp routes subscription notifications exclusively to the channel, so the paths never double-fire; a legacy server's rejection degrades to the hook). Re-list + re-register over the old set, then the established rebuild + broadcast.
+- **MCP server log notices forwarded to the UI** — each server's log messages ride a per-server token bucket (burst 5, sustained 10/min, 500-char message cap, drops folded into a synthetic `suppressed` notice) onto a session-level `mcp_notice` stream element (fire-and-forget, outside R2 reconciliation): warning+ surface as toasts, and the TopBar gains a bell (newest first, cap 100, unread badge). The `notifications/message` deprecation (SEP-2577, spec 2026-07-28) is handled with a scoped allow — it remains what deployed servers emit; progress notifications are deliberately NOT forwarded (request-scoped, token mapping would be guesswork).
+- **Round-artifacts dock tab** — the current round's touched files and tool invocations, folded declaratively from the stream's `tool_start` events (write/edit/replace_lines → path; bash → command label; MCP tools by name; read-class/plumbing ignored). A user message resets it, a history snapshot rebuilds it from the last user message, a reconnect clears it. File rows open preview tabs (the fs-layer mock keeps intercepting); invocation rows pulse their tool card in the stream.
+- **MCP panel UX** — per-tool registration results ride the AddServer ack (partial success stays success; a skipped tool carries its reason — collision/reserved — visible in the UI, never only in the log); `McpServerSummary` gains `tool_names` (the live session's registered set, state-distinguished empty); the add form's env field explains the no-inheritance / never-echoed contract in place.
+
+### Changed
+
+- **CI actions moved to node24 targets** — the node20 deprecation warnings cleared across the workflows and the release build-setup fragment.
+
+### Fixed
+
+- **rustls 0.23.43 → 0.23.45** — RUSTSEC-2026-0285.
+
 ## [0.1.2] - 2026-09-14
 
 ### Added
@@ -43,6 +60,7 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 - Interactive terminal per chat (e4pty PTY over a dedicated `/ws/term` side channel, xterm.js), tabbed file dock with git-status explorer.
 - Release pipeline: dist archives with the web UI bundled (`web-ui/` next to the binary), shell + PowerShell installers, and a standalone `flux-web-ui.tar.gz` for script-installer users.
 
+[0.1.3]: https://github.com/km0e/flux/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/km0e/flux/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/km0e/flux/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/km0e/flux/releases/tag/v0.1.0

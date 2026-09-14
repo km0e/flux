@@ -78,6 +78,11 @@ message SubscribeResponse {
     // waiting for the next history snapshot. `content` is the
     // bubble-matching key.
     MessagePersisted message_persisted = 25;
+    // A rate-limited logging notification from one MCP server (F-10b).
+    // Session-level: fire-and-forget, NOT part of the R2 snapshot
+    // reconciliation (a gap/reconnect does not replay server notices —
+    // they are transient status, not conversation truth).
+    McpNotice mcp_notice = 26;
     // ── Global broadcasts (session-level) ──
     ChatsBroadcast chats = 16;
     ChatCreated chat_created = 17;
@@ -195,6 +200,17 @@ message ModelsBroadcast {
 
 message McpServersBroadcast {
   repeated McpServerSummary servers = 1;
+}
+
+// One MCP server's log notification, forwarded to the UI (the server
+// side rate-limits: a small burst then a sustained 10/min, drops folded
+// into a synthetic "suppressed" notice). The level is the MCP spec's
+// lowercase string — passed through verbatim so unknown future levels
+// survive (the UI greys what it cannot map).
+message McpNotice {
+  string server_id = 1;
+  string level = 2;
+  string message = 3;
 }
 
 message SkillsBroadcast {

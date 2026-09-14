@@ -447,6 +447,23 @@ describe('tool_preview lifecycle (pending card → upgrade / void)', () => {
     expect(document.querySelectorAll('[data-tool-call-id="p2"]').length).toBe(0);
   });
 
+  it('mcp_notice: warning+ toasts; everything lands in the bell ring (unread counted)', () => {
+    const { ctx } = mockCtx();
+    dispatchMessage({ type: 'mcp_notice', server_id: 'fs', level: 'warning', message: 'slow upstream' }, ctx);
+    dispatchMessage({ type: 'mcp_notice', server_id: 'fs', level: 'info', message: 'tick' }, ctx);
+    const s = useFlux.getState();
+    // The ring keeps both, newest first, source-labelled.
+    expect(s.mcpNotices.map((n) => n.message)).toEqual(['tick', 'slow upstream']);
+    expect(s.mcpNoticesUnread).toBe(2);
+    // warning+ pops a toast; info is ring-only.
+    expect(s.toasts.some((t) => t.text.includes('[mcp:fs] slow upstream'))).toBe(true);
+    expect(s.toasts.some((t) => t.text.includes('tick'))).toBe(false);
+    // Opening the bell clears the unread counter, keeps the ring.
+    s.markMcpNoticesRead();
+    expect(useFlux.getState().mcpNoticesUnread).toBe(0);
+    expect(useFlux.getState().mcpNotices).toHaveLength(2);
+  });
+
   it('a preview upgraded to running survives round end (only pending cards void)', () => {
     const { ctx } = mockCtx();
     dispatchMessage({ type: 'tool_preview', chat_id: 'c1', id: 'p3', name: 'bash' }, ctx);

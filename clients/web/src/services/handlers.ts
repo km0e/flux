@@ -144,6 +144,18 @@ const HANDLERS = {
     ctx.state.set({ mcpServers: msg.servers });
   },
 
+  /** MCP server notice (F-10b): server-side rate-limited. warning+ pops
+   * a toast; everything lands in the bell's ring. The level string is
+   * the MCP spec's, passed through verbatim — unknown levels read as
+   * info (ring-only), never as errors. */
+  mcp_notice: (msg, ctx) => {
+    ctx.state.pushMcpNotice(msg.server_id, msg.level, msg.message);
+    const isLoud = ['warning', 'error', 'critical', 'alert', 'emergency'].includes(msg.level);
+    if (isLoud) {
+      useFlux.getState().pushToast('error', `[mcp:${msg.server_id}] ${msg.message}`);
+    }
+  },
+
   /** Skills broadcast — the Skills dialog's data source. */
   skills: (msg, _ctx) => {
     handleSkillsMessage(msg.skills);

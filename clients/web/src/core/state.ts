@@ -23,8 +23,10 @@ import type {
   ProviderModelInfo,
   ProviderSummary,
   McpServerSummary,
+  McpNoticeEntry,
   SkillSummary,
   SavedModelInfo,
+  RoundArtifact,
 } from './types';
 
 /** Cumulative token usage for one chat (compact ↑/↓/R/W footer language).
@@ -47,6 +49,7 @@ const EMPTY_TOTALS: UsageTotals = {
 /** Toast stack cap + id sequence (module-level, monotonic). */
 const TOAST_CAP = 4;
 let toastSeq = 0;
+let noticeSeq = 0;
 
 export interface Chat {
   id: string;
@@ -159,8 +162,18 @@ export interface FluxStore {
   /** Terminal tabs (one session each; bound to a chat). Created via the
    * dock's "+" or the sidebar button — never auto-spawned. */
   terminalTabs: TerminalTabMeta[];
-  /** The active dock tab id: a file tab id or a terminal tab id. */
+  /** The active dock tab id: a file tab id, a terminal tab id, or the
+   * round-artifacts tab ('round'). */
   activeDockTab: string | null;
+  /** The current round's artifacts per chat (F-11) — since the chat's
+   * last user message, rebuilt from the history snapshot on re-open.
+   * Written by services/artifacts.ts; the dock's Round tab reads it. */
+  roundArtifacts: Record<string, RoundArtifact[]>;
+  /** Forwarded MCP server notices (F-10b) — newest first, capped at 100.
+   * Fire-and-forget session-level status, never conversation truth. */
+  mcpNotices: McpNoticeEntry[];
+  /** Notices arrived since the bell was last opened. */
+  mcpNoticesUnread: number;
 
   // ── Actions ──
 
@@ -180,6 +193,11 @@ export interface FluxStore {
   renameChat(id: string, name: string): void;
   /** Unified notification: dedupe by kind+text, cap the stack. */
   pushToast(kind: ToastEntry['kind'], text: string): void;
+  /** Fold one MCP server notice into the ring (newest first, capped)
+   * and count it unread. */
+  pushMcpNotice(server_id: string, level: string, message: string): void;
+  /** The bell was opened — clear the unread counter. */
+  markMcpNoticesRead(): void;
   dismissToast(id: number): void;
   /** Delete a chat + prune every per-chat record. */
   deleteChat(id: string): void;
@@ -227,6 +245,9 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   openFiles: [],
   terminalTabs: [],
   activeDockTab: null,
+  roundArtifacts: {},
+  mcpNotices: [],
+  mcpNoticesUnread: 0,
 
   addUsage(chatId, u) {
     const prev = get().usage[chatId] ?? EMPTY_TOTALS;
@@ -306,6 +327,24 @@ export const useFlux = create<FluxStore>()((set, get) => ({
     set({
       chats: get().chats.map((c) => (c.id === chatId ? { ...c, provider, model } : c)),
     });
+  },
+
+  pushMcpNotice(server_id, level, message) {
+    const entry: McpNoticeEntry = {
+      id: ++noticeSeq,
+      server_id,
+      level,
+      message,
+      at: Date.now(),
+    };
+    set((s) => ({
+      mcpNotices: [entry, ...s.mcpNotices].slice(0, 100),
+      mcpNoticesUnread: s.mcpNoticesUnread + 1,
+    }));
+  },
+
+  markMcpNoticesRead() {
+    set({ mcpNoticesUnread: 0 });
   },
 
   pushToast(kind, text) {
@@ -436,5 +475,8 @@ export function resetFluxForTest(): void {
     openFiles: [],
     terminalTabs: [],
     activeDockTab: null,
+    roundArtifacts: {},
+    mcpNotices: [],
+    mcpNoticesUnread: 0,
   });
 }

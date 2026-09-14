@@ -306,7 +306,7 @@ pub(crate) mod test_support {
         // The mcp manager's live-apply connector: a test never spawns real
         // servers — the apply fails into the inline error path.
         let connect: crate::mcp::Connect =
-            Arc::new(|_cfg| Box::pin(async { Err(anyhow::anyhow!("no mcp in test")) }));
+            Arc::new(|_cfg, _notices| Box::pin(async { Err(anyhow::anyhow!("no mcp in test")) }));
         let (mcp, _mcp_rx) =
             crate::mcp::McpManager::new(Arc::new(flux_core::ToolRegistry::default()), connect);
         (state, registry, Arc::new(mcp))

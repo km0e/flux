@@ -17,6 +17,7 @@ import { useFlux } from '../core/state';
 import { bridge } from '../core/bridge';
 import { ensurePane, getPaneIfExists } from './panes';
 import { getController, disposeController } from './stream';
+import { recordToolStart, resetRound, clearAllRounds } from './artifacts';
 import {
   createMessageBubble,
   createNoticeBubble,
@@ -105,6 +106,9 @@ export function handleReasoningDelta(chatId: string, delta: string): void {
 
 export function handleToolStart(chatId: string, id: string, name: string, args: string): void {
   getController(chatId).addToolCard(id, name, args);
+  // The round's artifact list folds the same event (F-11) — files/invocations
+  // since the chat's last user message.
+  recordToolStart(chatId, id, name, args);
 }
 
 /** tool_preview — the model is still forming a tool call. The identity
@@ -335,6 +339,7 @@ export function appendUserMessage(text: string): void {
   // Covers reasoning, TTFT, tool execution, and question waits uniformly, so
   // Stop/Escape stay live for the whole round.
   useFlux.getState().setStreaming(cid, true);
+  resetRound(cid);
   appendUserBubble(cid, text);
 }
 
@@ -347,6 +352,9 @@ export function appendUserMessage(text: string): void {
 export function appendInterjectedMessage(text: string): void {
   const cid = useFlux.getState().activeChatId;
   if (!cid) return;
+  // The interjected message starts the replacement round — the artifact
+  // list retires with the cancelled one.
+  resetRound(cid);
   // Streaming is already live — the cancelled round holds the flag.
   appendUserBubble(cid, text);
 }
@@ -376,6 +384,7 @@ function appendUserBubble(cid: string, text: string): void {
  * active chat from the store. */
 export function resetStreamingForReconnect(): void {
   clearInterrupt();
+  clearAllRounds();
   for (const chatId of Object.keys(useFlux.getState().streaming)) {
     disposeController(chatId);
     useFlux.getState().clearStreaming(chatId);

@@ -208,7 +208,15 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
           args: s.args,
           env_keys: s.envKeys,
           state: mcpStateOf(s.state),
+          tool_names: s.toolNames,
         })),
+      };
+    case 'mcpNotice':
+      return {
+        type: 'mcp_notice',
+        server_id: k.value.serverId,
+        level: k.value.level,
+        message: k.value.message,
       };
     case 'skills':
       return {

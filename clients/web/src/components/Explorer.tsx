@@ -23,7 +23,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { Tree, type NodeApi, type NodeRendererProps, type TreeApi } from 'react-arborist';
 import { ChevronRight, FolderIcon as FolderGlyph, FolderOpen, RotateCw } from 'lucide-react';
-import { listDir, readFile, isDisconnect } from '../services/fs';
+import { listDir, isDisconnect } from '../services/fs';
+import { openFilePreview } from '../services/filePreview';
 import { useFlux } from '../core/state';
 import { cn } from '../lib/cn';
 import { fmtBytes } from '../lib/format';
@@ -225,40 +226,9 @@ export default function Explorer(): React.ReactElement {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const openPreview = (path: string) => {
-    // Multi-file tabs: opening adds (or activates) a tab in the right dock
-    // and lands the fetch result on THAT tab (stale-guarded by id).
-    const name = dirName(path);
-    const id = path;
-    useFlux.getState().addFileTab({
-      id,
-      path,
-      name,
-      content: '',
-      truncated: false,
-      loading: true,
-      rawView: false,
-    });
-    void readFile(path).then((r) => {
-      // Stale guard: only land the reply if this tab is still open.
-      if (!useFlux.getState().openFiles.some((t) => t.id === id)) return;
-      if (r.error && !isDisconnect(r.error)) {
-        // Unified reporting — the pane itself shows a neutral placeholder.
-        useFlux.getState().pushToast('error', `Could not read ${name} — ${r.error}`);
-      }
-      useFlux.getState().patchFileTab(id, {
-        content: r.content ?? '',
-        truncated: r.truncated ?? false,
-        size: r.size,
-        error: r.error,
-        loading: false,
-      });
-    });
-  };
-
   const onActivate = useCallback(
     (node: NodeApi<FsNode>) => {
-      if (node.data.kind === 'file') openPreview(node.data.id);
+      if (node.data.kind === 'file') openFilePreview(node.data.id);
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [],

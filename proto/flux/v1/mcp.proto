@@ -43,6 +43,19 @@ message AddServerRequest {
 message AddServerResponse {
   string id = 1;
   optional string error = 2;
+  // Per-tool registration outcomes on a successful add. Partial success
+  // is still success (the row lands, the server runs) — a tool whose
+  // name collides is SKIPPED and the reason rides here, visible in the
+  // UI instead of only in the server log.
+  repeated ToolRegistrationResult results = 3;
+}
+
+// One tool's registration outcome (the add ack's per-tool detail).
+message ToolRegistrationResult {
+  string name = 1;
+  bool registered = 2;
+  // Why a tool was skipped — absent when registered.
+  optional string reason = 3;
 }
 
 message RemoveServerRequest {

@@ -37,3 +37,4 @@ export function listDir(path?: string): Promise<FsListing> {
 export function readFile(path: string): Promise<FsContent> {
   return grpcReadFile(path);
 }
+

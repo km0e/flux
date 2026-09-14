@@ -211,7 +211,16 @@ describe('integration panels', () => {
 
   it('mcp: preselected preview with live-apply semantics, two-step delete, env line validation', async () => {
     useFlux.setState({
-      mcpServers: [{ id: 'fs', command: 'npx', args: ['-y', '@mcp/fs'], env_keys: ['TOKEN'], state: 'running' }],
+      mcpServers: [
+        {
+          id: 'fs',
+          command: 'npx',
+          args: ['-y', '@mcp/fs'],
+          env_keys: ['TOKEN'],
+          state: 'running',
+          tool_names: ['fs_read', 'fs_write'],
+        },
+      ],
     });
     render(<McpPanel />);
     expect(fetchMcpServers).toHaveBeenCalled();
@@ -220,6 +229,10 @@ describe('integration panels', () => {
     expect(screen.getAllByText('fs').length).toBeGreaterThan(0);
     expect(screen.getAllByText('npx -y @mcp/fs').length).toBeGreaterThan(0);
     expect(screen.getByText('TOKEN')).toBeTruthy();
+    // The live session's registered tools render as chips (the summary's
+    // tool_names — the debugging surface that replaces the server log).
+    expect(screen.getByText('fs_read')).toBeTruthy();
+    expect(screen.getByText('fs_write')).toBeTruthy();
     expect(screen.getByText(/Applies live/)).toBeTruthy();
     // Delete is two-step, in the preview pane.
     fireEvent.click(screen.getByLabelText('Remove fs'));

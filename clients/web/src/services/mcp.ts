@@ -13,6 +13,7 @@
  * Depends: core/grpc.ts
  */
 import { grpcAddMcpServer, grpcFetchMcpServers, grpcRemoveMcpServer } from '../core/grpc';
+import type { McpToolRegistration } from '../core/types';
 import { log } from '../logger';
 
 export function fetchMcpServers(): void {
@@ -21,15 +22,16 @@ export function fetchMcpServers(): void {
 }
 
 /** Register an MCP server (persisted to the server database — the ack
- * implies durability). Resolves with the inline error, or undefined on
- * success (the fresh list arrives via the `mcp_servers` broadcast). Empty
- * args/env are omitted on the wire. */
+ * implies durability). Resolves with the inline error plus the per-tool
+ * registration outcomes (a skipped tool carries its reason), or an empty
+ * set on failure. The fresh list arrives via the `mcp_servers` broadcast.
+ * Empty args/env are omitted on the wire. */
 export function addMcpServer(input: {
   id: string;
   command: string;
   args: string[];
   env: Record<string, string>;
-}): Promise<string | undefined> {
+}): Promise<{ error?: string; results: McpToolRegistration[] }> {
   return grpcAddMcpServer(input);
 }
 

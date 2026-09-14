@@ -351,6 +351,7 @@ impl Stream {
                 Some(ResponseKind::Providers(_)) => "providers",
                 Some(ResponseKind::Models(_)) => "models",
                 Some(ResponseKind::McpServers(_)) => "mcp_servers",
+                Some(ResponseKind::McpNotice(_)) => "mcp_notice",
                 Some(ResponseKind::Skills(_)) => "skills",
                 None => "<none>",
             };

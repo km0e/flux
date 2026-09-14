@@ -5,12 +5,13 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { resetFluxForTest } from '../../core/state';
 import { fetchMcpServers, addMcpServer, removeMcpServer } from '../../services/mcp';
+import type { McpToolRegistration } from '../../core/types';
 import * as grpc from '../../core/grpc';
 
 vi.mock('../../core/grpc', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../core/grpc')>()),
   grpcFetchMcpServers: vi.fn(async () => undefined),
-  grpcAddMcpServer: vi.fn(async () => undefined),
+  grpcAddMcpServer: vi.fn(async () => ({ results: [] as McpToolRegistration[] })),
   grpcRemoveMcpServer: vi.fn(async () => undefined),
 }));
 
@@ -25,20 +26,24 @@ describe('mcp service', () => {
     expect(vi.mocked(grpc.grpcFetchMcpServers)).toHaveBeenCalled();
   });
 
-  it('addMcpServer delegates with the launch triple (the inline error rides the promise)', async () => {
+  it('addMcpServer delegates with the launch triple (the inline error + per-tool results ride the promise)', async () => {
     await expect(
       addMcpServer({ id: 'fs', command: 'npx', args: ['-y', '@mcp/fs'], env: { TOKEN: 'v' } }),
-    ).resolves.toBeUndefined();
+    ).resolves.toEqual({ results: [] });
     expect(vi.mocked(grpc.grpcAddMcpServer)).toHaveBeenCalledWith({
       id: 'fs',
       command: 'npx',
       args: ['-y', '@mcp/fs'],
       env: { TOKEN: 'v' },
     });
-    vi.mocked(grpc.grpcAddMcpServer).mockResolvedValueOnce('failed to spawn');
-    await expect(addMcpServer({ id: 'x', command: 'x', args: [], env: {} })).resolves.toBe(
-      'failed to spawn',
-    );
+    vi.mocked(grpc.grpcAddMcpServer).mockResolvedValueOnce({
+      error: 'failed to spawn',
+      results: [],
+    });
+    await expect(addMcpServer({ id: 'x', command: 'x', args: [], env: {} })).resolves.toEqual({
+      error: 'failed to spawn',
+      results: [],
+    });
   });
 
   it('removeMcpServer delegates the inline error; unknown id included', async () => {

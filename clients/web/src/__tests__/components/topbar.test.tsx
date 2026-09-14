@@ -111,3 +111,43 @@ describe('TopBar', () => {
     expect(localStorage.getItem('flux.theme')).toBeNull();
   });
 });
+
+describe('TopBar — the MCP notice bell (F-10b)', () => {
+  beforeEach(() => {
+    resetFluxForTest();
+    resetBridgeForTest();
+    document.body.innerHTML = '<div id="host"></div>';
+  });
+
+  it('shows the unread badge and opens the ring; opening marks it read', async () => {
+    useFlux.setState({
+      mcpNotices: [
+        { id: 2, server_id: 'fs', level: 'info', message: 'indexing done', at: Date.now() },
+        { id: 1, server_id: 'fs', level: 'warning', message: 'slow upstream', at: Date.now() },
+      ],
+      mcpNoticesUnread: 2,
+    });
+    render(<TopBar />);
+    // The badge counts what arrived since the bell was last open.
+    expect(screen.getByText('2')).toBeTruthy();
+    const bell = screen.getByLabelText(/Notifications \(2 unread\)/);
+    // Radix menus open on pointerdown (the repo's established pattern).
+    fireEvent.pointerDown(bell, { button: 0 });
+    fireEvent.click(bell);
+    // The ring lists newest first, source-labelled + levelled (Radix
+    // mounts the menu content in a portal — find async).
+    expect(await screen.findByText('indexing done')).toBeTruthy();
+    expect(screen.getByText('slow upstream')).toBeTruthy();
+    expect(screen.getByText('warning')).toBeTruthy();
+    expect(useFlux.getState().mcpNoticesUnread).toBe(0);
+  });
+
+  it('an empty ring reads as an honest empty state', async () => {
+    render(<TopBar />);
+    expect(screen.queryByText('2')).toBeNull();
+    const bell = screen.getByLabelText(/Notifications/);
+    fireEvent.pointerDown(bell, { button: 0 });
+    fireEvent.click(bell);
+    expect(await screen.findByText(/Nothing yet/)).toBeTruthy();
+  });
+});
