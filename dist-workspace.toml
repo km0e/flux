@@ -7,8 +7,11 @@ members = ["cargo:."]
 cargo-dist-version = "0.32.0"
 # CI backends to support
 ci = "github"
-# The installers to generate for each app
-installers = []
+# The installers to generate for each app — shell (curl | sh) and powershell
+# (irm | iex) need zero extra infrastructure (they download from the GitHub
+# Release and install to CARGO_HOME with a receipt). npm would require an
+# npm package + NPM_TOKEN secret; homebrew a tap repo — both deferred.
+installers = ["shell", "powershell"]
 # Target platforms to build apps for (Rust target-triple syntax)
 targets = ["aarch64-apple-darwin", "aarch64-unknown-linux-gnu", "x86_64-apple-darwin", "x86_64-unknown-linux-gnu", "x86_64-pc-windows-msvc"]
 # Where to host releases
