@@ -8,17 +8,34 @@
 # This fragment REPLACES dist's default build-setup wholesale, so it must
 # carry everything every platform needs.
 #
-# protoc comes from each runner's own package manager — no third-party
-# action. arduino/setup-protoc (which dist's older default used) is
-# unmaintained (last commit 2024-09) and still declares a node20 runtime,
-# which GitHub force-runs on node24 with a deprecation warning on every
-# job; the native installs also drop the GitHub-API download (and its
-# rate-limit/token dependency). CI's rust job already proves apt's
-# protobuf-compiler builds flux-proto; brew/choco are the same class.
+# protoc: macOS/Windows come from the runner's own package manager (brew/
+# choco track current upstream — proto3 optional is long-stable there).
+# Linux CANNOT: the release runners are pinned to ubuntu-22.04 /-arm (the
+# glibc 2.35 floor, see dist-workspace.toml) and apt's protobuf-compiler
+# there is 3.12.4 — proto3 `optional` is still experimental, so
+# flux-proto's build.rs dies with `--experimental_allow_proto3_optional
+# was not set` (regression caught on the v0.1.3 tag: CI's rust job runs
+# ubuntu-latest = 24.04, protoc 3.21, and can't see it). The Linux step
+# below fetches a pinned binary straight from the protobuf release assets
+# — a plain HTTPS download (no API, no token, no third-party action;
+# arduino/setup-protoc is unmaintained and still declares a node20
+# runtime, which GitHub force-runs on node24 with a deprecation warning
+# on every job).
 - name: Install protoc (Linux)
   if: runner.os == 'Linux'
+  shell: bash
   run: |
-    sudo apt-get update && sudo apt-get install -y protobuf-compiler
+    PROTOC_VERSION=29.3
+    case "$(uname -m)" in
+      x86_64) PROTOC_ARCH=x86_64 ;;
+      aarch64) PROTOC_ARCH=aarch_64 ;;  # the release asset's spelling
+      *) echo "unsupported architecture: $(uname -m)" >&2; exit 1 ;;
+    esac
+    curl -fsSL --retry 3 -o /tmp/protoc.zip \
+      "https://github.com/protocolbuffers/protobuf/releases/download/v${PROTOC_VERSION}/protoc-${PROTOC_VERSION}-linux-${PROTOC_ARCH}.zip"
+    sudo unzip -o /tmp/protoc.zip -d /usr/local bin/protoc 'include/*'
+    sudo chmod +x /usr/local/bin/protoc
+    protoc --version
 - name: Install protoc (macOS)
   if: runner.os == 'macOS'
   run: |
