@@ -220,11 +220,19 @@ export default function Explorer(): React.ReactElement {
   }, [workdir, loaded, loadDir]);
 
   // Auto-refresh tick at the fixed cadence — Explorer unmounts with the
-  // Files tab, so the timer never runs while the tree is hidden.
+  // Files tab, so the timer never runs while the tree is hidden. The tick
+  // reads the LATEST refresh through a ref: keying the interval on
+  // `refresh` (which changes with every `loaded`/`workdir` mutation) would
+  // tear down and re-arm the timer on every directory load — a directory
+  // expanded within 15s of each previous load would NEVER reach a tick.
+  const refreshRef = useRef(refresh);
   useEffect(() => {
-    const t = setInterval(() => void refresh(), AUTO_REFRESH_MS);
-    return () => clearInterval(t);
+    refreshRef.current = refresh;
   }, [refresh]);
+  useEffect(() => {
+    const t = setInterval(() => void refreshRef.current(), AUTO_REFRESH_MS);
+    return () => clearInterval(t);
+  }, []);
 
   const onActivate = useCallback(
     (node: NodeApi<FsNode>) => {

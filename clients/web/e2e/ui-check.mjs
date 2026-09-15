@@ -288,6 +288,11 @@ async function main() {
       '--host', '127.0.0.1', '--port', String(serverPort),
     ],
     'inherit',
+    // The server's reqwest honors env-var proxies (system-proxy feature) —
+    // on a proxied dev machine the upstream POST to the loopback fake
+    // provider would be routed through the proxy and answered with a 502.
+    // Scope no_proxy to THIS child only; the user's shell is untouched.
+    { env: { ...process.env, no_proxy: '127.0.0.1,localhost', NO_PROXY: '127.0.0.1,localhost' } },
   );
   for (let i = 0; i < 60; i++) {
     try {
@@ -479,10 +484,13 @@ async function main() {
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     document.getElementById('send').click();
   })()`);
+  await waitFor(`document.querySelectorAll('.tool.done').length >= 1`, 'tool round wrap-up');
+  // The result <pre> is LAZILY materialized on first expansion (dom.ts) —
+  // a collapsed card carries no result text. Expand, then assert.
+  await evalJs(`document.querySelector('.tool.done .tool-header').click()`);
   await waitFor(
-    `document.querySelectorAll('.tool.done').length >= 1 &&
-     (document.querySelector('.chat-pane')?.textContent ?? '').includes('ran fine')`,
-    'tool round wrap-up',
+    `(document.querySelector('.chat-pane')?.textContent ?? '').includes('ran fine')`,
+    'tool result text',
   );
   check('tool round completes (SSE → kernel → WS → DOM)', true);
 

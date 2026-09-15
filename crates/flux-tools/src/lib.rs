@@ -5,6 +5,7 @@
 //! - `search` — pattern matching (grep, glob)
 //! - `shell` — command execution
 //! - `skills` — Agent Skills packages (skill_list / skill_read, lazy loading)
+//! - `ansi` — escape-sequence stripping (bash output hygiene only)
 //! - `subprocess` — shared kill-hygiene subprocess runner (internal)
 //!
 //! The chat boundary (workdir / current_dir) reaches tools through
@@ -12,6 +13,7 @@
 //! there is no argument-preprocessing layer (see the trust model in
 //! AGENTS.md).
 
+mod ansi;
 mod fs;
 mod search;
 mod shell;
@@ -32,23 +34,23 @@ use std::path::{Path, PathBuf};
 use tracing::warn;
 
 /// Format the output of a subprocess into a human-readable string.
+/// Input is already decoded (`String::from_utf8_lossy` at the caller) and
+/// ANSI-stripped where the caller's semantics require it (bash only).
 pub(crate) fn format_command_output(
-    stdout: &[u8],
-    stderr: &[u8],
+    stdout: &str,
+    stderr: &str,
     status: Option<std::process::ExitStatus>,
 ) -> String {
-    let stdout = String::from_utf8_lossy(stdout);
-    let stderr = String::from_utf8_lossy(stderr);
     let mut result = String::new();
     if !stdout.is_empty() {
-        result.push_str(&stdout);
+        result.push_str(stdout);
     }
     if !stderr.is_empty() {
         if !result.is_empty() {
             result.push('\n');
         }
         result.push_str("--- stderr ---\n");
-        result.push_str(&stderr);
+        result.push_str(stderr);
     }
     if result.is_empty() {
         result = if let Some(s) = status {
@@ -185,7 +187,7 @@ mod tests {
 
     #[test]
     fn format_command_output_combines_stdout_stderr() {
-        let out = format_command_output(b"hello", b"world", None);
+        let out = format_command_output("hello", "world", None);
         assert!(out.contains("hello"));
         assert!(out.contains("world"));
         assert!(out.contains("--- stderr ---"));
@@ -193,7 +195,7 @@ mod tests {
 
     #[test]
     fn format_command_output_shows_exit_code_when_empty() {
-        let out = format_command_output(b"", b"", Some(std::process::ExitStatus::default()));
+        let out = format_command_output("", "", Some(std::process::ExitStatus::default()));
         assert!(out.contains("exit code") || out == "(no output)");
     }
 }

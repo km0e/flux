@@ -22,7 +22,6 @@ It is built as a Cargo workspace:
 - [`flux-core`](crates/flux-core/) — the agent-runtime contract layer: pure types (`Message`, `Role`, `ToolCall`, `CoreError`, `ErrorCode`, `ChatStateKind`), `WireEvent` (kernel output vocabulary), `Tool` trait + `ToolRegistry` + `ToolCtx` (cancel token, call id, sandbox boundary with `resolve`), the four kernel ports, and the `Provider` session factory (deps: `serde`, `serde_json`, `strum`, `thiserror`, `async-trait`, `tracing`, `futures`).
 - [`flux-macros`](crates/flux-macros/) — proc-macro for `#[derive(Tool)]`.
 - [`flux-provider`](crates/flux-provider/) — OpenAI-compatible implementation + SSE client, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`).
-- [`flux-context`](crates/flux-context/) — pure scaffold data-production (no driver/trait coupling): the pluggable scaffold information blocks (`blocks.rs` compute engines + frequency bases), `build_scaffold_text` (project profile/tree/git/conventions/decisions), and project introspection (`detector.rs`: language/build/test detection; `collector.rs`: per-source info collectors; `git.rs`: change-frequency measurement; `.flux` project config). The information-collection system's growth point — may split into `flux-project` when it outgrows this layout.
 - [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, and skill tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
 - [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: connects external MCP servers — stdio child processes OR remote Streamable HTTP endpoints (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
 - [`flux-store`](crates/flux-store/) — SQLite persistence layer (chats, messages, state, provider registry).
@@ -131,7 +130,7 @@ flux/
 │ ├── dist/ # build output — what flux-server serves
 │ └── src/
 │ ├── main.tsx # entry: log level + mountChat
-│ ├── mount.tsx # mountChat: flushSync render-first init, restore, lease-switch subscription
+│ ├── mount.tsx # mountChat: flushSync render-first init, restore, lease-switch subscription, the title's transition-gated subscription
 │ ├── components/ # React UI: App, TopBar, ChatHeader, Sidebar, ChatView, MessageList, ChatInput,
 │ │ # UsageStats, Explorer (react-arborist), RightDock (round-artifacts tab + file tabs + terminal),
 │ │ # RoundPanel, FileTabView, TerminalPanel, FileIcon, Toasts, ErrorBoundary
@@ -146,6 +145,8 @@ flux/
 │ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
 │ ├── services/ # panes, stream, stream-handler, history, dispatch, handlers,
 │ │ # artifacts (per-round touched files + invocations, F-11), filePreview, code-copy, lease, forkDraft,
+│ │ # drafts (per-chat composer drafts, sessionStorage write-through), title (document-title
+│ │ # composition — name / working… / background-attention counter),
 │ │ # fs, new-chat, dialogs (promise-shaped impls), providers, models, mcp, skills, terminal
 │ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, follow, highlight (+hljs-bundle), cn (clsx+twMerge), fileIcons, clipboard, format, id
 │ ├── styles/ # app.css (tailwind entry + @theme bridge + the flux line), tokens.css (--fx-* light-dark),
@@ -548,7 +549,9 @@ runs exactly once per code block.
  escaped text — stable frame-to-frame until the closing ``` arrives.
 - Code enhancement (`enhanceHtml` in lib/markdown.ts: highlight, copy button, language
  badge, table-wrap) touches only **committed** `<pre><code>`/`<table>` blocks.
-- The live tail carries a CSS-only blinking caret (`.message.live .stream-tail::after`).
+- The live text tail is a plain `.stream-tail` container — the streaming caret is GONE
+ (removed CSS-only); streaming state is signaled by the typing indicator, the Stop button,
+ and the composer's streaming border.
 - `overflow-anchor: none` on `.chat-pane` + `contain: content` on streaming regions.
 
 **Reasoning**: same pipeline and caches (`reasoningCache` reset per reasoning segment);

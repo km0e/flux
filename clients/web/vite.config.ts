@@ -105,5 +105,13 @@ export default defineConfig({
     globals: false,
     setupFiles: ['./src/test/setup.ts'],
     include: ['src/__tests__/**/*.test.ts', 'src/__tests__/**/*.test.tsx'],
+    coverage: {
+      provider: 'v8',
+      // Generated wire contracts are import-only (never hand-written);
+      // test fixtures and static assets carry nothing to measure.
+      include: ['src/**'],
+      exclude: ['src/gen/**', 'src/test/**', 'src/assets/**', 'src/**/__tests__/**'],
+      reporter: ['text-summary'],
+    },
   },
 });

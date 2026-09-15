@@ -321,6 +321,13 @@ export function handleStreamEnd(chatId: string, finishReason?: string): void {
     ctrl.appendNotice('Reply truncated by content filter');
   }
   if (!wrapOnly) useFlux.getState().clearStreaming(chatId);
+  // Background attention for the tab title: a round finished in a chat the
+  // user is not looking at while the tab is hidden. The wrap-only end of
+  // an interrupt-send sequence is NOT a completion — the replacement round
+  // follows in the same burst.
+  if (!wrapOnly && useFlux.getState().activeChatId !== chatId) {
+    useFlux.getState().bumpBackgroundEvents();
+  }
   if (interruptedChatId === chatId) clearInterrupt();
   resetAnnounce();
 }

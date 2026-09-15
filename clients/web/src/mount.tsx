@@ -33,6 +33,7 @@ import { switchLease } from './services/lease';
 import { registerDialogs } from './components/dialogs/impl';
 import { initViewportHeight } from './core/viewport';
 import { installFailsafe } from './core/failsafe';
+import { syncTitle, initTitleAttention } from './services/title';
 import { bridge, setBridge } from './core/bridge';
 import { log, setLogLevel, getLogLevel, type LogLevel } from './logger';
 import type { DispatchContext } from './services/dispatch';
@@ -128,6 +129,23 @@ export function mountChat(opts: MountOptions): MountHandle {
   // Sidebar collapse is a device preference — persist every change.
   useFlux.subscribe((s, prev) => {
     if (s.sidebarOpen !== prev.sidebarOpen) storeSidebarOpen(s.sidebarOpen);
+  });
+
+  // The document title rides conversation state — written on TRANSITIONS
+  // only (the streaming object changes per flag flip, never per delta),
+  // plus once here for the restored chat. Background attention clears
+  // when the page becomes visible again.
+  initTitleAttention();
+  syncTitle();
+  useFlux.subscribe((s, prev) => {
+    if (
+      s.activeChatId !== prev.activeChatId ||
+      s.streaming !== prev.streaming ||
+      s.backgroundEvents !== prev.backgroundEvents ||
+      s.chats !== prev.chats
+    ) {
+      syncTitle();
+    }
   });
 
   // Switching chats is a lease handover (D-05/D-06): chat_close the old chat

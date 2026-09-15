@@ -201,6 +201,23 @@ function fakeStream(elements: SubscribeResponse[]) {
   return { subscribe, done };
 }
 
+/** A stream that yields its elements and then STAYS OPEN — the attached
+ * state the send-translation tests need (a scripted-exhausted stream
+ * detaches immediately, and since B1 a detached stream QUEUES sends
+ * instead of firing the RPC mocks). */
+function openStream(elements: SubscribeResponse[]) {
+  const subscribe = vi.fn(async (_req: unknown, opts?: { signal?: AbortSignal }) =>
+    (async function* () {
+      for (const e of elements) {
+        if (opts?.signal?.aborted) return;
+        yield e;
+      }
+      await new Promise(() => {}); // attached until disposed/aborted
+    })(),
+  );
+  return { subscribe };
+}
+
 describe('ConnectConnection lifecycle', () => {
   it('ready → session_resumed synthesis, store write, status connected, queue flush', async () => {
     const ready = el('', 0n, {
@@ -287,7 +304,7 @@ describe('ConnectConnection lifecycle', () => {
 
 describe('ConnectConnection.send (chat control translation)', () => {
   function attachedConn(elements: SubscribeResponse[] = []) {
-    const { subscribe } = fakeStream(elements);
+    const { subscribe } = openStream(elements);
     vi.spyOn(grpc.clients, 'events', 'get').mockReturnValue({ subscribe } as never);
     const conn = new ConnectConnection();
     const frames: unknown[] = [];
@@ -484,6 +501,93 @@ describe('ConnectConnection.send (chat control translation)', () => {
     // Nothing to observe directly — the invariant is the queue stays empty
     // so no cancel can fire after a reconnect.
     // (A queued chat proves the queue itself works — see the flush test.)
+    conn.dispose();
+  });
+
+  it('a send in the DISCONNECT WINDOW queues instead of hitting the wire (B1)', async () => {
+    // The stream attaches (ready) and then ENDS: everything after is the
+    // disconnect window — abort is non-null there, but the stream is not
+    // attached. The banner promises queued messages ride the reconnect;
+    // a send here must queue, never fire a doomed RPC.
+    const ready = el('', 0n, { case: 'ready', value: create(ReadySchema, { sessionId: 'tok-b1' }) });
+    const { subscribe } = fakeStream([ready]);
+    vi.spyOn(grpc.clients, 'events', 'get').mockReturnValue({ subscribe } as never);
+    const listChats = vi.fn(async () => ({ chats: [] }));
+    const sendMessage = vi.fn(async () => ({}));
+    vi.spyOn(grpc.clients, 'chat', 'get').mockReturnValue({ listChats, sendMessage } as never);
+
+    const conn = new ConnectConnection();
+    // A message queued BEFORE the stream attaches (the outage path).
+    conn.send({ type: 'chat_list' });
+    conn.connect();
+    await vi.waitFor(() =>
+      expect(sessionStorage.getItem('flux.session.id')).toBe('tok-b1'),
+    );
+    // The queued chat_list flushed on attach; the scripted stream then
+    // exhausts → handleDisconnect → the window.
+    await vi.waitFor(() => expect(listChats).toHaveBeenCalledTimes(1));
+    conn.send({ type: 'chat', chat_id: 'c1', message: 'typed offline' });
+    await new Promise((r) => setTimeout(r, 20));
+    // The window send never reached the wire — it sits queued.
+    expect(listChats).toHaveBeenCalledTimes(1);
+    expect(sendMessage).not.toHaveBeenCalled();
+    conn.dispose();
+  });
+
+  it('a send whose stream detaches mid-flight re-queues instead of an error bubble (B1)', async () => {
+    // An OPEN stream (attached), an in-flight RPC, then the stream ends
+    // under it and the RPC fails bare: definitive statuses are mapped, a
+    // bare transport failure while detached re-queues — no error bubble.
+    const ready = el('', 0n, { case: 'ready', value: create(ReadySchema, { sessionId: 'tok-b1b' }) });
+    let endStream: () => void = () => {};
+    const ended = new Promise<void>((r) => (endStream = r));
+    const subscribe = vi.fn(async () =>
+      (async function* () {
+        yield ready;
+        await ended;
+      })(),
+    );
+    vi.spyOn(grpc.clients, 'events', 'get').mockReturnValue({ subscribe } as never);
+    // The NEXT attach (the reconnect) rides its own open stream.
+    const subscribe2 = vi.fn(async () =>
+      (async function* () {
+        yield el('', 0n, { case: 'ready', value: create(ReadySchema, { sessionId: 'tok-b1b' }) });
+        await new Promise(() => {});
+      })(),
+    );
+
+    let failRpc: (() => void) | null = null;
+    const sendMessage = vi.fn(
+      (_req: unknown) =>
+        new Promise((_res, rej) => {
+          failRpc = () => rej(new Error('transport gone'));
+        }),
+    );
+    const listChats = vi.fn(async () => ({ chats: [] }));
+    vi.spyOn(grpc.clients, 'chat', 'get').mockReturnValue({ listChats, sendMessage } as never);
+
+    const frames: unknown[] = [];
+    const conn = new ConnectConnection();
+    conn.setMessageHandler((m) => frames.push(m));
+    conn.connect();
+    await vi.waitFor(() => expect(sessionStorage.getItem('flux.session.id')).toBe('tok-b1b'));
+    conn.send({ type: 'chat', chat_id: 'c1', message: 'in flight' });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalled());
+    // The stream ends while the RPC is still pending — the disconnect
+    // window opens under the in-flight send.
+    endStream();
+    await vi.waitFor(() =>
+      expect(frames.some((f) => (f as { type: string }).type === 'session_resumed')).toBe(true),
+    );
+    failRpc!();
+    await new Promise((r) => setTimeout(r, 20));
+    // No internal error bubble — the message re-queues for the reconnect.
+    expect(frames.some((f) => (f as { type: string }).type === 'error')).toBe(false);
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    // The queued send flushes on the NEXT attach.
+    vi.spyOn(grpc.clients, 'events', 'get').mockReturnValue({ subscribe: subscribe2 } as never);
+    conn.reconnect();
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledTimes(2));
     conn.dispose();
   });
 });

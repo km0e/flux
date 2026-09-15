@@ -27,6 +27,7 @@ import {
 } from './stream-handler';
 import { attachForkToLiveBubble, renderHistoryMessages } from './history';
 import { pairForkDraft } from './forkDraft';
+import { pruneDrafts } from './drafts';
 import { clearChatPane, getPaneIfExists, getPaneIds } from './panes';
 import { handleModelsFrame } from './models';
 import { handleSkillsMessage } from './skills';
@@ -94,6 +95,10 @@ const HANDLERS = {
     for (const id of getPaneIds()) {
       if (!live.has(id)) clearChatPane(id);
     }
+    // Drafts are keyed by chat id, not pane — prune against the live set
+    // directly, so a draft whose pane was already LRU-evicted is cleaned
+    // too (a paneless deleted chat would otherwise keep its draft).
+    pruneDrafts(live);
     // Terminal sessions of deleted chats die too (the server reaps their
     // PTYs; this drops the dead sockets + tab metas).
     pruneSessions(live);
@@ -253,6 +258,11 @@ const HANDLERS = {
   },
 
   question_required: (msg, ctx) => {
+    // Background attention for the tab title — a question is the highest-
+    // attention event; the action gates on the tab being hidden.
+    if (msg.chat_id !== useFlux.getState().activeChatId) {
+      useFlux.getState().bumpBackgroundEvents();
+    }
     // The model's question tool awaits an answer: sync an in-pane context
     // hint and let the dialog layer collect the answer with its own UX (an
     // inline card in the conversation flow) — the question text and options

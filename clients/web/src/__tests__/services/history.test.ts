@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { renderHistoryMessages } from '../../services/history';
+import { renderHistoryMessages, historyPageStart } from '../../services/history';
 import { useFlux } from '../../core/state';
 import { _resetPanesForTest, getPane } from '../../services/panes';
 import { markPaneStale } from '../../services/stream-handler';
@@ -136,6 +136,10 @@ describe('renderHistoryMessages', () => {
     const card = cards[0] as HTMLElement;
     expect(card.dataset.toolCallId).toBe('tc1');
     expect(card.querySelector('.tool-status')?.textContent).toContain('completed');
+    // Lazy materialization (semantic change, pinned): the collapsed card
+    // carries NO result <pre>; expanding builds it with the merged result.
+    expect(card.querySelector('.tool-result-container pre')).toBeNull();
+    (card.querySelector('.tool-header') as HTMLElement).click();
     expect(card.querySelector('.tool-result-container pre')?.textContent).toBe(
       'file contents here',
     );
@@ -331,5 +335,148 @@ describe('live fork affordance (message_persisted back-pressure)', () => {
     appendUserMessage('watching');
     expect(attachForkToLiveBubble('test-chat', 3, 'watching')).toBe(true);
     expect(pane.querySelector('.msg-fork')).toBeTruthy();
+  });
+});
+
+// ── History pagination (tail-first) ──────────────────────────────────────
+
+describe('historyPageStart (round-atomic page alignment)', () => {
+  it('returns 0 untouched (the first page never aligns backwards past the start)', async () => {
+    const msgs: HistoryMessage[] = [
+      { role: 'assistant', content: 'a', tool_calls: [] },
+      { role: 'user', content: 'u', tool_calls: [] },
+    ];
+    expect(historyPageStart(msgs, 0)).toBe(0);
+  });
+
+  it('aligns a candidate that lands mid-round back to the round user message', async () => {
+    // Round: user(0) → assistant(1) → tool(2) → assistant(3) → user(4).
+    // A candidate at 2 (the tool result) must pull back to 0 — a page
+    // starting at a tool result would orphan it from its call card.
+    const msgs: HistoryMessage[] = [
+      { role: 'user', content: 'q1', tool_calls: [] },
+      { role: 'assistant', content: '', tool_calls: [{ id: 'c1', name: 'bash', arguments: '{}' }] },
+      { role: 'tool', content: 'out', tool_call_id: 'c1' },
+      { role: 'assistant', content: 'done', tool_calls: [] },
+      { role: 'user', content: 'q2', tool_calls: [] },
+    ];
+    expect(historyPageStart(msgs, 2)).toBe(0);
+    expect(historyPageStart(msgs, 3)).toBe(0);
+    expect(historyPageStart(msgs, 4)).toBe(4);
+  });
+
+  it('clamps out-of-range candidates', async () => {
+    const msgs: HistoryMessage[] = [{ role: 'user', content: 'q', tool_calls: [] }];
+    expect(historyPageStart(msgs, 99)).toBe(0);
+    expect(historyPageStart(msgs, -5)).toBe(0);
+  });
+});
+
+describe('tail-first history pagination', () => {
+  let wrap: HTMLDivElement;
+
+  beforeEach(() => {
+    wrap = document.createElement('div');
+    wrap.id = 'messages-wrap';
+    document.body.appendChild(wrap);
+    useFlux.setState({ activeChatId: 'test-chat' });
+    useFlux.setState({ streaming: {} });
+  });
+
+  afterEach(() => {
+    _resetPanesForTest();
+    document.body.removeChild(wrap);
+  });
+
+  it('renders only the last page for a long transcript and offers the rest', async () => {
+    const msgs: HistoryMessage[] = Array.from({ length: 150 }, (_, i) => ({
+      role: i % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `msg-${i}`,
+      id: i + 1,
+      tool_calls: [],
+    }));
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+
+    const rendered = pane.querySelectorAll('.message.user, .message.assistant');
+    expect(rendered.length).toBe(60);
+    // The tail is what renders — the LAST message must be present, the first must not.
+    expect(pane.textContent).toContain('msg-149');
+    expect(pane.textContent).not.toContain('msg-0');
+    const btn = pane.querySelector('.history-load-earlier') as HTMLButtonElement;
+    expect(btn?.textContent).toBe('Load earlier messages (90)');
+  });
+
+  it('prepends earlier pages on click, oldest first, and retires the button at the top', async () => {
+    const msgs: HistoryMessage[] = Array.from({ length: 150 }, (_, i) => ({
+      role: i % 2 === 0 ? ('user' as const) : ('assistant' as const),
+      content: `msg-${i}`,
+      id: i + 1,
+      tool_calls: [],
+    }));
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+
+    const btn = pane.querySelector('.history-load-earlier') as HTMLButtonElement;
+    btn.click();
+    let rendered = pane.querySelectorAll('.message.user, .message.assistant');
+    expect(rendered.length).toBe(120);
+    expect(pane.textContent).toContain('msg-30');
+    expect((pane.querySelector('.history-load-earlier') as HTMLButtonElement).textContent).toBe(
+      'Load earlier messages (30)',
+    );
+    // Page order preserved: msg-30 sits ABOVE msg-149's page.
+    const first = rendered[0]!.querySelector('.message-body')!.textContent;
+    expect(first).toBe('msg-30');
+
+    (pane.querySelector('.history-load-earlier') as HTMLButtonElement).click();
+    rendered = pane.querySelectorAll('.message.user, .message.assistant');
+    expect(rendered.length).toBe(150);
+    expect(pane.textContent).toContain('msg-0');
+    expect(pane.querySelector('.history-load-earlier')).toBeNull();
+  });
+
+  it('keeps a tool pair atomic when the page boundary lands mid-round', async () => {
+    // 3 rounds; page candidate (150-60…) is irrelevant at this scale — build
+    // exactly 61 messages so the naive tail slice starts mid-round: 40 user/
+    // assistant pairs then a tool round. Simpler: craft directly.
+    const msgs: HistoryMessage[] = [];
+    for (let r = 0; r < 30; r++) {
+      msgs.push({ role: 'user', content: `q-${r}`, id: r * 3 + 1, tool_calls: [] });
+      msgs.push({
+        role: 'assistant',
+        content: '',
+        id: r * 3 + 2,
+        tool_calls: [{ id: `call-${r}`, name: 'bash', arguments: '{}' }],
+      });
+      msgs.push({ role: 'tool', content: `out-${r}`, tool_call_id: `call-${r}` });
+    }
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+
+    // Every rendered tool result merged into its call card: NO orphan
+    // result cards (a standalone card carries an empty .tool-args-summary).
+    const orphanResults = [...pane.querySelectorAll('.tool')].filter(
+      (el) => el.querySelector('.tool-status')?.textContent?.trim() === 'result',
+    );
+    expect(orphanResults).toHaveLength(0);
+    // The first user message in the DOM starts a page — every call card in
+    // the pane found its result (60 rendered of 90 messages, but the page
+    // starts at a user boundary: 20 full rounds).
+    const renderedUsers = pane.querySelectorAll('.message.user').length;
+    expect(renderedUsers).toBe(20);
+    const btn = pane.querySelector('.history-load-earlier') as HTMLButtonElement;
+    expect(btn?.textContent).toBe('Load earlier messages (30)');
+  });
+
+  it('a short history renders whole with no affordance', async () => {
+    const msgs: HistoryMessage[] = [
+      { role: 'user', content: 'only', id: 1, tool_calls: [] },
+      { role: 'assistant', content: 'answer', id: 2, tool_calls: [] },
+    ];
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+    expect(pane.querySelectorAll('.message').length).toBe(2);
+    expect(pane.querySelector('.history-load-earlier')).toBeNull();
   });
 });

@@ -20,7 +20,8 @@ Two voices carry the UI (see styles/fonts.css):
   v1.1.0 (IBM, https://github.com/IBM/plex) — the UI face
 - `JetBrainsMono-{Regular,Bold,Italic}.woff2` — JetBrains Mono v2.304
   (JetBrains, https://www.jetbrains.com/lp/mono/)
-- `JetBrainsMonoNerdFontMono-Regular.ttf` — JetBrainsMono Nerd Font Mono
+- `JetBrainsMonoNerdFontMono-Regular.woff2` — JetBrainsMono Nerd Font Mono
   v3.4.0 (ryanoasis/nerd-fonts — the patched variant that adds the icon /
   powerline glyph range; the "Mono" variant keeps icons single-width so
-  terminal cells stay aligned)
+  terminal cells stay aligned). Upstream ships TTF only; this woff2 is
+  converted locally by `scripts/fetch-fonts.sh` at refresh time.

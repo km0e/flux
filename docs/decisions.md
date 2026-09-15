@@ -39,3 +39,7 @@ Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机
 ### T-11 关停是崩溃（crash-only）：无优雅关停机制，持久性由存储层契约承担
 
 服务端不安装任何信号 handler——SIGTERM/SIGINT 保持默认处置，进程即时死亡，即使有浏览器流在场（曾实现过的优雅关停——`with_graceful_shutdown` + drain——已删）。为何接受：① 优雅关停只覆盖死法全集中最小的子集（SIGKILL、OOM、panic、断电、容器强杀均不经过它），数据正确性不应依赖死法；② 等待连接收尾正是当初「必须关前端才能退出」的根因——Subscribe 响应体永不自然结束（keepalive 泵永转），`serve.await` 被在途流永久楔死，drain 反而一次都跑不到，机制在其唯一需要的场景里价值为零；③ 持久性改由存储层契约无条件承担：transcript 提交**批次原子**（machine 在每个批次边界、续流开启前提交 assistant 段 + 批次结果；轮末提交末段），WAL + 事务写保证「任何死法都落在同一个可恢复点」——已提交批次永不丢，持久尾部永不携带悬空 tool_call（OpenAI 兼容 API 对其 400），崩溃窗口缩到当前存活段（秒级）；④ 工具子进程清理不依赖优雅路径：进程内（`kill_on_drop` + 进程组守卫 + 协作取消）覆盖活着的进程，内核侧 `PR_SET_PDEATHSIG`（flux-tools `arm_parent_death_signal`）覆盖进程自身死亡的所有方式。残余代价：关停时客户端看到的是连接重置（RST）而非干净 EOF——客户端本就有重连 + R2 快照调和，纯观感差异；尾部未答消息由用户手动重发（模型看得到历史，幂等窗口本就随进程内存消亡）；断电可能丢最后几笔提交（`synchronous=NORMAL`，进程崩溃零丢失，不逐笔 fsync）。重开评估条件：出现无法接受 RST 观感、或需要「关停前强制收割在飞轮次」的部署形态（如多实例编排的 drain 钩子），且存储层契约被证明不足以支撑恢复。
+
+### T-12 bash 输出 ANSI 只在 bash 工具层 strip，不上提统一漏斗、不做前端兜底
+
+捕获层已是管道（isatty=false），自觉程序自动关色；对无视 isatty 的程序（开 ansi feature 的 tracing subscriber 是典型），strip 只放在 flux-tools `BashTool::execute`（结果进入 `bounded_output` 之前），不放在 flux-chat 的统一漏斗。范围决策：① 文件类工具（read_file/grep/glob）**绝不 strip**——模型基于其内容做 edit_file，strip 会让模型视图与磁盘内容错位（字符数/偏移不一致，edit 往返失败），保真优先于观感；② MCP 结果不清理（协议文本，风险低）；③ 前端不兜底——改动前已入库的带 ANSI 历史重开时原样显示，不做数据迁移；④ 裸 `\r` 丢弃——进度条覆盖帧折叠为残字连排（与主流 coding agent 的 exec 输出 strip 同取舍）。重开评估条件：带色 MCP 工具成为高频困扰（可泛化为 per-tool 卫生声明），或旧历史可读性抱怨集中（做一次性迁移清洗）。

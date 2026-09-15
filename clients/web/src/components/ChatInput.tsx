@@ -10,6 +10,7 @@ import { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/cn';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { takePendingDraft } from '../services/forkDraft';
+import { getDraft, saveDraft, clearDraft } from '../services/drafts';
 import { ArrowUp, Square } from 'lucide-react';
 
 interface ChatInputProps {
@@ -60,17 +61,41 @@ export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: Cha
     inputRef.current?.focus();
   }, []);
 
-  // A fork's redo-turn draft: the fork's composer opens with the fork
-  // point's content prefilled (the transcript copy stops before it —
-  // services/forkDraft.ts). Consumed ONCE, on the fork's first mount —
-  // editing the text is the fork's whole point.
+  // Draft restore on mount (the component remounts per chat switch —
+  // key={cid} in ChatView — so this lands on every switch and open).
+  // Priority: a fork's redo-turn draft wins (editing that text IS the
+  // fork's whole point — services/forkDraft.ts); otherwise the chat's own
+  // saved composer text. A consumed fork draft also drops any saved draft
+  // for the id, so a stale one cannot resurrect on a later remount.
   useEffect(() => {
-    const draft = takePendingDraft(chatId);
     const el = inputRef.current;
-    if (!draft || !el) return;
-    el.value = draft;
+    if (!el) return;
+    const forkDraft = takePendingDraft(chatId);
+    if (forkDraft) {
+      el.value = forkDraft;
+      grow(el);
+      setLen(el.value.length);
+      clearDraft(chatId);
+      return;
+    }
+    const saved = getDraft(chatId);
+    if (!saved) return;
+    el.value = saved;
     grow(el);
     setLen(el.value.length);
+  }, [chatId]);
+
+  // Draft save on unmount — captures the element (React nulls the ref
+  // before passive cleanups run) and the chat id (closures keep rapid
+  // A→B→A switching correct). Runs once per switch-away, never per
+  // keystroke; detached nodes keep their value readable.
+  useEffect(() => {
+    const el = inputRef.current;
+    if (!el) return;
+    const cid = chatId;
+    return () => {
+      if (el.value) saveDraft(cid, el.value);
+    };
   }, [chatId]);
 
   // A prompt suggestion (or any compose request) fills the composer. The
@@ -100,6 +125,7 @@ export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: Cha
     el.value = '';
     el.style.height = 'auto';
     setLen(0);
+    clearDraft(chatId); // sent — the pending draft is consumed
     onSend(text);
   };
 

@@ -18,6 +18,7 @@ import { cn } from '../lib/cn';
 import { relativeTime } from '../lib/format';
 import { log } from '../logger';
 import { clearChatPane } from '../services/panes';
+import { deleteDraft } from '../services/drafts';
 import { dialogs } from '../services/dialogs';
 import { startNewChatFlow } from '../services/new-chat';
 // The Files tree (react-arborist + react-window) is a secondary surface —
@@ -276,6 +277,7 @@ export function Sidebar(): React.ReactElement {
       if (!confirmed) return;
       // The server already aborted the task and broadcast the list; converge the local UI immediately.
       clearChatPane(id);
+      deleteDraft(id); // ids never recycle — the draft is dead weight
       useFlux.getState().deleteChat(id);
       bridge.send({ type: 'chat_delete', chat_id: id });
     });

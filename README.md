@@ -10,7 +10,7 @@
 - **Agent Skills**：惰性加载的能力包（`SKILL.md` 目录，遵循 [Agent Skills 标准](https://agentskills.io)）——模型经 `skill_list` 发现、按需经 `skill_read` 加载完整指令（不向 prompt 注入任何内容；项目技能在 `<workdir>/.flux/skills/`，全局在 `~/.flux/skills/`，同名时项目覆盖全局）。Web UI 的 Skills 对话框管理它们：从本地目录或 git URL 安装（可选 subpath 支持多技能仓库）、删除全局条目——立即生效，无需重启。
 - **LLM Provider**：OpenAI / OpenAI 兼容端点——纯端点（id · url · api key），由 Web UI 的 Providers 对话框管理、存入服务端数据库（没有配置文件）。**本地模型注册表**按模型保存请求参数（自动从 [models.dev](https://models.dev) 元数据富化）；切换对话的 provider 在轮边界热切换——引擎在全量历史上原地 re-begin，不会中断。
 - **流式输出**：经 gRPC-Web 实时推送文本 + 推理（reasoning）增量——接收与渲染解耦一帧（delta 追加到 raw 缓冲，rAF 合帧渲染，每帧至多一次增量渲染）。已提交段落只渲染一次、append-only 追加，代码块稳定打字、高亮恰好一次；粘滞滚动状态机让跟随平滑，不把正在阅读的用户拽回去。
-- **MCP 客户端**：把外部 MCP 服务器作为子进程启动并暴露其工具。由 Web UI 的 MCP 对话框管理（存入服务端数据库；**persist-first + 即时应用**——管理器启动子进程、注册工具，匹配的对话在轮边界重建引擎），并带自愈监督：异常退出的子进程按封顶退避自动重启。server 的工具集变化（`tools/list_changed`）自动重载，日志通知经服务端限流转发到顶栏通知铃。
+- **MCP 客户端**：接入外部 MCP 服务器并暴露其工具——两种传输：`stdio`（本地子进程）与 `http`（远程 Streamable HTTP 端点，`url` + `headers`，header 值存服务端数据库、永不出服务端）。由 Web UI 的 MCP 对话框管理（存入服务端数据库；**persist-first + 即时应用**——管理器启动子进程/建立会话、注册工具，匹配的对话在轮边界重建引擎），并带自愈监督：异常退出的会话按封顶退避自动重启。server 的工具集变化（`tools/list_changed`）自动重载，日志通知经服务端限流转发到顶栏通知铃。
 - **无审批**：工具直接执行——没有确认环节。对话的 workdir 边界作为调用上下文（`ToolCtx`）到达工具，路径在边界内解析，工具错误以结果文本返回、模型自行读取并纠正。真正的隔离来自 OS/容器边界。内置 `question` 工具让模型在轮次中向用户提问（agent 产出问题文本 + 选项，经对话内的内联卡作答）。
 - **流取消与插话**：随时停止生成（Stop 按钮或 Esc）；轮次进行中发送消息走**单个 interrupt-send RPC**——服务端把「取消当前轮」与「排队我的消息」融合为一次操作，插话顺序由构造保证。
 - **从任意消息 fork**：非破坏性分支——新对话复制源 transcript 至所选用户轮**之前**，该轮内容预填进 fork 的输入框；源对话原样不动。

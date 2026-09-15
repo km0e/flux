@@ -174,6 +174,10 @@ export interface FluxStore {
   mcpNotices: McpNoticeEntry[];
   /** Notices arrived since the bell was last opened. */
   mcpNoticesUnread: number;
+  /** Background attention for the document title ("while you were away"):
+   * a round finishing or a question arriving in a NON-active chat while
+   * the tab was hidden. Cleared when the page becomes visible again. */
+  backgroundEvents: number;
 
   // ── Actions ──
 
@@ -198,6 +202,11 @@ export interface FluxStore {
   pushMcpNotice(server_id: string, level: string, message: string): void;
   /** The bell was opened — clear the unread counter. */
   markMcpNoticesRead(): void;
+  /** "While you were away" attention bump for the document title. Counts
+   * ONLY hidden-tab events — a visible window sees panes/toasts already. */
+  bumpBackgroundEvents(): void;
+  /** The page is visible again — clear the title attention counter. */
+  clearBackgroundEvents(): void;
   dismissToast(id: number): void;
   /** Delete a chat + prune every per-chat record. */
   deleteChat(id: string): void;
@@ -248,6 +257,7 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   roundArtifacts: {},
   mcpNotices: [],
   mcpNoticesUnread: 0,
+  backgroundEvents: 0,
 
   addUsage(chatId, u) {
     const prev = get().usage[chatId] ?? EMPTY_TOTALS;
@@ -265,6 +275,10 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   },
 
   setStreaming(chatId, v) {
+    // Idempotence gate: the text-delta path calls this on EVERY delta —
+    // the record rebuild + subscriber notifications must pay once per
+    // transition, not once per delta (the boolean itself never changes).
+    if (get().streaming[chatId] === v) return;
     set({ streaming: { ...get().streaming, [chatId]: v } });
   },
 
@@ -345,6 +359,17 @@ export const useFlux = create<FluxStore>()((set, get) => ({
 
   markMcpNoticesRead() {
     set({ mcpNoticesUnread: 0 });
+  },
+
+  bumpBackgroundEvents() {
+    // "While you were away" semantics: only events landing while the tab
+    // is hidden count.
+    if (!document.hidden) return;
+    set((s) => ({ backgroundEvents: s.backgroundEvents + 1 }));
+  },
+
+  clearBackgroundEvents() {
+    set({ backgroundEvents: 0 });
   },
 
   pushToast(kind, text) {
@@ -478,5 +503,6 @@ export function resetFluxForTest(): void {
     roundArtifacts: {},
     mcpNotices: [],
     mcpNoticesUnread: 0,
+    backgroundEvents: 0,
   });
 }

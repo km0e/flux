@@ -67,6 +67,10 @@ pub enum McpError {
     #[error("MCP initialization failed: {0}")]
     Initialize(String),
 
+    /// Failed to build the HTTP transport's client (transport config).
+    #[error("failed to build MCP HTTP client: {0}")]
+    Client(String),
+
     /// Failed to list tools from the MCP server.
     #[error("failed to list MCP tools: {0}")]
     ListTools(#[from] rmcp::ServiceError),
@@ -357,6 +361,30 @@ fn apply_mcp_env(cmd: &mut Command, env: &HashMap<String, String>) {
     }
 }
 
+/// Whether the endpoint URL targets the machine's loopback — the LOCAL
+/// tier (a stdio child's sibling), which must bypass ambient proxies (see
+/// the client construction in `connect_with_peer`). `localhost` by any
+/// spelling, or any IP literal that `is_loopback` (127.0.0.0/8, ::1).
+/// Unparseable URLs report `false` — they fail downstream validation with
+/// a proper error instead.
+fn loopback_target(url: &str) -> bool {
+    let Ok(url) = reqwest::Url::parse(url) else {
+        return false;
+    };
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    // IPv6 literals serialize bracketed ("[::1]") — strip before parsing.
+    let ipish = host.trim_start_matches('[').trim_end_matches(']');
+    ipish
+        .parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
 /// Spawn and connect to a single MCP server (stdio), or open a Streamable
 /// HTTP session (HTTP).
 ///
@@ -427,10 +455,29 @@ pub async fn connect_with_peer(
             // Accept servers that never assign an MCP-Session-Id (stateless
             // deployments) — field-set, not a builder method, in rmcp 3.3.
             cfg.allow_stateless = true;
-            // `from_config` builds rmcp's tuned default client: no idle
-            // pooling (Linux Delayed-ACK stalls) and no redirects (so
-            // custom headers can never leak to a redirect target).
-            let transport = StreamableHttpClientTransport::from_config(cfg);
+            // Build rmcp's tuned default client here instead of via
+            // `from_config`, with ONE deviation: a loopback target bypasses
+            // ambient proxies. A 127.0.0.1/localhost endpoint is a LOCAL
+            // server — the stdio tier's sibling — and an ambient
+            // `http_proxy` must not intercept it (a proxy that cannot reach
+            // the user's loopback answers 502; exactly what a proxied dev
+            // machine did to the loopback test). Remote hosts keep the
+            // env-proxy contract (`http_proxy`/`https_proxy`/`all_proxy`).
+            // The two non-default knobs replicate rmcp's
+            // `default_http_client`: no idle pooling (Linux Delayed-ACK
+            // stalls) and no redirects (so custom headers can never leak to
+            // a redirect target).
+            let builder = reqwest::Client::builder()
+                .pool_max_idle_per_host(0)
+                .redirect(reqwest::redirect::Policy::none());
+            let client = if loopback_target(url) {
+                builder.no_proxy()
+            } else {
+                builder
+            }
+            .build()
+            .map_err(|e| McpError::Client(e.to_string()))?;
+            let transport = StreamableHttpClientTransport::with_client(client, cfg);
             finish_connect(transport, notices).await
         }
     }
@@ -628,6 +675,31 @@ mod tests {
             .unwrap_err()
             .into();
         assert!(err.to_string().contains("invalid MCP HTTP header"));
+    }
+
+    #[test]
+    fn mcp_error_client_display() {
+        let err = McpError::Client("builder refused".into());
+        assert!(err.to_string().contains("failed to build MCP HTTP client"));
+    }
+
+    // ── loopback_target ──
+
+    #[test]
+    fn loopback_targets_are_recognized() {
+        assert!(loopback_target("http://127.0.0.1:9000/mcp"));
+        assert!(loopback_target("http://127.5.0.9/mcp")); // whole /8 is loopback
+        assert!(loopback_target("http://localhost/mcp"));
+        assert!(loopback_target("http://LOCALHOST:8080/mcp")); // case-free
+        assert!(loopback_target("http://[::1]:9000/mcp"));
+    }
+
+    #[test]
+    fn non_loopback_and_malformed_targets_are_not_loopback() {
+        assert!(!loopback_target("https://example.com/mcp"));
+        assert!(!loopback_target("http://192.168.1.10/mcp"));
+        assert!(!loopback_target("http://0.0.0.0/mcp")); // unspecified, not loopback
+        assert!(!loopback_target("not a url at all"));
     }
 
     // ── extract_text_from_result ──

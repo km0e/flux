@@ -3,18 +3,84 @@
  * Escape cancels the streaming round (and retires interrupt-send
  * bookkeeping).
  */
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/react';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { render, fireEvent, createEvent } from '@testing-library/react';
 import { App } from '../../components/App';
 import { useFlux, resetFluxForTest } from '../../core/state';
 import { resetBridgeForTest, setBridge } from '../../core/bridge';
 
+// matchMedia stub — the drawer tests need the MOBILE regime; everything
+// else gets desktop. The flag is read live (useIsMobile's initializer and
+// effect, isMobileViewport's escape probe).
+let mobileMatches = false;
+const matchMediaStub = vi.fn().mockImplementation((q: string) => ({
+  matches: mobileMatches && q === '(max-width: 767.5px)',
+  media: q,
+  onchange: null,
+  addEventListener: vi.fn(),
+  removeEventListener: vi.fn(),
+  addListener: vi.fn(),
+  removeListener: vi.fn(),
+  dispatchEvent: vi.fn(),
+}));
+
 describe('App', () => {
   beforeEach(() => {
+    vi.stubGlobal('matchMedia', matchMediaStub);
     resetFluxForTest();
     resetBridgeForTest();
     document.body.innerHTML = '<div id="host"></div>';
     localStorage.clear();
+  });
+
+  afterEach(() => {
+    mobileMatches = false;
+    vi.unstubAllGlobals();
+  });
+
+  it('the mobile drawer inerts the covered content; the top bar stays reachable', () => {
+    mobileMatches = true;
+    useFlux.setState({ dockOpen: true });
+    render(<App />);
+    // Covered surfaces are out of the tab order / a11y tree / pointer.
+    expect(document.getElementById('main')?.hasAttribute('inert')).toBe(true);
+    expect(document.getElementById('right-dock')?.hasAttribute('inert')).toBe(true);
+    // The toggle that closes the drawer must stay reachable.
+    expect(document.getElementById('top-bar')?.hasAttribute('inert')).toBe(false);
+    // Closing the drawer restores everything.
+    fireEvent.click(document.getElementById('sidebar-toggle')!);
+    expect(useFlux.getState().sidebarOpen).toBe(false);
+    expect(document.getElementById('main')?.hasAttribute('inert')).toBe(false);
+    expect(document.getElementById('right-dock')?.hasAttribute('inert')).toBe(false);
+  });
+
+  it('desktop never inerts the content (side-by-side layout, no overlay)', () => {
+    mobileMatches = false;
+    useFlux.setState({ dockOpen: true });
+    render(<App />);
+    expect(document.getElementById('main')?.hasAttribute('inert')).toBe(false);
+    expect(document.getElementById('right-dock')?.hasAttribute('inert')).toBe(false);
+  });
+
+  it('Escape closes the mobile drawer first and does NOT cancel the round', () => {
+    mobileMatches = true;
+    const send = vi.fn();
+    setBridge({ send });
+    useFlux.setState({
+      chats: [
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
+      ],
+      activeChatId: 'c1',
+      streaming: { c1: true },
+    });
+    render(<App />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    // The drawer is the topmost surface — it closes; the round survives.
+    expect(useFlux.getState().sidebarOpen).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    // Drawer closed — Escape cancels as usual.
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(send).toHaveBeenCalledWith({ type: 'cancel', chat_id: 'c1' });
   });
 
   it('renders the shell: top bar, sidebar layer, messages wrap comes from panes', () => {
@@ -54,6 +120,103 @@ describe('App', () => {
     render(<App />);
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(send).not.toHaveBeenCalled();
+  });
+
+  it('Escape does NOT cancel while a Radix dialog/menu is open (B2)', () => {
+    const send = vi.fn();
+    setBridge({ send });
+    useFlux.setState({
+      chats: [
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
+      ],
+      activeChatId: 'c1',
+      streaming: { c1: true },
+    });
+    render(<App />);
+
+    // An open dialog owns Escape (its layer dismisses) — the window-level
+    // cancel must not ALSO fire, or closing Settings kills the round.
+    const dialog = document.createElement('div');
+    dialog.setAttribute('role', 'dialog');
+    dialog.setAttribute('data-state', 'open');
+    document.body.appendChild(dialog);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(send).not.toHaveBeenCalled();
+
+    // Same for an open dropdown menu (role=menu; Radix unmounts when
+    // closed, so presence = open).
+    dialog.remove();
+    const menu = document.createElement('div');
+    menu.setAttribute('role', 'menu');
+    document.body.appendChild(menu);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(send).not.toHaveBeenCalled();
+
+    // Once the surface is gone, Escape cancels again.
+    menu.remove();
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(send).toHaveBeenCalledWith({ type: 'cancel', chat_id: 'c1' });
+  });
+
+  it('Escape ignores an already-consumed (defaultPrevented) event (B2)', () => {
+    const send = vi.fn();
+    setBridge({ send });
+    useFlux.setState({
+      chats: [
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
+      ],
+      activeChatId: 'c1',
+      streaming: { c1: true },
+    });
+    render(<App />);
+    const ev = createEvent.keyDown(window, { key: 'Escape' });
+    Object.defineProperty(ev, 'defaultPrevented', { value: true });
+    fireEvent(window, ev);
+    expect(send).not.toHaveBeenCalled();
+  });
+
+  it('the sidebar resizer resizes by keyboard, clamped and persisted (B3)', () => {
+    render(<App />);
+    const resizer = document.getElementById('sidebar-resizer')!;
+    expect(resizer.getAttribute('tabindex')).toBe('0');
+    expect(resizer.getAttribute('aria-valuenow')).toBe('240');
+
+    // The handle is the sidebar's RIGHT border: ArrowRight widens.
+    fireEvent.keyDown(resizer, { key: 'ArrowRight' });
+    expect(useFlux.getState().sidebarWidth).toBe(264);
+    expect(document.documentElement.style.getPropertyValue('--fx-sidebar-w')).toBe('264px');
+    expect(localStorage.getItem('flux.sidebar.width')).toBe('264');
+
+    fireEvent.keyDown(resizer, { key: 'ArrowLeft' });
+    expect(useFlux.getState().sidebarWidth).toBe(240);
+
+    // Clamped: at the ceiling ArrowRight is a no-op; at the floor ArrowLeft too.
+    useFlux.setState({ sidebarWidth: 360 });
+    fireEvent.keyDown(resizer, { key: 'ArrowRight' });
+    expect(useFlux.getState().sidebarWidth).toBe(360);
+    useFlux.setState({ sidebarWidth: 160 });
+    fireEvent.keyDown(resizer, { key: 'ArrowLeft' });
+    expect(useFlux.getState().sidebarWidth).toBe(160);
+
+    // Other keys pass through.
+    fireEvent.keyDown(resizer, { key: 'ArrowUp' });
+    expect(useFlux.getState().sidebarWidth).toBe(160);
+  });
+
+  it('a cancelled pointer gesture commits and detaches (B5)', () => {
+    render(<App />);
+    const resizer = document.getElementById('sidebar-resizer')!;
+
+    fireEvent.pointerDown(resizer);
+    fireEvent.pointerMove(window, { clientX: 300 });
+    fireEvent.pointerCancel(window);
+    // Commit-on-cancel: the var already showed 300 — the store must agree.
+    expect(useFlux.getState().sidebarWidth).toBe(300);
+    expect(localStorage.getItem('flux.sidebar.width')).toBe('300');
+    expect(document.body.classList.contains('resizing-sidebar')).toBe(false);
+    // The dead gesture is detached — later moves change nothing.
+    fireEvent.pointerMove(window, { clientX: 350 });
+    expect(document.documentElement.style.getPropertyValue('--fx-sidebar-w')).toBe('300px');
   });
 
   it('the sidebar resizer drags to a new width (clamped) and persists on release', () => {

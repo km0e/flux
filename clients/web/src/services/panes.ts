@@ -14,6 +14,7 @@ import { useFlux } from '../core/state';
 import { bridge } from '../core/bridge';
 import { disposeController } from './stream';
 import { isNearBottom } from '../lib/dom';
+import { dismissPendingQuestion } from './dialogs';
 
 const panes = new Map<string, HTMLDivElement>();
 
@@ -148,8 +149,10 @@ export function hideEmptyState(chatId: string): void {
  * path for a STALE pane (departed mid-round — see stream-handler's
  * stalePanes): the outdated messages must not flash while the claim's
  * history snapshot is in flight. The controller is left alone — the
- * snapshot render owns its disposal. */
+ * snapshot render owns its disposal. A pending question card dies with
+ * the wipe — its promise resolves as dismissed (registry), never hangs. */
 export function clearPaneMessages(chatId: string): void {
+  dismissPendingQuestion(chatId);
   const pane = getPaneIfExists(chatId);
   if (!pane) return;
   for (const child of Array.from(pane.children)) {
@@ -222,6 +225,7 @@ export function removePane(chatId: string): void {
  */
 export function clearChatPane(chatId: string): void {
   log.debug('clearChatPane ' + chatId);
+  dismissPendingQuestion(chatId);
   disposeController(chatId);
   removePane(chatId);
   // disposeController clears streaming/reasoning; prune the usage and

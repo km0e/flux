@@ -25,7 +25,8 @@ import { TooltipProvider } from './ui/tooltip';
 import { useFlux } from '../core/state';
 import { restoreTerminals } from '../services/terminal';
 import { useEscapeKey } from '../hooks/useEscapeKey';
-import { useEdgeResize } from '../hooks/useEdgeResize';
+import { useEdgeResize, edgeResizeKeys, type EdgeResizeSpec } from '../hooks/useEdgeResize';
+import { isMobileViewport } from '../hooks/useIsMobile';
 import { bridge } from '../core/bridge';
 import { discardInterrupt } from '../services/stream-handler';
 import { storeSidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from '../core/prefs';
@@ -41,8 +42,28 @@ export function App(): React.ReactElement {
   // Escape key cancels streaming — and retires any interrupt-send
   // bookkeeping: after an explicit stop the queued turn dies server-side
   // ("stop means stop"), so the wrap-up must show the usual notice.
-  const onEscape = useCallback(() => {
-    const { activeChatId, streaming } = useFlux.getState();
+  // Guards: when a Radix surface (dialog / dropdown / select) is open, ITS
+  // layer owns Escape — DismissableLayer handles the keydown on its content
+  // element (and prevents default when it dismisses), so an event that
+  // arrives here already-consumed, or with such a surface still mounted,
+  // must not ALSO cancel the live round (closing the Settings dialog used
+  // to kill a streaming answer).
+  const onEscape = useCallback((e: KeyboardEvent) => {
+    if (e.defaultPrevented) return;
+    if (
+      document.querySelector(
+        '[role="dialog"][data-state="open"], [role="menu"], [role="listbox"]',
+      )
+    )
+      return;
+    const { activeChatId, streaming, sidebarOpen } = useFlux.getState();
+    // The mobile drawer is the topmost surface while open and has no Radix
+    // layer of its own — Escape closes it first, and must not ALSO cancel
+    // the live round underneath. Desktop Escape falls through to cancel.
+    if (sidebarOpen && isMobileViewport()) {
+      useFlux.setState({ sidebarOpen: false });
+      return;
+    }
     if (activeChatId && streaming[activeChatId]) {
       discardInterrupt(activeChatId);
       bridge.send({ type: 'cancel', chat_id: activeChatId });
@@ -80,17 +101,25 @@ export function App(): React.ReactElement {
   }, [previewWidth]);
 
   // The drag contract (CSS-var direct write, release commit, body class)
-  // lives in the shared hook — the sidebar tracks the pointer's x.
-  const startResize = useEdgeResize({
+  // lives in the shared hook — the sidebar tracks the pointer's x. The
+  // keyboard contract rides the same spec: the separator is focusable and
+  // the arrows nudge ±24px (the dock's separator behaves identically).
+  const sidebarSpec: EdgeResizeSpec = {
     cssVar: '--fx-sidebar-w',
     dragClass: 'resizing-sidebar',
     widthAt: (e) => e.clientX,
-    clamp: (x) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, x)),
-    commit: (next) => {
+    clamp: (x: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, x)),
+    commit: (next: number) => {
       useFlux.setState({ sidebarWidth: next });
       storeSidebarWidth(next);
     },
-  });
+  };
+  const startResize = useEdgeResize(sidebarSpec);
+  const resizeKeys = edgeResizeKeys(
+    sidebarSpec,
+    () => useFlux.getState().sidebarWidth,
+    'right', // the handle is the sidebar's RIGHT border — ArrowRight widens
+  );
 
   // Terminal tabs survive a refresh via sessionStorage + the server's
   // grace reattach — restore (and reconnect) them once the identity is
@@ -121,13 +150,20 @@ export function App(): React.ReactElement {
                   Desktop CSS keeps it display:none. */}
               <div id="sidebar-backdrop" onClick={() => useFlux.setState({ sidebarOpen: false })} />
               <Sidebar />
-              {/* Drag handle: desktop only (narrow CSS hides it). */}
+              {/* Drag handle: desktop only (narrow CSS hides it). Focusable
+                  with aria-valuenow — a focusable separator is a splitter
+                  and must expose its value; the arrows resize (B3). */}
               <div
                 id="sidebar-resizer"
                 role="separator"
                 aria-orientation="vertical"
                 aria-label="Resize sidebar"
+                aria-valuenow={sidebarWidth}
+                aria-valuemin={SIDEBAR_MIN_WIDTH}
+                aria-valuemax={SIDEBAR_MAX_WIDTH}
+                tabIndex={0}
                 onPointerDown={startResize}
+                onKeyDown={resizeKeys}
               />
             </div>
             <ErrorBoundary>

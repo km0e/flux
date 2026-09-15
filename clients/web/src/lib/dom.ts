@@ -374,10 +374,14 @@ export function createToolCard(opts: ToolCardOptions): HTMLDivElement {
     const expanded = !el.classList.contains('expanded');
     el.classList.toggle('expanded', expanded);
     header.setAttribute('aria-expanded', String(expanded));
-    // Expansion grows the pane's content (a 180ms grid-rows transition);
-    // when the card sits at the bottom the growth lands below the fold —
-    // follow it like streamed content. Collapse shrinks: no follow.
-    if (expanded) followExpansionFrom(el);
+    // Lazy result materialization: the collapsed card carries NO result
+    // <pre> (most cards are never opened — defer the text layout until
+    // the first expand). The result string rides the registry, so the
+    // copy button works collapsed too.
+    if (expanded) {
+      materializeToolResult(el);
+      followExpansionFrom(el);
+    }
   };
   header.addEventListener('click', toggleExpanded);
   header.addEventListener('keydown', (e: KeyboardEvent) => {
@@ -422,10 +426,41 @@ export function createToolCard(opts: ToolCardOptions): HTMLDivElement {
   return el;
 }
 
+// ── Tool results: lazy materialization ───────────────────────────────────
+//
+// The result string NEVER enters the DOM at set time — it rides a registry
+// and the <pre> is built on the card's first expansion. Rationale: the
+// server bounds every tool result at the inline budget (~8000 chars, see
+// flux-chat's bounded_output), so the size is legal — but a long
+// conversation carries dozens of cards whose collapsed result containers
+// would still pay text layout + retained DOM for content nobody reads.
+// Deferring costs nothing (the copy button reads the registry/closure, not
+// the <pre>) and removes the per-card layout weight entirely.
+const toolResults = new WeakMap<HTMLElement, string>();
+
+/**
+ * Build the result <pre> for a tool card from the registry — idempotent
+ * (a materialized card is a no-op). Called on first expansion; empty
+ * results never materialize anything.
+ */
+function materializeToolResult(el: HTMLElement): void {
+  const result = toolResults.get(el);
+  if (!result) return;
+  const container = el.querySelector('.tool-result-container');
+  if (!container || container.querySelector('pre')) return;
+  const pre = document.createElement('pre');
+  pre.textContent = result;
+  // Before the copy button (which setToolCardResult appended last).
+  const copyBtn = container.querySelector('.copy-btn');
+  if (copyBtn) container.insertBefore(pre, copyBtn);
+  else container.appendChild(pre);
+}
+
 export function setToolCardResult(el: HTMLElement, result: string): void {
   const resultContainer = el.querySelector('.tool-result-container');
   if (!resultContainer) return;
 
+  toolResults.set(el, result);
   resultContainer.innerHTML = '';
 
   if (result) {
@@ -438,14 +473,17 @@ export function setToolCardResult(el: HTMLElement, result: string): void {
       resultContainer.appendChild(meta);
     }
 
-    const pre = document.createElement('pre');
-    pre.textContent = result;
-    resultContainer.appendChild(pre);
+    // No <pre> here — materialized lazily on first expansion (module
+    // comment). An ALREADY-expanded card must not wait for a collapse/
+    // expand cycle: materialize immediately.
+    if (el.classList.contains('expanded')) materializeToolResult(el);
 
     const copyBtn = createCopyButton(() => result);
     // Margin rides stream.css (.tool-result-container .copy-btn) — the
     // imperative DOM must not carry Tailwind utilities (layering).
     resultContainer.appendChild(copyBtn);
+  } else {
+    toolResults.delete(el);
   }
 }
 

@@ -180,7 +180,11 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
     case 'chats':
       return { type: 'chats', chats: k.value.chats.map(protoChatToChat) };
     case 'chatCreated':
-      return { type: 'chat_created', chat: protoChatToChat(k.value.chat!) };
+      // No non-null assertion: a chatCreated without a payload is a
+      // malformed element — throw so the stream loop logs and skips it
+      // (the element carries nothing dispatchable).
+      if (!k.value.chat) throw new Error('chatCreated without a chat payload');
+      return { type: 'chat_created', chat: protoChatToChat(k.value.chat) };
     case 'providers':
       return {
         type: 'providers',
@@ -331,6 +335,14 @@ export class ConnectConnection {
   private retryCount = 0;
   private connecting = false;
   private disposed = false;
+  /** Whether the Subscribe stream is attached (the `ready` handshake
+   * landed). `abort` alone cannot serve as this signal: it stays non-null
+   * for the whole disconnect window (between a stream end and the next
+   * connect attempt — seconds on the backoff schedule, indefinitely on
+   * 'failed'), during which sends would hit the wire, fail, and surface as
+   * spurious error bubbles — while the composer banner promises they will
+   * be queued and sent on reconnect. */
+  private streamAttached = false;
   private onMessage: MessageHandler | null = null;
   private onStatusChange: ((s: ConnectionStatus) => void) | null = null;
   private onOpenHandler: (() => void) | null = null;
@@ -352,6 +364,10 @@ export class ConnectConnection {
     if (this.connecting || this.disposed) return;
     this.connecting = true;
     this.onStatusChange?.('connecting');
+    // The old stream (if any) is torn down below — the attached flag dies
+    // with it, so sends during this (re)connect window queue instead of
+    // racing the not-yet-open stream onto the wire.
+    this.streamAttached = false;
     this.teardownStream();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);
@@ -410,6 +426,7 @@ export class ConnectConnection {
   /** The handshake: adopt-or-mint result + leases. */
   private onReady(el: SubscribeResponse): void {
     this.connecting = false;
+    this.streamAttached = true;
     this.retryCount = 0;
     this.snapshotSeq = {}; // a fresh stream restarts the ordering slot-in
     if (el.kind.case !== 'ready') return; // guarded by the caller
@@ -440,9 +457,11 @@ export class ConnectConnection {
     void this.flushPending();
   }
 
-  /** Drain the pending queue in order (awaited per send). */
+  /** Drain the pending queue in order (awaited per send). The attachment
+   * guard stops the drain the moment the stream detaches mid-flush — each
+   * failed send re-queues itself, so a bare length loop would never end. */
   private async flushPending(): Promise<void> {
-    while (this.pendingQueue.length > 0 && !this.disposed) {
+    while (this.pendingQueue.length > 0 && this.streamAttached && !this.disposed) {
       const d = this.pendingQueue.shift()!;
       await this.sendNow(d);
     }
@@ -451,6 +470,7 @@ export class ConnectConnection {
   private handleDisconnect(reason: string): void {
     if (this.disposed) return;
     this.connecting = false;
+    this.streamAttached = false;
     this.stopDeadlineCheck();
     this.retryCount++;
     const delay = RETRY_DELAYS_MS[Math.min(this.retryCount - 1, RETRY_DELAYS_MS.length - 1)];
@@ -491,7 +511,7 @@ export class ConnectConnection {
    * refusals synthesize the error frames the handler table already knows.
    */
   send(data: ClientMessage): void {
-    if (!this.abort || this.connecting) {
+    if (!this.streamAttached || this.connecting) {
       if (data.type === 'cancel') {
         log.debug('send dropped (stream not attached): cancel cannot reach a live round');
         return;
@@ -706,6 +726,17 @@ export class ConnectConnection {
         this.reconnect();
         return;
       }
+      // The stream detached while this send was in flight (an idle-window
+      // send that lost the race with a stream end). Definitive statuses
+      // were already mapped above; a bare transport failure carries no
+      // server verdict, so re-queue instead of surfacing an error bubble —
+      // the reconnect flush delivers it (the same contract the banner
+      // states for messages typed during the outage).
+      if (!this.streamAttached && !this.disposed) {
+        log.info('send re-queued (stream detached mid-flight): ' + data.type);
+        this.pendingQueue.push(data);
+        return;
+      }
       // Transport-level failure with the stream still "attached" — the
       // next element (or deadline) will detach us; surface as an error.
       this.onMessage?.({
@@ -729,6 +760,7 @@ export class ConnectConnection {
 
   dispose(): void {
     this.disposed = true;
+    this.streamAttached = false;
     this.stopDeadlineCheck();
     if (this.reconnectTimer) {
       clearTimeout(this.reconnectTimer);

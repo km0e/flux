@@ -10,11 +10,13 @@
  *                         design), ~63-67 KB per weight
  *   'JetBrains Mono'    — the machine voice and terminal base (box-drawing
  *                         and powerline glyphs included upstream), ~90 KB/weight
- *   'JetBrains Mono NF' — the Nerd Font Mono patch (~2.4 MB TTF; the NF
- *                         release ships no woff2) covering the icon ranges
- *                         prompts use. Declared over BOTH weights from the
- *                         single Regular file — bold icons are rare and
- *                         synthesizing bold would break cell metrics.
+ *   'JetBrains Mono NF' — the Nerd Font Mono patch (~1.0 MB woff2,
+ *                         converted locally from the TTF the NF release
+ *                         ships — see scripts/fetch-fonts.sh) covering the
+ *                         icon ranges prompts use. Declared over BOTH
+ *                         weights from the single Regular file — bold
+ *                         icons are rare and synthesizing bold would break
+ *                         cell metrics.
  *
  * local() precedes every url(): an installed system font always wins, so
  * users with real Plex/Nerd Fonts never download ours. The NF face is
@@ -87,7 +89,7 @@
   src:
     local('JetBrainsMono Nerd Font Mono'), local('JetBrains Mono NF'),
     local('Symbols Nerd Font Mono'), local('Symbols Nerd Font'),
-    url('../assets/fonts/JetBrainsMonoNerdFontMono-Regular.ttf') format('truetype');
+    url('../assets/fonts/JetBrainsMonoNerdFontMono-Regular.woff2') format('woff2');
   font-weight: 400 700;
   font-style: normal;
   font-display: block;

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { registerAllHandlers } from '../../services/handlers';
 import { dispatchMessage } from '../../services/dispatch';
 import { useFlux } from '../../core/state';
-import { ensurePane, getPaneIfExists, _resetPanesForTest } from '../../services/panes';
+import { ensurePane, getPaneIfExists, clearChatPane, _resetPanesForTest } from '../../services/panes';
 import { getController } from '../../services/stream';
 import { markInterrupt } from '../../services/stream-handler';
 import { bridge, setBridge, resetBridgeForTest } from '../../core/bridge';
@@ -181,6 +181,38 @@ describe('handlers', () => {
       });
     });
     expect(pane.querySelector('#question-wait')).toBeNull();
+  });
+
+  it('a background stream_end / question while the tab is hidden bumps the title attention', () => {
+    const { ctx } = mockCtx();
+    ensurePane('c1');
+    // c1 is NOT the active chat, and the tab is hidden: the round's end is
+    // a "while you were away" event for the document title.
+    useFlux.setState({ activeChatId: 'c2' });
+    Object.defineProperty(document, 'hidden', { value: true, configurable: true });
+    try {
+      dispatchMessage({ type: 'stream_end', chat_id: 'c1' }, ctx);
+      expect(useFlux.getState().backgroundEvents).toBe(1);
+
+      dispatchMessage(
+        {
+          type: 'question_required',
+          chat_id: 'c1',
+          id: 'q1',
+          question: { text: 'Proceed?' },
+        },
+        ctx,
+      );
+      expect(useFlux.getState().backgroundEvents).toBe(2);
+
+      // The ACTIVE chat's events never count.
+      useFlux.setState({ activeChatId: 'c1' });
+      dispatchMessage({ type: 'stream_end', chat_id: 'c1' }, ctx);
+      expect(useFlux.getState().backgroundEvents).toBe(2);
+    } finally {
+      Object.defineProperty(document, 'hidden', { value: false, configurable: true });
+      clearChatPane('c1');
+    }
   });
 
   it('does not re-fetch the chat list when a round ends (message counts are gone)', () => {

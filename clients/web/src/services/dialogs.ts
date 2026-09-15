@@ -37,6 +37,41 @@ export interface DialogImpls {
 /** Answer recorded when the user dismisses the question (Esc / close). */
 export const QUESTION_DISMISSED = '(no answer: the user dismissed the question)';
 
+// ── Pending-question registry ──────────────────────────────────────────────
+// The inline question card lives OUTSIDE React's tree (a DOM child of the
+// chat pane), so lifecycle events that destroy the pane — a stale-pane
+// resync wipe, a chat deletion — must reach the pending promise through a
+// registry, or it hangs forever (the card gone, the answer never sent).
+// Keyed by chat id: one question per chat at a time (the server's question
+// tool is a blocking call in that chat's round).
+
+type QuestionFinish = (answer: string) => void;
+const pendingQuestions = new Map<string, QuestionFinish>();
+
+/** Register the pending question's finisher for a chat. A still-pending
+ * previous question for the same chat is dismissed first (a newer
+ * question supersedes — the old card's server-side tool call is gone). */
+export function registerPendingQuestion(chatId: string, finish: QuestionFinish): void {
+  pendingQuestions.get(chatId)?.(QUESTION_DISMISSED);
+  pendingQuestions.set(chatId, finish);
+}
+
+/** Unregister — the finisher calls this as it resolves (guarded: only its
+ * own entry, so a superseding registration is never clobbered). */
+export function unregisterPendingQuestion(chatId: string, finish: QuestionFinish): void {
+  if (pendingQuestions.get(chatId) === finish) pendingQuestions.delete(chatId);
+}
+
+/** Resolve the chat's pending question with the dismissal answer (if one
+ * is pending). Called by the pane-lifecycle paths (resync wipe, delete). */
+export function dismissPendingQuestion(chatId: string): boolean {
+  const finish = pendingQuestions.get(chatId);
+  if (!finish) return false;
+  pendingQuestions.delete(chatId);
+  finish(QUESTION_DISMISSED);
+  return true;
+}
+
 /** Neutral fallbacks — flows never hang when no UI is registered (tests,
  * early mount). */
 const fallback: DialogImpls = {

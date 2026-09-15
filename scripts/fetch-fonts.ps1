@@ -6,8 +6,11 @@
 #
 #   IBM Plex Sans v1.1.0           (woff2, complete faces - the UI voice)
 #   JetBrains Mono v2.304          (woff2, base face + box-drawing)
-#   JetBrainsMono Nerd Font v3.4.0 (TTF - the NF release ships no woff2;
-#                                   the icon range prompts use)
+#   JetBrainsMono Nerd Font v3.4.0 (TTF upstream - the NF release ships no
+#                                   woff2; converted here to woff2, the
+#                                   icon range prompts use)
+#
+# The NF conversion needs `woff2_compress` (google woff2 tool) on PATH.
 #
 # Usage: .\scripts\fetch-fonts.ps1
 $ErrorActionPreference = "Stop"
@@ -42,7 +45,18 @@ try {
     Invoke-WebRequest -Uri "https://github.com/ryanoasis/nerd-fonts/releases/download/v$NfVer/JetBrainsMono.zip" -OutFile $nfZip
     $nfDir = Join-Path $tmp "nf"
     Expand-Archive -Path $nfZip -DestinationPath $nfDir -Force
-    Copy-Item (Join-Path $nfDir "JetBrainsMonoNerdFontMono-Regular.ttf") $fonts -Force
+
+    # Convert the NF TTF to woff2 (2.4 MB -> ~1.0 MB). The NF release ships
+    # no woff2, so the conversion happens here - once per upgrade, committed.
+    $woff2Compress = Get-Command woff2_compress -ErrorAction SilentlyContinue
+    if (-not $woff2Compress) {
+        Write-Error "woff2_compress not found on PATH (winget/brew install woff2, or apt install woff2 under WSL)"
+        throw "woff2_compress missing"
+    }
+    & $woff2Compress.Source (Join-Path $nfDir "JetBrainsMonoNerdFontMono-Regular.ttf")
+    if ($LASTEXITCODE -ne 0) { throw "woff2_compress failed" }
+    Remove-Item (Join-Path $fonts "JetBrainsMonoNerdFontMono-Regular.ttf") -Force -ErrorAction SilentlyContinue
+    Copy-Item (Join-Path $nfDir "JetBrainsMonoNerdFontMono-Regular.woff2") $fonts -Force
 
     Write-Host "==> Done (committed files - run git status to see what changed):"
     Get-ChildItem $fonts

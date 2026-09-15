@@ -7,8 +7,13 @@
 #
 #   IBM Plex Sans v1.1.0           (woff2, complete faces — the UI voice)
 #   JetBrains Mono v2.304          (woff2, base face + box-drawing)
-#   JetBrainsMono Nerd Font v3.4.0 (TTF — the NF release ships no woff2;
-#                                   the icon range prompts use)
+#   JetBrainsMono Nerd Font v3.4.0 (TTF upstream — the NF release ships no
+#                                   woff2; converted here to woff2, the
+#                                   icon range prompts use)
+#
+# The NF conversion needs `woff2_compress` (the google woff2 tool — apt
+# `woff2` / brew `woff2`) or python fontTools+brotli. One of them must be
+# on PATH; without either the NF face cannot be refreshed.
 #
 # Usage: fetch-fonts.sh
 set -euo pipefail
@@ -46,7 +51,26 @@ echo "==> JetBrainsMono Nerd Font Mono v${NF_VER}"
 curl -fsSL -o "$tmp/nf.zip" \
     "https://github.com/ryanoasis/nerd-fonts/releases/download/v${NF_VER}/JetBrainsMono.zip"
 unzip -o -q "$tmp/nf.zip" "JetBrainsMonoNerdFontMono-Regular.ttf" -d "$tmp/nf"
-cp "$tmp/nf/JetBrainsMonoNerdFontMono-Regular.ttf" "$FONTS/"
+
+# Convert the NF TTF to woff2 (2.4 MB → ~1.0 MB). The NF release ships no
+# woff2, so the conversion happens here — once per upgrade, committed.
+if command -v woff2_compress >/dev/null 2>&1; then
+    woff2_compress "$tmp/nf/JetBrainsMonoNerdFontMono-Regular.ttf"
+elif python3 -c 'import fontTools, brotli' >/dev/null 2>&1; then
+    python3 - "$tmp/nf/JetBrainsMonoNerdFontMono-Regular.ttf" << 'PYEOF'
+import sys
+from fontTools.ttLib import TTFont
+f = TTFont(sys.argv[1])
+f.flavor = "woff2"
+f.save(sys.argv[1].rsplit(".", 1)[0] + ".woff2")
+PYEOF
+else
+    echo "ERROR: need woff2_compress (apt install woff2 / brew install woff2)" >&2
+    echo "       or python fontTools+brotli (pip install fonttools brotli)" >&2
+    exit 1
+fi
+rm -f "$FONTS/JetBrainsMonoNerdFontMono-Regular.ttf"
+cp "$tmp/nf/JetBrainsMonoNerdFontMono-Regular.woff2" "$FONTS/"
 
 echo "==> Done (committed files — run git status to see what changed):"
 ls -lh "$FONTS"

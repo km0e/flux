@@ -11,6 +11,12 @@ echo "==> Running Clippy..."
 cargo clippy --workspace --tests -- -D warnings
 
 echo "==> Running Rust tests..."
+# Loopback test fixtures must never ride an ambient proxy: with http_proxy
+# set system-wide, reqwest's system-proxy routes 127.0.0.1 mocks through
+# the proxy, which cannot reach the machine's own loopback and answers
+# 502 (the same scope-no_proxy-for-loopback hygiene e2e/ui-check.mjs
+# applies to its server child). Non-loopback traffic still uses the proxy.
+export no_proxy="127.0.0.1,localhost" NO_PROXY="127.0.0.1,localhost"
 cargo test --workspace
 
 echo "==> Installing frontend dependencies (pnpm)..."

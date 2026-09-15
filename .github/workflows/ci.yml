@@ -91,10 +91,71 @@ jobs:
         working-directory: clients/web
         run: pnpm exec tsc --noEmit
 
-      - name: Run frontend tests
+      - name: Run frontend tests (coverage)
         working-directory: clients/web
-        run: pnpm test
+        run: pnpm run test:coverage
 
       - name: Build the web UI
         working-directory: clients/web
         run: pnpm run build:fast
+
+  # Headless e2e smoke over the REAL stack: cargo-built flux-server + the
+  # built UI + a scripted SSE provider, driven by e2e/ui-check.mjs (raw CDP,
+  # no extra deps). The unit/vitest layer cannot catch wiring regressions
+  # (static serving, gRPC-Web framing, the /ws/term side channel) — this job
+  # is the only surface that exercises the shipped shape end to end.
+  e2e:
+    runs-on: ubuntu-latest
+    # cargo build (debug) dominates; bound a hung run like the rust job
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # flux-proto's build.rs shells out to the system protoc (same as the
+      # rust job — apt's version supports proto3 optional).
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          package_json_file: clients/package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: clients/pnpm-lock.yaml
+
+      - name: Install Chrome
+        id: chrome
+        uses: browser-actions/setup-chrome@v1
+        with:
+          chrome-version: stable
+
+      - name: Install dependencies (pnpm)
+        working-directory: clients
+        run: pnpm install --frozen-lockfile
+
+      # gen:proto (prebuild) → tsc → vite build — the dist the server serves.
+      - name: Build the web UI
+        working-directory: clients/web
+        run: pnpm run build
+
+      - name: Build flux-server (debug)
+        run: cargo build -p flux-server
+
+      - name: Headless e2e smoke (ui-check)
+        working-directory: clients/web
+        env:
+          FLUX_CHROME: ${{ steps.chrome.outputs.chrome-path }}
+        run: pnpm run ui-check

@@ -122,13 +122,45 @@ describe('createToolCard', () => {
 });
 
 describe('setToolCardResult', () => {
-  it('appends pre and copy button', () => {
+  it('defers the result <pre> to first expansion (copy button immediate)', () => {
     const el = createToolCard({ id: 'c1', name: 'tool', status: 'running' });
     setToolCardResult(el, 'result text');
-    const pre = el.querySelector('pre');
-    expect(pre?.textContent).toBe('result text');
+    // Lazy materialization: collapsed cards carry NO result <pre>…
+    expect(el.querySelector('pre')).toBeNull();
+    // …but the copy button works off the registry immediately.
     const btn = el.querySelector('.copy-btn');
     expect(btn).not.toBeNull();
+
+    // First expansion materializes the <pre> with the full result.
+    (el.querySelector('.tool-header') as HTMLElement).click();
+    const pre = el.querySelector('pre');
+    expect(pre?.textContent).toBe('result text');
+  });
+
+  it('materializes immediately when the card is already expanded', () => {
+    const el = createToolCard({ id: 'c1', name: 'tool', status: 'running' });
+    (el.querySelector('.tool-header') as HTMLElement).click(); // expand BEFORE the result arrives
+    setToolCardResult(el, 'late result');
+    expect(el.querySelector('pre')?.textContent).toBe('late result');
+  });
+
+  it('materialization is idempotent — re-expansion never duplicates', () => {
+    const el = createToolCard({ id: 'c1', name: 'tool', status: 'running' });
+    setToolCardResult(el, 'once');
+    const header = el.querySelector('.tool-header') as HTMLElement;
+    header.click(); // expand
+    header.click(); // collapse
+    header.click(); // expand again
+    expect(el.querySelectorAll('pre')).toHaveLength(1);
+    expect(el.querySelector('pre')?.textContent).toBe('once');
+  });
+
+  it('an empty result stores nothing and never materializes', () => {
+    const el = createToolCard({ id: 'c1', name: 'tool', status: 'running' });
+    setToolCardResult(el, '');
+    (el.querySelector('.tool-header') as HTMLElement).click();
+    expect(el.querySelector('pre')).toBeNull();
+    expect(el.querySelector('.copy-btn')).toBeNull();
   });
 });
 

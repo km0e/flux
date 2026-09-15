@@ -247,6 +247,32 @@
   padding: 2px 4px;
 }
 
+/* History pagination — the "load earlier" affordance prepended above the
+ * oldest rendered page (see services/history.ts). A quiet centered pill:
+ * visible enough to find at the top of the scroll, silent otherwise. */
+.history-load-earlier {
+  margin: 8px auto 4px;
+  padding: 4px 12px;
+  border: 1px solid var(--fx-border);
+  border-radius: 999px;
+  background: var(--fx-inset);
+  color: var(--fx-muted);
+  font-family: var(--fx-font-mono);
+  font-size: var(--fx-text-2xs);
+  cursor: pointer;
+  transition:
+    color var(--fx-duration-fast) ease,
+    border-color var(--fx-duration-fast) ease;
+}
+.history-load-earlier:hover {
+  color: var(--fx-fg);
+  border-color: var(--fx-border-strong);
+}
+.history-load-earlier:focus-visible {
+  outline: 1px solid var(--fx-accent);
+  outline-offset: 2px;
+}
+
 /* ── Typing indicator (TTFT: three-dot pulse before the first token) ── */
 
 .message.typing {
@@ -272,15 +298,6 @@
 
 .message.typing span:nth-child(3) {
   animation-delay: 0.4s;
-}
-
-/* Streaming caret: a soft blinking block at the live tail. */
-.message.live .stream-tail:not(:empty)::after,
-.message.live .stream-tail:empty::after {
-  content: '▍';
-  color: var(--fx-accent);
-  animation: caretBlink 1s steps(2) infinite;
-  font-size: 0.9em;
 }
 
 /* ── Reasoning / Thinking ────────────────────────────────────────────── */

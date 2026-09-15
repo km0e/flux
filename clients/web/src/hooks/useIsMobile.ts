@@ -11,6 +11,16 @@ import { useEffect, useState } from 'react';
 
 const QUERY = '(max-width: 767.5px)';
 
+/** The one breakpoint, exported for event-time probes. */
+export const MOBILE_QUERY = QUERY;
+
+/** Event-time viewport probe — callback closures (Escape handling) must
+ * read the CURRENT regime, never a render-time frozen value. jsdom-safe:
+ * without matchMedia it reports false (desktop). */
+export function isMobileViewport(): boolean {
+  return typeof matchMedia === 'function' && matchMedia(QUERY).matches;
+}
+
 export function useIsMobile(): boolean {
   const [isMobile, setIsMobile] = useState(
     () => typeof matchMedia === 'function' && matchMedia(QUERY).matches,

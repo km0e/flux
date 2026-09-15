@@ -24,6 +24,7 @@ import { ProviderSwitchDialog } from './ProviderSwitchDialog';
 import { appendUserMessage, appendInterjectedMessage, markInterrupt, discardInterrupt } from '../services/stream-handler';
 import { Button } from './ui';
 import { Tooltip } from './ui/tooltip';
+import { useCoveredByDrawer } from '../hooks/useCoveredByDrawer';
 import { cn } from '../lib/cn';
 
 const CONN_BANNER: Record<'connecting' | 'disconnected' | 'failed', string> = {
@@ -74,6 +75,7 @@ export function ChatView(): React.ReactElement {
   const streaming = useFlux((s) => (cid ? (s.streaming[cid] ?? false) : false));
   const readonly = useFlux((s) => (cid ? (s.readonlyChats[cid] ?? false) : false));
   const connStatus = useFlux((s) => s.connectionStatus);
+  const coveredByDrawer = useCoveredByDrawer();
   const [switching, setSwitching] = useState(false);
 
   const banner = connStatus === 'connected' ? null : CONN_BANNER[connStatus];
@@ -116,7 +118,10 @@ export function ChatView(): React.ReactElement {
   };
 
   return (
-    <div id="main" className="flex min-h-0 min-w-0 flex-1 flex-col">
+    // Inert while the mobile drawer covers this column: keyboard/AT focus
+    // must not walk behind the overlay. The TopBar (outside this element)
+    // stays reachable — its toggle is how the drawer closes.
+    <div id="main" inert={coveredByDrawer} className="flex min-h-0 min-w-0 flex-1 flex-col">
       {/* The conversation's header row: identity + per-chat usage. */}
       <ChatHeader />
       <div className="flex min-h-0 flex-1 flex-col px-4 pb-3">

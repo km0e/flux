@@ -1,3 +1,4 @@
+use crate::ansi::strip_ansi;
 use crate::format_command_output;
 use crate::subprocess::RunError;
 use flux_core::{CoreError, ToolCtx};
@@ -76,7 +77,17 @@ impl BashTool {
         // An interrupted command's killed status (exit code -9) is noise —
         // the kernel marks the interruption; keep just the partial output.
         let status = (!ctx.cancel.is_cancelled()).then_some(output.status);
-        let result = format_command_output(&output.stdout, &output.stderr, status);
+        // ANSI hygiene (bash-only by design): the runner's pipes already
+        // suppress color for isatty-aware programs, but programs that emit
+        // unconditionally (e.g. tracing subscribers with the ansi feature)
+        // still leak escape codes into the transcript. File tools do NOT
+        // strip — the model edits from their content, and a strip would
+        // desync it from the file on disk.
+        let raw_stdout = String::from_utf8_lossy(&output.stdout);
+        let raw_stderr = String::from_utf8_lossy(&output.stderr);
+        let stdout = strip_ansi(&raw_stdout);
+        let stderr = strip_ansi(&raw_stderr);
+        let result = format_command_output(stdout.as_ref(), stderr.as_ref(), status);
 
         Ok(result)
     }
@@ -207,6 +218,38 @@ mod tests {
             .await;
         assert!(result.is_ok());
         assert!(result.unwrap().contains("hello"));
+    }
+
+    #[tokio::test]
+    async fn bash_strips_ansi_from_output() {
+        // Programs that emit color unconditionally (ignoring the capture
+        // pipes) must not leak escape codes into the transcript: the tool
+        // result, the model context and the UI card all see clean text.
+        let dir = tempdir().unwrap();
+        let tool = BashTool::new();
+        let result = tool
+            .call(
+                cmd_args("printf '\\033[32m INFO\\033[0m ready\\r\\n'; printf '\\033]0;title\\033\\\\done'"),
+                boundary_ctx(dir.path()),
+            )
+            .await
+            .unwrap();
+        assert!(
+            result.contains(" INFO ready"),
+            "text preserved, got: {result}"
+        );
+        assert!(
+            result.contains("done"),
+            "osc-stripped text preserved, got: {result}"
+        );
+        assert!(
+            !result.contains('\x1b'),
+            "no escape bytes remain, got: {result}"
+        );
+        assert!(
+            !result.contains('\x07'),
+            "no control noise remains, got: {result}"
+        );
     }
 
     #[cfg(unix)]

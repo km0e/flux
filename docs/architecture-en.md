@@ -257,7 +257,7 @@ graph TB
 - **glob bases on `current_dir`**: glob's search root = the ctx's `current_dir` (matching bash's shell-cwd semantics — after the model moves it with `state_set current_dir`, glob follows); bash runs at `ctx.current_dir` (empty → `InvalidArguments`, fail-closed).
 - **Agent Skills (skill_list / skill_read — progressive disclosure BY TOOLS)**: a skill = a self-contained capability package (a directory with a `SKILL.md`: frontmatter `name`/`description`, body = instructions). **Nothing is injected into any prompt** — the tools' own descriptions (visible to the model via every request's `tools` array) are the only always-visible surface; `skill_list` scans fresh on every call (no restart semantics) and `skill_read` loads the content. Locations: project `<workdir>/.flux/skills/` (inside the boundary) + global `~/.flux/skills/` (user-installed trusted content, the same trust tier as MCP servers launched from the DB); on a name collision the project entry wins. `skill_read` is **name-keyed** — the model never passes a path; the requested file resolves relative to the skill root under a strict containment check (canonicalize + prefix, symlink-safe), so a read structurally cannot leave the skill directory;
 - **Output overflow buffer (centralized, anchored, persisted)**: every tool result passes `Chat::bounded_output` — outputs over 8000 chars are written through to the per-chat `buf_entries` table (anchored to the producing tool call's id, `ToolCtx::call_id`) and the tool returns a head + a reference that IS the call id; the model reads the rest with `buf_read {ref, offset, limit}` (char-based paging, pages ≤ 6000 chars, no recursion; read-through to the store). **Never overwritten, no generation wipe**: the reference is self-describing and stable (the transcript carries the same id), so entries survive engine rebuilds AND process restarts with no shell handoff (the in-memory buffer is gone; the store is the only truth); the lifetime equals the chat's lifetime (a transcript only grows — there is no archive boundary, no GC); a FORK copies the entries of the calls its copied transcript carries, keeping `buf_read` references resolvable in the fork; chat deletion cascades. Entries capped at 1M chars. Per-tool caps merged into the central layer: bash 8KB / read_file line-length and total truncation removed; grep keeps its match-window shaping + 500 matches; glob 500. grep paths relative to the search root; read_file footer `end` = last shown line (inclusive), fires at exactly `limit+1` lines remaining;
-- **MCP**: the free function `connect_with_peer` spawns external MCP servers (stdio child processes, 30s init timeout), wraps their tool lists as `McpToolWrapper` (60s per-call timeout); `McpSession` is an RAII keep-alive guard. The launch list lives in the server database (UI-managed, persist-first + live apply: the `McpManager` holds the global registry reference — a successful connect registers, a removal unregisters exactly the owner's names, then engine rebuilds fan out; a spawn failure rides the ack inline and the row stays, a startup failure is skipped with a warning — the UI stays reachable to fix it).
+- **MCP**: the free function `connect_with_peer` connects external MCP servers (`McpServerConfig` enum: `Stdio` child processes / `Http` Streamable HTTP endpoints — rmcp's `StreamableHttpClientTransport`, custom headers carry auth, `allow_stateless` accepts session-less servers, `reinit_on_expired_session` re-handshakes in-transport on a 404 session expiry; proxies come from the process environment `http_proxy`/`https_proxy`/`all_proxy` — loopback targets are EXEMPT, a `127.0.0.1`/`localhost` endpoint is a local server, the stdio tier's sibling, and must never ride a proxy; 30s init timeout), wraps their tool lists as `McpToolWrapper` (60s per-call timeout); `McpSession` is an RAII keep-alive guard shared by both transports (`QuitReason::Closed` under HTTP is a dropped connection, reconnected by the same supervisor's capped backoff — the transport's in-transport SSE retry / session recovery is the INNER self-healing ring, the supervisor the outer one). The launch list lives in the server database (UI-managed, persist-first + live apply: the `McpManager` holds the global registry reference — a successful connect registers, a removal unregisters exactly the owner's names, then engine rebuilds fan out; a connect failure rides the ack inline and the row stays, a startup failure is skipped with a warning — the UI stays reachable to fix it).
 
 ### 3.5 Tool Context & Boundary (no approvals)
 
@@ -554,25 +554,36 @@ graph TB
 - **First-party dialogs**: `services/dialogs.ts` exposes promise-shaped `confirmDelete`/`pickNewChat`/`askQuestion`;
  `components/dialogs/impl.tsx` registers the UI implementations at mount (Radix dialogs
  rendered into a body overlay, each with its own React root; the model's question mounts an
- inline card into the active pane). Tests inject stubs via `setDialogImpls`;
+ inline card into the QUESTION'S OWN pane, addressed by chat id — a question for a background
+ chat pushes a discoverability toast, and pane wipes/deletions resolve the pending answer as
+ DISMISSED through a pending-question registry (`services/dialogs`) instead of hanging; a
+ newer question for the same chat supersedes the older one). Tests inject stubs via `setDialogImpls`;
 - **Control primitives** (`components/ui.tsx`): Button/IconButton/TextField/Badge/Spinner are
  the single styling authority for controls — utilities consuming only the `--fx-*` token
  theme plus the radius/control-height scales; custom base rules live inside `@layer base` so
  utilities override as intended (the `@layer base` global `:focus-visible` ring yields to
  `focus:outline-none`); a global `:focus-visible` ring and unified overlay scrollbars;
 - **TopBar**: the GLOBAL bar — toggle, brand mark, streaming indicator (click = cancel),
- connection (reconnect button when down), a Settings dropdown (Providers / MCP / Skills —
- one menu, not three peer icons), theme toggle (auto/dark/light, persisted; applied
- pre-paint by an inline script in index.html — no flash); it carries NO chat state and
- never appears/disappears with the active chat;
+ connection (reconnect button when down), the MCP notice bell (unread badge; ring capped
+ at 100), the Settings gear opening ONE dialog whose tabs hold Providers / MCP / Skills
+ (lazily loaded chunk; the last section is remembered within the session), theme toggle
+ (auto/dark/light, persisted; applied pre-paint by an inline script in index.html — no
+ flash); it carries NO chat state and never appears/disappears with the active chat;
 - **ChatHeader**: the conversation's header row above the message column — chat name,
  mono workdir, the dock's DIRECT toggle (PanelRight, aria-pressed; also
  Ctrl/Cmd+J), per-chat token usage; chat identity lives here, not in the TopBar;
 - **Collapsible sidebar**: Ctrl/Cmd+B + in-bar toggle; the mobile regime (<768px, the one breakpoint) runs it as an overlay drawer;
- desktop drag-resize 160–360px persisted via prefs. **The width is authored in app.css's
+ backdrop closes it, a selection auto-collapses, **Escape closes it** (the drawer is the
+ topmost surface — before a round cancel), and while open the covered content (`#main`,
+ `#right-dock`) goes **`inert`** (`useCoveredByDrawer`: keyboard/AT focus cannot walk behind
+ the overlay; the TopBar stays reachable — its toggle is how the drawer closes); desktop
+ drag-resize — or arrow keys ±24px on the separator — 160–360px persisted via prefs. **The width is authored in app.css's
  shell-layout section** (`#sidebar { width: var(--fx-sidebar-w) }` + `overflow: hidden`) —
  tab switches, new chats, or tree loads can never reflow it (pinned by app.test); during a drag the width rides the CSS var directly (zero
- React renders per pointermove), the store commit + persist happen on pointerup. A new-chat
+ React renders per pointermove), the store commit + persist happen on pointerup, and a
+ pointercancel commits the last moved width and detaches (cancel events carry no meaningful
+ coordinates); drag and keyboard share one spec (`useEdgeResize`/`edgeResizeKeys`), and the
+ separator exposes splitter ARIA (tabindex + `aria-valuenow/min/max`). A new-chat
  button + client-side filter (name/workdir substring); row actions (rename/delete) live in a
  Radix DropdownMenu ⋯ menu (danger-styled delete); rename is an inline controlled input
  (Enter/blur commit, Esc revert);
@@ -592,7 +603,7 @@ graph TB
  → 1–3 char glyph + a **fixed decorative palette** — deliberately not `--fx-*` tokens so
  language identity never drifts with the theme, the GitHub linguist tradeoff; chip background =
  same color at 16% color-mix);
-- **The right dock is TABBED (multi-file + terminal)**: file tabs open editor-style, each closed independently; the Terminal tab is pinned last; closing the DOCK merely hides it (tabs persist, reopening restores the view);
+- **The right dock is TABBED (multi-file + terminal)**: file tabs open editor-style, each closed independently; the Terminal tab is pinned last; closing the DOCK merely hides it (tabs persist, reopening restores the view); the strip is a real ARIA tablist (roving tabindex — only the active tab sits in the Tab order, Left/Right/Home/End move and activate, `aria-controls`/`aria-labelledby` naming the single swapping tabpanel);
 - **Docked — it pushes the conversation**: a flex sibling of the chat column inside the body row, not an overlay — widening it pushes the conversation left, never covering content; `max-w-[calc(100vw-280px)]` clamps the persisted width, and the mobile regime flips it to a FULL-SCREEN sheet (<768px — the persisted desktop width is neutralized); a left-edge drag handle (window pointer listeners + `body.resizing-preview` + persist on release; arrow keys nudge ±24px on the separator); file bodies are always `white-space: pre` with horizontal scrolling;
 - **Terminal tabs (multiple; added via the "+" / the empty-state action)**: terminal fonts are bundled (JetBrains Mono + the Nerd Font Mono icon patch, OFL-1.1 — `styles/fonts.css` local()-first, icons load on glyph demand; `scripts/fetch-fonts` refreshes; the same file declares the IBM Plex Sans UI face); sessions live in `services/terminal.ts` (Map per tab), switching tabs/chats unmounts the panel while the PTY and the xterm buffer keep going; sessionStorage remembers the terminal id LIST per chat so a refresh restores every tab and re-attaches to the same PTYs within the grace window (the server replays its 256 KiB scrollback); the socket is self-healing — any unexpected end (backend restarts included) re-enters a 1s→2s→4s→5s-capped backoff retry, and a stale term id falls back to a fresh server-side spawn, except for the two terminal states (killed tabs, exited shells); the exit loop is closed server-side: shell exit → `exited` frame + entry removal + socket close (reader-EOF and wait are unified through one finish path — select!'s random arm can no longer drop the frame); each tab closes independently (killing its PTY); a CLEAN shell exit (code 0)
 auto-closes its tab — the PTY is already gone server-side and the exit was a
@@ -611,7 +622,8 @@ exit-code status line for diagnosis; the theme re-reads the `--fx-*` tokens on `
  DOM (bubbles/tool cards with their status rail/prose/hljs via the `--fx-code-*` voice
  + the empty-state prompt card `.fx-empty-*`) — utilities cannot reach it. Control
  primitives in `components/ui.tsx` own control styling.
-- **Mobile regime (<768px, the one breakpoint)**: sidebar = overlay drawer, dock = full-screen
+- **Mobile regime (<768px, the one breakpoint)**: sidebar = overlay drawer (covered content
+ goes `inert` while open), dock = full-screen
  sheet; viewport chain `100vh → 100dvh → var(--fx-vvh)` (`core/viewport.ts` publishes the
  visualViewport height — iOS keyboards overlay the layout viewport, so dvh alone buries the
  composer; Chrome Android rides `interactive-widget=resizes-content`); `viewport-fit=cover` +
@@ -625,10 +637,8 @@ exit-code status line for diagnosis; the theme re-reads the `--fx-*` tokens on `
 
 ### 4.2 State Management
 
-A zustand store `useFlux` (`core/state.ts`,): `chats`, `activeChatId`, `connectionStatus`, `reasoningStates`, `usage`, `workspacePath`, `streaming`, `scrollBtnVisible`, `loadedChatId`, `readonlyChats` (read-only mark from busy degradation — drives the viewer bar), `toasts` (unified error stack, `pushToast`/`dismissToast` — kind+text dedupe + cap 4), `sidebarOpen`/`sidebarWidth` (collapsible sidebar, persisted in localStorage via `core/prefs.ts`), `dockOpen`/`openFiles`/`activeDockTab` (the right dock: visibility, multi-file tabs, active tab), `previewWidth` (dock width, persisted in prefs), `providers`/`providerModels`/
-`providerProbeErrors` (the registry + its probed model catalogs and failure marks —
-the Providers dialog probes, the pickers read), `mcpServers` (the MCP launch-list
-summary). Terminal sessions do NOT go through the store (high-frequency I/O) — they live in a per-chat Map in `services/terminal.ts`. Components subscribe via selectors (`useFlux((s) => s.chats)`); the imperative services read/write through `useFlux.getState` and store actions — store actions own the derived logic (`setStreaming` converges the scroll button, `deleteChat` prunes every per-chat record). **`DispatchContext.state` must be wired as a getter** — zustand `setState` replaces the state object, so a snapshot taken at mount would read stale fields forever. High-frequency streaming data (deltas, DOM) does **not** go through the store — it flows through the imperative channel.
+A zustand store `useFlux` (`core/state.ts`,): `chats`, `activeChatId`, `connectionStatus`, `usage`, `streaming`, `scrollBtnVisible`, `loadedChatId`, `readonlyChats` (read-only mark from busy degradation — drives the viewer bar), `leaseSwitch` (a lease handover in flight — suppresses the In-use badge flicker on the departed row), `toasts` (unified error stack, `pushToast`/`dismissToast` — kind+text dedupe + cap 4), `sidebarOpen`/`sidebarWidth` (collapsible sidebar, persisted in localStorage via `core/prefs.ts`), `dockOpen`/`openFiles`/`activeDockTab` (the right dock: visibility, multi-file tabs, active tab), `previewWidth` (dock width, persisted in prefs), `providers`/`providerModels`/
+`providerProbeErrors`/`savedModels` (the registry + its probed model catalogs and failure marks + the LOCAL saved models — pickers read saved first, then the catalog), `mcpServers`/`mcpNotices`/`mcpNoticesUnread` (the MCP launch list + the notice bell's ring), `skills`, `roundArtifacts` (per-chat current-round artifacts), `backgroundEvents` (background attention for the document title — the "(n)" prefix; only hidden-tab events count). **`document.title` is a state surface** (`services/title.ts`): `(n) {chat name|Flux} — working… — Flux`, written on state transitions only (one transition-gated subscription in mount); the counter clears when the page becomes visible again. **Composer drafts** (`services/drafts.ts`): switching conversations no longer loses the half-typed message — pending text is saved when the composer unmounts (a switch away) and restored on return (a fork's redo-turn prefill wins), keyed by chat id, LRU-capped at 64, write-through to sessionStorage (a page reload restores too); writes only on save/clear, deletion paths prune by id. Terminal sessions do NOT go through the store (high-frequency I/O) — they live in a per-chat Map in `services/terminal.ts`. Components subscribe via selectors (`useFlux((s) => s.chats)`); the imperative services read/write through `useFlux.getState` and store actions — store actions own the derived logic (`setStreaming` converges the scroll button, `deleteChat` prunes every per-chat record). **`DispatchContext.state` must be wired as a getter** — zustand `setState` replaces the state object, so a snapshot taken at mount would read stale fields forever. High-frequency streaming data (deltas, DOM) does **not** go through the store — it flows through the imperative channel.
 
 ### 4.3 Streaming render (rAF-coalesced + structural anti-jump)
 
@@ -702,7 +712,7 @@ thinking creates a new block, and text resuming after thinking starts a fresh bu
 | tsc --noEmit | Frontend-wide type check (`pnpm run build` runs it first) |
 | vitest + jsdom + RTL | Unit tests. jsdom gaps are patched in `src/test/setup.ts` (ResizeObserver, PointerEvent, pointer capture, scrollIntoView) |
 
-Connection management (`ConnectConnection`): the session-scoped Subscribe stream anchors the identity (the stored token rides the open — adoption in the handshake; ready = authoritative identity + leases); stream elements translate onto the existing handler vocabulary (R2 snapshot reconciliation: gated content strictly below the snapshot's seq is dropped, type-scoped); ClientMessages translate onto the ChatService RPCs (lease-gate statuses synthesize the error frames — the handlers stay transport-blind). Reconnection: exponential backoff 2s→30s (5 retries), a `connecting` guard prevents concurrent connects, sends made while detached flush after ready; half-open detection = the frame deadline (90s vs the server's 30s keepalives).
+Connection management (`ConnectConnection`): the session-scoped Subscribe stream anchors the identity (the stored token rides the open — adoption in the handshake; ready = authoritative identity + leases); stream elements translate onto the existing handler vocabulary (R2 snapshot reconciliation: gated content strictly below the snapshot's seq is dropped, type-scoped); ClientMessages translate onto the ChatService RPCs (lease-gate statuses synthesize the error frames — the handlers stay transport-blind). Reconnection: exponential backoff 2s→30s (5 retries), a `connecting` guard prevents concurrent connects. The send gate rides a STREAM-ATTACHED flag (set by `ready`; cleared by connect/disconnect/dispose) — sends during the disconnect window and the connect window queue and flush in order after ready (the banner's "queued messages will be sent on reconnect" is delivered by the implementation); an in-flight send that loses the stream re-queues on a bare transport failure (definitive statuses still map to their error frames), and the flush loop carries an attachment guard (failed sends re-queue themselves, so the loop cannot spin). Half-open detection = the frame deadline (90s vs the server's 30s keepalives).
 
 ## 5. Design-Decision Index
 
