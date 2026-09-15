@@ -20,12 +20,12 @@ import { createClient } from '@connectrpc/connect';
 import { createGrpcWebTransport } from '@connectrpc/connect-web';
 import { FileSystemService, FsEntryKind, GitStatus } from '../gen/flux/v1/fs_pb';
 import { readStoredSessionId } from './session';
-import type { McpState, McpToolRegistration } from './types';
+import type { McpKind, McpState, McpToolRegistration } from './types';
 import { ProviderService } from '../gen/flux/v1/providers_pb';
 import { ModelService } from '../gen/flux/v1/models_pb';
 import { McpService } from '../gen/flux/v1/mcp_pb';
 import { SkillService } from '../gen/flux/v1/skills_pb';
-import { McpState as ProtoMcpState, SkillSource } from '../gen/flux/v1/common_pb';
+import { McpState as ProtoMcpState, McpKind as ProtoMcpKind, SkillSource } from '../gen/flux/v1/common_pb';
 import { ChatService } from '../gen/flux/v1/chats_pb';
 import { EventService } from '../gen/flux/v1/events_pb';
 import type { FsEntry, FsListing, FsContent } from './types';
@@ -289,15 +289,23 @@ export function mcpStateOf(state: ProtoMcpState): McpState {
   }
 }
 
+/** Map the wire McpKind enum onto the UI-side union. */
+export function mcpKindOf(kind: ProtoMcpKind): McpKind {
+  return kind === ProtoMcpKind.HTTP ? 'http' : 'stdio';
+}
+
 /** Fetch the MCP launch list and publish it into the store. */
 export async function grpcFetchMcpServers(): Promise<void> {
   const resp = await mcpClient.listServers({}, { timeoutMs: 8000, ...auth() });
   useFlux.setState({
     mcpServers: resp.servers.map((s) => ({
       id: s.id,
+      kind: mcpKindOf(s.kind),
       command: s.command,
       args: s.args,
       env_keys: s.envKeys,
+      url: s.url,
+      header_keys: s.headerKeys,
       state: mcpStateOf(s.state),
       tool_names: s.toolNames,
     })),
@@ -306,16 +314,22 @@ export async function grpcFetchMcpServers(): Promise<void> {
 
 export async function grpcAddMcpServer(input: {
   id: string;
+  kind: McpKind;
   command: string;
   args: string[];
   env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
 }): Promise<{ error?: string; results: McpToolRegistration[] }> {
   const resp = await mcpClient.addServer(
     {
       id: input.id.trim(),
+      kind: input.kind === 'http' ? ProtoMcpKind.HTTP : ProtoMcpKind.STDIO,
       command: input.command.trim(),
       args: input.args,
       env: input.env,
+      url: input.url.trim(),
+      headers: input.headers,
     },
     { timeoutMs: 15000, ...auth() },
   );

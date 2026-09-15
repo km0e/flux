@@ -1,7 +1,11 @@
 //! Flux MCP client: bridge external MCP servers into Flux agents.
 //!
-//! This crate spawns MCP servers as child processes (via `rmcp`'s stdio transport),
-//! fetches their tool lists, and exposes those tools as [`flux_core::Tool`] objects.
+//! This crate connects external MCP servers — either spawned as child
+//! processes (rmcp's stdio transport) or reached as remote Streamable HTTP
+//! endpoints — fetches their tool lists, and exposes those tools as
+//! [`flux_core::Tool`] objects. Everything downstream of the connect
+//! (handshake, tool wrapping, notifications, session lifetime) is
+//! transport-agnostic.
 
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -13,22 +17,35 @@ use async_trait::async_trait;
 use flux_core::{CoreError, Tool, ToolCtx};
 use rmcp::model::{CallToolRequestParams, CallToolResult, ClientInfo, ContentBlock};
 use rmcp::service::{MaybeSendFuture, NotificationContext, RoleClient};
-use rmcp::transport::TokioChildProcess;
+use rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig;
+use rmcp::transport::{
+    IntoTransport, StreamableHttpClientTransport, TokioChildProcess, TransportAdapterIdentity,
+};
 use rmcp::{ClientHandler, Peer};
-use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
-/// Configuration for an MCP server that should be launched as a child process.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct McpServerConfig {
-    /// Executable to run.
-    pub command: String,
-    /// Arguments passed to the executable.
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// Extra environment variables.
-    #[serde(default)]
-    pub env: HashMap<String, String>,
+/// How flux connects to one external MCP server — the per-server connect
+/// config, carried from the store row (mapped in flux-server) into the
+/// transport build here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum McpServerConfig {
+    /// A child process flux spawns and talks to over stdio.
+    Stdio {
+        /// Executable to run.
+        command: String,
+        /// Arguments passed to the executable.
+        args: Vec<String>,
+        /// Extra environment variables (the child inherits NOTHING else).
+        env: HashMap<String, String>,
+    },
+    /// A remote Streamable HTTP endpoint.
+    Http {
+        /// The endpoint URL (e.g. `https://example.com/mcp`).
+        url: String,
+        /// Headers sent with every request — auth rides here as an
+        /// ordinary header (e.g. `Authorization: Bearer …`).
+        headers: HashMap<String, String>,
+    },
 }
 
 /// Errors that can occur when connecting to or calling an MCP server.
@@ -37,6 +54,14 @@ pub enum McpError {
     /// Failed to spawn the child process.
     #[error("failed to spawn MCP server: {0}")]
     Spawn(#[from] std::io::Error),
+
+    /// A header name/value failed to parse (HTTP transport config).
+    #[error("invalid MCP HTTP header: {0}")]
+    Header(#[from] http::header::InvalidHeaderName),
+
+    /// A header value failed to parse (HTTP transport config).
+    #[error("invalid MCP HTTP header value: {0}")]
+    HeaderValue(#[from] http::header::InvalidHeaderValue),
 
     /// Failed to initialize the MCP session.
     #[error("MCP initialization failed: {0}")]
@@ -332,7 +357,8 @@ fn apply_mcp_env(cmd: &mut Command, env: &HashMap<String, String>) {
     }
 }
 
-/// Spawn and connect to a single MCP server.
+/// Spawn and connect to a single MCP server (stdio), or open a Streamable
+/// HTTP session (HTTP).
 ///
 /// Returns the session (its `quit()` is the death signal; Drop cancels),
 /// an external cancel capability (a closure over the same inner token —
@@ -365,15 +391,70 @@ pub async fn connect_with_peer(
     ),
     McpError,
 > {
-    let mut command = Command::new(&config.command);
-    command
-        .args(&config.args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
-    apply_mcp_env(&mut command, &config.env);
+    // The two branches differ ONLY in transport construction — the
+    // handshake, tool listing, notification wiring and session plumbing
+    // below are transport-agnostic (shared via `finish_connect`).
+    match config {
+        McpServerConfig::Stdio { command, args, env } => {
+            let mut command = Command::new(command);
+            command
+                .args(args)
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::inherit());
+            apply_mcp_env(&mut command, env);
+            let transport = TokioChildProcess::new(command)?;
+            finish_connect(transport, notices).await
+        }
+        McpServerConfig::Http { url, headers } => {
+            // Header names/values are validated here so a malformed user
+            // config is a clean config error, not a mid-handshake surprise.
+            let custom: HashMap<http::header::HeaderName, http::header::HeaderValue> = headers
+                .iter()
+                .map(|(k, v)| {
+                    Ok((
+                        http::header::HeaderName::from_bytes(k.as_bytes())?,
+                        http::header::HeaderValue::from_str(v)?,
+                    ))
+                })
+                .collect::<Result<_, McpError>>()?;
+            let mut cfg = StreamableHttpClientTransportConfig::with_uri(url.clone())
+                .custom_headers(custom)
+                // A 404 session-expired reply triggers the transport's own
+                // re-initialize + retry — the inner self-healing ring; the
+                // supervisor stays the outer one (real outages).
+                .reinit_on_expired_session(true);
+            // Accept servers that never assign an MCP-Session-Id (stateless
+            // deployments) — field-set, not a builder method, in rmcp 3.3.
+            cfg.allow_stateless = true;
+            // `from_config` builds rmcp's tuned default client: no idle
+            // pooling (Linux Delayed-ACK stalls) and no redirects (so
+            // custom headers can never leak to a redirect target).
+            let transport = StreamableHttpClientTransport::from_config(cfg);
+            finish_connect(transport, notices).await
+        }
+    }
+}
 
-    let transport = TokioChildProcess::new(command)?;
+/// The transport-agnostic tail of [`connect_with_peer`]: serve the
+/// client session over any transport, list the tools, wire the
+/// notification paths, and assemble the session handle.
+async fn finish_connect<T, E>(
+    transport: T,
+    notices: Option<tokio::sync::mpsc::UnboundedSender<ServerNotice>>,
+) -> Result<
+    (
+        McpSession,
+        Arc<dyn Fn() + Send + Sync>,
+        Peer<RoleClient>,
+        Vec<rmcp::model::Tool>,
+    ),
+    McpError,
+>
+where
+    T: IntoTransport<RoleClient, E, TransportAdapterIdentity>,
+    E: std::error::Error + Send + Sync + 'static,
+{
     let handler = NoticeClientHandler {
         sink: notices.clone(),
     };
@@ -476,35 +557,34 @@ mod tests {
     // ── McpServerConfig ──
 
     #[test]
-    fn config_fields_preserve_values() {
-        let cfg = McpServerConfig {
+    fn stdio_config_fields_preserve_values() {
+        let cfg = McpServerConfig::Stdio {
             command: "npx".into(),
             args: vec!["-y".into(), "@scope/server".into()],
             env: HashMap::from([("KEY".into(), "val".into())]),
         };
-        assert_eq!(cfg.command, "npx");
-        assert_eq!(cfg.args, vec!["-y", "@scope/server"]);
-        assert_eq!(cfg.env.get("KEY"), Some(&"val".to_string()));
-    }
-
-    #[test]
-    fn config_serialize_roundtrip() {
-        let cfg = McpServerConfig {
-            command: "npx".into(),
-            args: vec!["-y".into(), "@scope/server".into()],
-            env: HashMap::from([("KEY".into(), "val".into())]),
+        let McpServerConfig::Stdio { command, args, env } = cfg else {
+            panic!("expected the Stdio variant");
         };
-        let json = serde_json::to_string(&cfg).unwrap();
-        let back: McpServerConfig = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.command, "npx");
-        assert_eq!(back.args, vec!["-y", "@scope/server"]);
-        assert_eq!(back.env.get("KEY"), Some(&"val".to_string()));
+        assert_eq!(command, "npx");
+        assert_eq!(args, vec!["-y", "@scope/server"]);
+        assert_eq!(env.get("KEY"), Some(&"val".to_string()));
     }
 
     #[test]
-    fn config_default_is_empty() {
-        let cfg = McpServerConfig::default();
-        assert!(cfg.command.is_empty());
+    fn http_config_fields_preserve_values() {
+        let cfg = McpServerConfig::Http {
+            url: "https://example.com/mcp".into(),
+            headers: HashMap::from([("Authorization".into(), "Bearer tok".into())]),
+        };
+        let McpServerConfig::Http { url, headers } = cfg else {
+            panic!("expected the Http variant");
+        };
+        assert_eq!(url, "https://example.com/mcp");
+        assert_eq!(
+            headers.get("Authorization"),
+            Some(&"Bearer tok".to_string())
+        );
     }
 
     // ── McpError ──
@@ -539,6 +619,15 @@ mod tests {
     fn mcp_error_timeout_display() {
         let err = McpError::Timeout(30);
         assert!(err.to_string().contains("30s"));
+    }
+
+    #[test]
+    fn mcp_error_header_display() {
+        // A header NAME with illegal characters is a clean config error.
+        let err: McpError = http::header::HeaderName::from_bytes(b"bad header\n")
+            .unwrap_err()
+            .into();
+        assert!(err.to_string().contains("invalid MCP HTTP header"));
     }
 
     // ── extract_text_from_result ──
@@ -598,16 +687,20 @@ mod tests {
         // in the shell, and the child is arbitrary `npx -y`-downloaded
         // code. The child's env must be exactly the config.env keys,
         // nothing from the parent.
-        let cfg = McpServerConfig {
+        let cfg = McpServerConfig::Stdio {
             command: "/bin/sh".into(),
             args: vec!["-c".into(), "env".into()],
             env: HashMap::from([("ALLOWED_BY_USER".into(), "yes".into())]),
         };
-        let mut cmd = tokio::process::Command::new(&cfg.command);
-        cmd.args(&cfg.args)
+        let (command, args, env) = match cfg {
+            McpServerConfig::Stdio { command, args, env } => (command, args, env),
+            _ => unreachable!(),
+        };
+        let mut cmd = tokio::process::Command::new(&command);
+        cmd.args(&args)
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
-        apply_mcp_env(&mut cmd, &cfg.env);
+        apply_mcp_env(&mut cmd, &env);
         let out = cmd.output().await.unwrap();
         let text = String::from_utf8_lossy(&out.stdout);
         assert!(

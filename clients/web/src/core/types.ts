@@ -123,11 +123,21 @@ export interface RoundArtifact {
   source?: 'shell' | 'mcp';
 }
 
+/** How flux connects to one registered MCP server. */
+export type McpKind = 'stdio' | 'http';
+
 export interface McpServerSummary {
   id: string;
+  kind: McpKind;
+  /** Executable to run (stdio rows; empty for http). */
   command: string;
   args: string[];
   env_keys: string[];
+  /** The Streamable HTTP endpoint (http rows; empty for stdio). */
+  url: string;
+  /** Header NAMES for the HTTP transport — values never leave the
+   * server. */
+  header_keys: string[];
   state: McpState;
   /** Tool names the live session registered — empty when no live
    * session (distinguish via state). */

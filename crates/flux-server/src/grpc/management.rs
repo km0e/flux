@@ -268,9 +268,12 @@ impl McpService for McpManagement {
                 .into_iter()
                 .map(|s| flux_proto::flux::v1::McpServerSummary {
                     id: s.id,
+                    kind: s.kind,
                     command: s.command,
                     args: s.args,
                     env_keys: s.env_keys,
+                    url: s.url,
+                    header_keys: s.header_keys,
                     state: s.state,
                     tool_names: s.tool_names,
                 })
@@ -283,11 +286,23 @@ impl McpService for McpManagement {
         request: Request<AddServerRequest>,
     ) -> Result<tonic::Response<AddServerResponse>, tonic::Status> {
         let req = request.into_inner();
+        let kind = match flux_proto::flux::v1::McpKind::try_from(req.kind) {
+            Ok(flux_proto::flux::v1::McpKind::Stdio) => flux_store::mcp::McpServerKind::Stdio,
+            Ok(flux_proto::flux::v1::McpKind::Http) => flux_store::mcp::McpServerKind::Http,
+            // Unspecified defaults to the deployed-majority transport; the
+            // stdio validation then demands a command.
+            Ok(flux_proto::flux::v1::McpKind::Unspecified) | Err(_) => {
+                flux_store::mcp::McpServerKind::Stdio
+            }
+        };
         let row = flux_store::mcp::McpServerRow {
             id: req.id.clone(),
+            kind,
             command: req.command,
             args: req.args,
             env: req.env.into_iter().collect::<HashMap<String, String>>(),
+            url: req.url,
+            headers: req.headers.into_iter().collect::<HashMap<String, String>>(),
         };
         let m = management::add_mcp_server(&self.state, &self.mcp, row).await;
         let ok = m.error.is_none();

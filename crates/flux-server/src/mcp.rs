@@ -4,20 +4,23 @@
 //! The list lives ONLY in the server database (the server has no config
 //! file); every mutation is persist-FIRST (the row is the launch list — a
 //! failed connect is retried at the next process start), then applied to
-//! the running process: the manager spawns/connects the child, registers
-//! its tools into the global registry (reserved-name + collision rules),
-//! and tracks the exact names it registered so a removal unregisters
-//! precisely those. After a successful apply the caller fans an engine
-//! rebuild out to the chats (each respawn re-assembles from the CURRENT
-//! global registry), so a change lands without a process restart.
+//! the running process: the manager connects the server (a stdio child
+//! process or a remote Streamable HTTP endpoint, per the row's kind),
+//! registers its tools into the global registry (reserved-name +
+//! collision rules), and tracks the exact names it registered so a
+//! removal unregisters precisely those. After a successful apply the
+//! caller fans an engine rebuild out to the chats (each respawn
+//! re-assembles from the CURRENT global registry), so a change lands
+//! without a process restart.
 //!
-//! Summaries redact the env values (keys only) — secrets parity with the
-//! provider api_key.
+//! Summaries redact the env AND header values (keys only) — secrets
+//! parity with the provider api_key.
 
 use flux_core::{Tool, ToolRegistry};
 use flux_proto::flux::v1::McpServerSummary;
 use flux_proto::flux::v1::McpState;
 use flux_store::Store;
+use flux_store::mcp::McpServerKind;
 use flux_store::mcp::McpServerRow;
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
@@ -128,8 +131,9 @@ pub type Connect = Arc<
 pub type ConnectFuture =
     std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<ConnectedServer>> + Send>>;
 
-/// The production connect: spawn the child, handshake, list tools, wrap
-/// each as a registry tool bound to the peer.
+/// The production connect: connect per the row's kind (spawn the stdio
+/// child or open the HTTP session), handshake, list tools, wrap each as
+/// a registry tool bound to the peer.
 pub fn production_connect() -> Connect {
     Arc::new(|cfg, notices| {
         Box::pin(async move {
@@ -152,6 +156,36 @@ pub fn production_connect() -> Connect {
             })
         })
     })
+}
+
+/// Map a store row onto the per-server connect config — the kind
+/// discriminator is the store's; shape validation happened at the write
+/// point (`add`), so this is a plain projection.
+fn config_for(row: &McpServerRow) -> flux_mcp::McpServerConfig {
+    match row.kind {
+        McpServerKind::Stdio => flux_mcp::McpServerConfig::Stdio {
+            command: row.command.clone(),
+            args: row.args.clone(),
+            env: row.env.clone(),
+        },
+        McpServerKind::Http => flux_mcp::McpServerConfig::Http {
+            url: row.url.clone(),
+            headers: row.headers.clone(),
+        },
+    }
+}
+
+/// The human-readable connect target for logs (the launch line vs the
+/// endpoint URL).
+fn connect_target(row: &McpServerRow) -> String {
+    match row.kind {
+        McpServerKind::Stdio => [row.command.as_str()]
+            .into_iter()
+            .chain(row.args.iter().map(String::as_str))
+            .collect::<Vec<_>>()
+            .join(" "),
+        McpServerKind::Http => row.url.clone(),
+    }
 }
 
 /// The live MCP surface: launch-list rows are the truth on disk, this map
@@ -251,12 +285,8 @@ impl McpManager {
             return;
         };
         let connects = rows.into_iter().map(|row| async move {
-            tracing::info!(id = %row.id, command = %row.command, "connecting to MCP");
-            let cfg = flux_mcp::McpServerConfig {
-                command: row.command.clone(),
-                args: row.args.clone(),
-                env: row.env.clone(),
-            };
+            tracing::info!(id = %row.id, target = %connect_target(&row), "connecting to MCP");
+            let cfg = config_for(&row);
             let result = (self.connect)(cfg, self.wire_notices(&row.id)).await;
             (row, result)
         });
@@ -297,12 +327,7 @@ impl McpManager {
         if self.entries.read().unwrap().contains_key(id) {
             anyhow::bail!("MCP server '{id}' is already running");
         }
-        let cfg = flux_mcp::McpServerConfig {
-            command: row.command.clone(),
-            args: row.args.clone(),
-            env: row.env.clone(),
-        };
-        let connected = (self.connect)(cfg, self.wire_notices(id)).await?;
+        let connected = (self.connect)(config_for(row), self.wire_notices(id)).await?;
         let outcomes = register_tools(&self.registry, id, &connected.tools);
         self.entries.write().unwrap().insert(
             id.to_string(),
@@ -501,12 +526,7 @@ impl McpManager {
                     tracing::info!(id = %id, "MCP entry removed during backoff; supervisor exiting");
                     return;
                 };
-                let cfg = flux_mcp::McpServerConfig {
-                    command: row.command.clone(),
-                    args: row.args.clone(),
-                    env: row.env.clone(),
-                };
-                match (self.connect)(cfg, self.wire_notices(&id)).await {
+                match (self.connect)(config_for(&row), self.wire_notices(&id)).await {
                     Ok(connected) => {
                         let names = registered_names(&register_tools(
                             &self.registry,
@@ -618,18 +638,55 @@ fn register_tools(
 
 /// Validate + persist a new MCP server. Persist-first: a successful return
 /// means the row is durable (the live apply is the caller's next step).
+/// Shape validation is kind-specific and happens HERE (the write point) —
+/// the connect path trusts the row's shape.
 pub(crate) async fn add(
     store: &Arc<Store>,
     mut row: McpServerRow,
 ) -> anyhow::Result<McpServerSummary> {
     row.id = row.id.trim().to_string();
-    row.command = row.command.trim().to_string();
     anyhow::ensure!(!row.id.is_empty(), "MCP server id must not be empty");
-    anyhow::ensure!(
-        !row.command.is_empty(),
-        "MCP server '{}' command must not be empty",
-        row.id
-    );
+    match row.kind {
+        McpServerKind::Stdio => {
+            row.command = row.command.trim().to_string();
+            anyhow::ensure!(
+                !row.command.is_empty(),
+                "MCP server '{}' command must not be empty",
+                row.id
+            );
+        }
+        McpServerKind::Http => {
+            row.url = row.url.trim().to_string();
+            anyhow::ensure!(
+                !row.url.is_empty(),
+                "MCP server '{}' url must not be empty",
+                row.id
+            );
+            anyhow::ensure!(
+                row.command.is_empty(),
+                "MCP server '{}' is an http row and must not carry a command",
+                row.id
+            );
+            let parsed = reqwest::Url::parse(&row.url)
+                .map_err(|e| anyhow::anyhow!("MCP server '{}' url is invalid: {e}", row.id))?;
+            anyhow::ensure!(
+                matches!(parsed.scheme(), "http" | "https"),
+                "MCP server '{}' url must be http(s), got '{}'",
+                row.id,
+                parsed.scheme()
+            );
+            anyhow::ensure!(
+                parsed.host_str().is_some(),
+                "MCP server '{}' url must carry a host",
+                row.id
+            );
+            anyhow::ensure!(
+                row.headers.keys().all(|k| !k.trim().is_empty()),
+                "MCP server '{}' has an empty header name",
+                row.id
+            );
+        }
+    }
     if !store.insert_mcp_server(&row).await? {
         anyhow::bail!("duplicate MCP server id: {}", row.id);
     }
@@ -670,11 +727,19 @@ pub(crate) async fn summaries(
 fn summary(row: McpServerRow, state: McpState, tool_names: Vec<String>) -> McpServerSummary {
     let mut env_keys: Vec<String> = row.env.into_keys().collect();
     env_keys.sort();
+    let mut header_keys: Vec<String> = row.headers.into_keys().collect();
+    header_keys.sort();
     McpServerSummary {
         id: row.id,
+        kind: match row.kind {
+            McpServerKind::Stdio => flux_proto::flux::v1::McpKind::Stdio as i32,
+            McpServerKind::Http => flux_proto::flux::v1::McpKind::Http as i32,
+        },
         command: row.command,
         args: row.args,
         env_keys,
+        url: row.url,
+        header_keys,
         state: state as i32,
         tool_names,
     }
@@ -719,10 +784,25 @@ mod tests {
 
     fn row(id: &str, command: &str) -> McpServerRow {
         McpServerRow {
-            id: id.to_string(),
-            command: command.to_string(),
             args: vec!["-y".to_string()],
             env: HashMap::from([("B_KEY".to_string(), "v2".to_string())]),
+            ..McpServerRow::stdio(id, command)
+        }
+    }
+
+    fn http_row(id: &str) -> McpServerRow {
+        McpServerRow {
+            headers: HashMap::from([("Authorization".to_string(), "Bearer tok".to_string())]),
+            ..McpServerRow::http(id, "https://example.com/mcp")
+        }
+    }
+
+    /// The fake connects key their scripted tool sets by the row's connect
+    /// target (command for stdio, url for http).
+    fn cfg_target(cfg: &flux_mcp::McpServerConfig) -> &str {
+        match cfg {
+            flux_mcp::McpServerConfig::Stdio { command, .. } => command,
+            flux_mcp::McpServerConfig::Http { url, .. } => url,
         }
     }
 
@@ -767,7 +847,7 @@ mod tests {
         Arc::new(
             move |cfg: flux_mcp::McpServerConfig,
                   _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
-                let tools = map.get(&cfg.command).cloned();
+                let tools = map.get(cfg_target(&cfg)).cloned();
                 let quits = Arc::clone(&quits);
                 Box::pin(async move {
                     let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
@@ -793,7 +873,7 @@ mod tests {
         Arc::new(
             move |cfg: flux_mcp::McpServerConfig,
                   _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
-                let tools = map.get(&cfg.command).cloned();
+                let tools = map.get(cfg_target(&cfg)).cloned();
                 Box::pin(async move {
                     let tools = tools.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
                     Ok(ConnectedServer {
@@ -862,6 +942,94 @@ mod tests {
         // Duplicate id rejects.
         let err = add(&store, row("fs", "npx")).await.unwrap_err();
         assert!(err.to_string().contains("duplicate MCP server id"));
+    }
+
+    #[tokio::test]
+    async fn add_validates_http_rows() {
+        let store = test_store().await;
+        // A valid http row lands — the summary carries header KEYS only.
+        let sum = add(&store, http_row("remote")).await.unwrap();
+        assert_eq!(sum.id, "remote");
+        assert_eq!(sum.header_keys, vec!["Authorization"]);
+        assert_eq!(sum.url, "https://example.com/mcp");
+        // Empty url / non-http(s) scheme / missing host reject.
+        let err = add(
+            &store,
+            McpServerRow {
+                url: "   ".into(),
+                ..http_row("bad")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("url must not be empty"));
+        let err = add(
+            &store,
+            McpServerRow {
+                url: "ftp://x/mcp".into(),
+                ..http_row("bad")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("must be http(s)"));
+        // An http row carrying a command is rejected (kind shape mismatch).
+        let err = add(
+            &store,
+            McpServerRow {
+                command: "npx".into(),
+                ..http_row("bad")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("must not carry a command"));
+        // An empty header name is rejected.
+        let err = add(
+            &store,
+            McpServerRow {
+                headers: HashMap::from([("  ".to_string(), "v".to_string())]),
+                ..http_row("bad")
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("empty header name"));
+        // The row was never written for the rejected shapes.
+        assert_eq!(
+            summaries(&store, &HashMap::new(), &HashMap::new())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn apply_add_connects_http_rows_through_the_same_machinery() {
+        let store = test_store().await;
+        let registry = Arc::new(ToolRegistry::new());
+        // The fake keys by the connect target — an http row's target is
+        // its URL, proving the kind discriminator survives the row→config
+        // mapping.
+        let (manager, _rx) = McpManager::new(
+            Arc::clone(&registry),
+            fake_connect(vec![(
+                "https://example.com/mcp",
+                fake_tools(&["remote_tool"]),
+            )]),
+        );
+        let manager = Arc::new(manager);
+        add(&store, http_row("remote")).await.unwrap();
+        let outcomes = manager
+            .apply_add("remote", &http_row("remote"))
+            .await
+            .unwrap();
+        assert_eq!(outcomes.len(), 1);
+        assert!(outcomes[0].registered);
+        assert!(registry.get("remote_tool").is_some());
+        assert!(manager.apply_remove("remote").unwrap());
+        assert!(registry.get("remote_tool").is_none());
     }
 
     #[tokio::test]
@@ -1084,7 +1252,7 @@ mod tests {
         let connect: Connect = Arc::new(
             move |cfg: flux_mcp::McpServerConfig,
                   _notices: tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice>| {
-                let entry = map.get(&cfg.command).cloned();
+                let entry = map.get(cfg_target(&cfg)).cloned();
                 Box::pin(async move {
                     let (tools, relist) = entry.ok_or_else(|| anyhow::anyhow!("spawn failed"))?;
                     Ok(ConnectedServer {

@@ -6,6 +6,13 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 > parses this file); the full docs live in [`README.md`](README.md) and
 > [`docs/architecture.md`](docs/architecture.md).
 
+## [Unreleased]
+
+### Added
+
+- **MCP over Streamable HTTP** — the MCP launch list gains a second transport: rows are now `stdio` (local child processes, unchanged) or `http` (a remote Streamable HTTP endpoint, the spec's other standard transport and the registry's dominant remote form). One row shape (`mcp_servers.kind`), one connect config (`McpServerConfig::Stdio | Http`), and the ENTIRE downstream machinery untouched — handshake, tool wrapping, `tools/list_changed` dual-path notices, the notice gate, the self-healing supervisor (a dropped HTTP session is the same `QuitReason::Closed` the backoff loop already respawns; the transport's own SSE-retry + session-recovery + re-init-on-404 ring absorbs transient blips inside), tool registration and engine rebuilds. HTTP rows carry `url` + `headers` — auth rides as an ordinary header (e.g. `Authorization`); header VALUES live in the database and never leave the server (secrets parity with env values / api_key), wire summaries carry `header_keys` only. Stateless servers accepted (`allow_stateless`); proxies come from the server process environment (`http_proxy`/`https_proxy`/`all_proxy`) with zero config.
+- **MCP panel transport picker** — the add form opens with a two-segment transport control (Command / URL in the app's segmented-tab language): stdio keeps the command/args/env fields, http shows url + headers (`KEY=VALUE` per line, the env parser's grammar). Rows and previews render the connect line per kind (launch line vs endpoint URL) with header-key badges.
+
 ## [0.1.3] - 2026-09-15
 
 ### Added

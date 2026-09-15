@@ -14,8 +14,9 @@ service McpService {
   // The registered servers, sorted by id (env values redacted — keys only).
   rpc ListServers(ListServersRequest) returns (ListServersResponse);
 
-  // Register an MCP server (spawned as a child process). The list lives
-  // in the server database (the server has no config file).
+  // Register an MCP server (a stdio child process or a Streamable HTTP
+  // endpoint). The list lives in the server database (the server has no
+  // config file).
   rpc AddServer(AddServerRequest) returns (AddServerResponse);
 
   // Remove a registered server (unregisters exactly the tools it
@@ -38,6 +39,16 @@ message AddServerRequest {
   // The environment block for the child process. The VALUES never leave
   // the server after this call (summaries carry keys only).
   map<string, string> env = 4;
+  // Which transport the row uses. STDIO reads command/args/env; HTTP
+  // reads url/headers.
+  flux.v1.McpKind kind = 5;
+  // The Streamable HTTP endpoint URL (MCP_KIND_HTTP only; e.g.
+  // https://example.com/mcp).
+  string url = 6;
+  // Headers sent with every HTTP request — auth rides here as an
+  // ordinary header (e.g. Authorization). The VALUES never leave the
+  // server after this call (summaries carry keys only).
+  map<string, string> headers = 7;
 }
 
 message AddServerResponse {

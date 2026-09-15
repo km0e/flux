@@ -1348,6 +1348,9 @@ async fn mcp_add_remove_manages_the_launch_list() {
             command: bogus.into(),
             args: vec!["-y".into(), "@scope/server".into()],
             env: std::collections::HashMap::from([("TOKEN".into(), "secret".into())]),
+            kind: flux_proto::flux::v1::McpKind::Stdio as i32,
+            url: String::new(),
+            headers: Default::default(),
         },
         Some(s.token()),
     )
@@ -1379,6 +1382,9 @@ async fn mcp_add_remove_manages_the_launch_list() {
             command: bogus.into(),
             args: vec![],
             env: Default::default(),
+            kind: flux_proto::flux::v1::McpKind::Stdio as i32,
+            url: String::new(),
+            headers: Default::default(),
         },
         Some(s.token()),
     )
@@ -1396,6 +1402,9 @@ async fn mcp_add_remove_manages_the_launch_list() {
             command: "  ".into(),
             args: vec![],
             env: Default::default(),
+            kind: flux_proto::flux::v1::McpKind::Stdio as i32,
+            url: String::new(),
+            headers: Default::default(),
         },
         Some(s.token()),
     )
@@ -1454,6 +1463,9 @@ async fn mcp_rows_survive_restart_and_a_broken_command_never_blocks_startup() {
                 command: bogus.into(),
                 args: vec![],
                 env: Default::default(),
+                kind: flux_proto::flux::v1::McpKind::Stdio as i32,
+                url: String::new(),
+                headers: Default::default(),
             },
             Some(s.token()),
         )

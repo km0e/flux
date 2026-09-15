@@ -25,7 +25,7 @@
  */
 
 import { clients } from './grpc';
-import { mcpStateOf } from './grpc';
+import { mcpKindOf, mcpStateOf } from './grpc';
 import { readStoredSessionId, storeSessionId } from './session';
 import type {
   ChatInfo,
@@ -204,9 +204,12 @@ export function elementToFrame(el: SubscribeResponse): ServerMessage | null {
         type: 'mcp_servers',
         servers: k.value.servers.map((s) => ({
           id: s.id,
+          kind: mcpKindOf(s.kind),
           command: s.command,
           args: s.args,
           env_keys: s.envKeys,
+          url: s.url,
+          header_keys: s.headerKeys,
           state: mcpStateOf(s.state),
           tool_names: s.toolNames,
         })),

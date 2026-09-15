@@ -3,13 +3,14 @@
  * dialog.
  *
  * The list lives in the server database (the server has no config file);
- * a mutation is persist-first and applied LIVE: the server spawns the
- * child, registers its tools, and rebuilds the running conversation
- * engines so every chat's next round sees the fresh tool set (a live
- * round finishes first — a spawn failure rides the ack inline while the
- * row stays and is retried at the next server start). Summaries carry
- * env KEYS only — values never leave the server; editing an entry =
- * delete + re-add.
+ * a mutation is persist-first and applied LIVE: the server connects the
+ * server (a local stdio child process, or a remote Streamable HTTP
+ * endpoint via the form's transport picker), registers its tools, and
+ * rebuilds the running conversation engines so every chat's next round
+ * sees the fresh tool set (a live round finishes first — a failed
+ * connect rides the ack inline while the row stays and is retried at the
+ * next server start). Summaries carry env and header KEYS only — values
+ * never leave the server; editing an entry = delete + re-add.
  *
  * Desktop: master-detail — a selection rail (a persistent "+ New server"
  * row above the entries) and a detail pane that either previews the
@@ -32,8 +33,9 @@ import { useEffect, useState } from 'react';
 import { useFlux } from '../../core/state';
 import { addMcpServer, fetchMcpServers, removeMcpServer } from '../../services/mcp';
 import { useIsMobile } from '../../hooks/useIsMobile';
+import { cn } from '../../lib/cn';
 import { Badge, Button, Spinner, TextArea, TextField } from '../ui';
-import type { McpServerSummary, McpState, McpToolRegistration } from '../../core/types';
+import type { McpKind, McpServerSummary, McpState, McpToolRegistration } from '../../core/types';
 import {
   DetailPane,
   DialogHint,
@@ -94,20 +96,54 @@ function parseEnv(text: string): { env: Record<string, string>; error?: string }
   return { env };
 }
 
+/** The kind picker — a two-segment control in the app's segmented-tab
+ * language (inset track, the active segment raised). */
+function KindPicker(props: { kind: McpKind; onChange: (k: McpKind) => void }): React.ReactElement {
+  const seg = (k: McpKind, label: string, title: string) => (
+    <button
+      type="button"
+      aria-pressed={props.kind === k}
+      title={title}
+      onClick={() => props.onChange(k)}
+      className={cn(
+        'flex-1 cursor-pointer rounded-sm px-2.5 py-1 font-medium text-muted select-none',
+        'transition-colors duration-fast hover:text-fg',
+        props.kind === k && 'bg-elev text-fg shadow-sm',
+      )}
+    >
+      {label}
+    </button>
+  );
+  return (
+    <div role="group" aria-label="Transport" className="flex gap-0.5 rounded-md bg-inset p-0.5">
+      {seg('stdio', 'Command', 'Spawn a local child process over stdio')}
+      {seg('http', 'URL', 'Connect to a remote Streamable HTTP endpoint')}
+    </div>
+  );
+}
+
 /** The creation form — shared verbatim by the desktop detail pane and the
- * mobile stacked layout. */
+ * mobile stacked layout. The stdio fields (command/args/env) and the http
+ * fields (url/headers) are kind-conditional; the shared parts (id, kind,
+ * submit) stay put so switching kind keeps the typed id. */
 function McpForm(props: {
   id: string;
+  kind: McpKind;
   command: string;
   argsText: string;
   envText: string;
+  urlText: string;
+  headersText: string;
   adding: boolean;
   canAdd: boolean;
   addError: string | null;
   setId: (v: string) => void;
+  setKind: (k: McpKind) => void;
   setCommand: (v: string) => void;
   setArgsText: (v: string) => void;
   setEnvText: (v: string) => void;
+  setUrlText: (v: string) => void;
+  setHeadersText: (v: string) => void;
   onSubmit: () => void;
 }): React.ReactElement {
   return (
@@ -123,36 +159,66 @@ function McpForm(props: {
         <FormField label="Id" hint="e.g. filesystem" className="flex-1">
           <TextField value={props.id} onChange={(e) => props.setId(e.target.value)} placeholder="filesystem" />
         </FormField>
-        <FormField label="Command" hint="the executable to spawn" className="flex-[1.8]">
-          <TextField
-            value={props.command}
-            onChange={(e) => props.setCommand(e.target.value)}
-            placeholder="npx"
-            className="font-mono text-sm"
-          />
+        <FormField label="Transport" hint="local child process, or remote Streamable HTTP" className="flex-1">
+          <KindPicker kind={props.kind} onChange={props.setKind} />
         </FormField>
       </div>
-      <FormField label="Arguments" hint="one per line">
-        <TextArea
-          aria-label="Arguments"
-          rows={4}
-          placeholder={'-y\n@modelcontextprotocol/server-filesystem\n/path/to/workspace'}
-          value={props.argsText}
-          onChange={(e) => props.setArgsText(e.target.value)}
-        />
-      </FormField>
-      <FormField
-        label="Environment"
-        hint="KEY=VALUE per line — the child gets ONLY these (nothing inherited); values are stored server-side and never echoed back"
-      >
-        <TextArea
-          aria-label="Environment"
-          rows={3}
-          placeholder={'SOME_VAR=value\nAPI_TOKEN=… (the value never leaves the server)'}
-          value={props.envText}
-          onChange={(e) => props.setEnvText(e.target.value)}
-        />
-      </FormField>
+      {props.kind === 'stdio' ? (
+        <>
+          <FormField label="Command" hint="the executable to spawn">
+            <TextField
+              value={props.command}
+              onChange={(e) => props.setCommand(e.target.value)}
+              placeholder="npx"
+              className="font-mono text-sm"
+            />
+          </FormField>
+          <FormField label="Arguments" hint="one per line">
+            <TextArea
+              aria-label="Arguments"
+              rows={4}
+              placeholder={'-y\n@modelcontextprotocol/server-filesystem\n/path/to/workspace'}
+              value={props.argsText}
+              onChange={(e) => props.setArgsText(e.target.value)}
+            />
+          </FormField>
+          <FormField
+            label="Environment"
+            hint="KEY=VALUE per line — the child gets ONLY these (nothing inherited); values are stored server-side and never echoed back"
+          >
+            <TextArea
+              aria-label="Environment"
+              rows={3}
+              placeholder={'SOME_VAR=value\nAPI_TOKEN=… (the value never leaves the server)'}
+              value={props.envText}
+              onChange={(e) => props.setEnvText(e.target.value)}
+            />
+          </FormField>
+        </>
+      ) : (
+        <>
+          <FormField label="URL" hint="the Streamable HTTP endpoint (http/https)">
+            <TextField
+              value={props.urlText}
+              onChange={(e) => props.setUrlText(e.target.value)}
+              placeholder="https://example.com/mcp"
+              className="font-mono text-sm"
+            />
+          </FormField>
+          <FormField
+            label="Headers"
+            hint="KEY=VALUE per line — sent with every request; auth rides here (Authorization=Bearer …); values are stored server-side and never echoed back"
+          >
+            <TextArea
+              aria-label="Headers"
+              rows={3}
+              placeholder={'Authorization=Bearer … (the value never leaves the server)'}
+              value={props.headersText}
+              onChange={(e) => props.setHeadersText(e.target.value)}
+            />
+          </FormField>
+        </>
+      )}
       {props.addError && <span className="text-2xs break-all text-danger">{props.addError}</span>}
       <div className="flex justify-end">
         <Button variant="primary" type="submit" disabled={!props.canAdd}>
@@ -209,17 +275,26 @@ function ToolChips({ server }: { server: McpServerSummary }): React.ReactElement
   return <span className="text-2xs text-faint">{word}</span>;
 }
 
+/** The connect line of one entry — the launch line for stdio, the
+ * endpoint URL for http. */
+function connectLine(s: { kind: McpKind; command: string; args: string[]; url: string }): string {
+  return s.kind === 'http' ? s.url : [s.command, ...s.args].join(' ');
+}
+
 /** Mobile row: compact, with the inline actions the stacked layout needs. */
 function McpRow(props: {
   id: string;
+  kind: McpKind;
   command: string;
   args: string[];
+  url: string;
   envKeys: string[];
+  headerKeys: string[];
   state: McpState;
   toolNames: string[];
   onRemove: () => Promise<string | undefined>;
 }): React.ReactElement {
-  const launch = [props.command, ...props.args].join(' ');
+  const launch = connectLine(props);
   return (
     <RowShell>
       <div className="flex items-center gap-2">
@@ -227,6 +302,11 @@ function McpRow(props: {
         <StateBadge state={props.state} />
         {props.envKeys.map((k) => (
           <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
+            {k}
+          </Badge>
+        ))}
+        {props.headerKeys.map((k) => (
+          <Badge key={k} title={`header ${k} (the value never leaves the server)`}>
             {k}
           </Badge>
         ))}
@@ -252,7 +332,7 @@ function McpPreview(props: {
 }): React.ReactElement {
   const server = useFlux((s) => s.mcpServers.find((x) => x.id === props.id));
   if (!server) return <EmptyState>Server removed.</EmptyState>;
-  const launch = [server.command, ...server.args].join(' ');
+  const launch = connectLine(server);
   return (
     <div className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4">
       <div className="flex items-center gap-2">
@@ -260,6 +340,11 @@ function McpPreview(props: {
         <StateBadge state={server.state} />
         {server.env_keys.map((k) => (
           <Badge key={k} title={`env key ${k} (the value never leaves the server)`}>
+            {k}
+          </Badge>
+        ))}
+        {server.header_keys.map((k) => (
+          <Badge key={k} title={`header ${k} (the value never leaves the server)`}>
             {k}
           </Badge>
         ))}
@@ -275,9 +360,9 @@ function McpPreview(props: {
 }
 
 const HINT =
-  'External tool servers spawned as child processes at server start, stored in the server ' +
-  'database. Env values never leave the server after saving (keys only); editing an entry ' +
-  '= remove + re-add.';
+  'External tool servers — local child processes or remote Streamable HTTP endpoints — ' +
+  'connected at server start and stored in the server database. Env and header values never ' +
+  'leave the server after saving (keys only); editing an entry = remove + re-add.';
 
 export function McpPanel(): React.ReactElement {
   const servers = useFlux((s) => s.mcpServers);
@@ -287,9 +372,12 @@ export function McpPanel(): React.ReactElement {
   // The creation-form draft lives at panel level: switching the selection
   // never loses a half-typed entry.
   const [id, setId] = useState('');
+  const [kind, setKind] = useState<McpKind>('stdio');
   const [command, setCommand] = useState('');
   const [argsText, setArgsText] = useState('');
   const [envText, setEnvText] = useState('');
+  const [urlText, setUrlText] = useState('');
+  const [headersText, setHeadersText] = useState('');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
   // The fresh add's per-tool outcomes (the debugging surface — a skipped
@@ -304,10 +392,14 @@ export function McpPanel(): React.ReactElement {
     fetchMcpServers();
   }, []);
 
-  const canAdd = id.trim() !== '' && command.trim() !== '' && !adding;
+  const canAdd =
+    id.trim() !== '' && !adding && (kind === 'stdio' ? command.trim() !== '' : urlText.trim() !== '');
 
   const runAdd = () => {
-    const { env, error } = parseEnv(envText);
+    // The kind-conditional key=value block: env for stdio, headers for
+    // http — the same parser, one mental model.
+    const kvText = kind === 'stdio' ? envText : headersText;
+    const { env: kv, error } = parseEnv(kvText);
     if (error) {
       setAddError(error);
       return;
@@ -315,7 +407,15 @@ export function McpPanel(): React.ReactElement {
     setAdding(true);
     setAddError(null);
     const added = id.trim();
-    void addMcpServer({ id, command, args: parseLines(argsText), env }).then(
+    void addMcpServer({
+      id,
+      kind,
+      command,
+      args: kind === 'stdio' ? parseLines(argsText) : [],
+      env: kind === 'stdio' ? kv : {},
+      url: urlText,
+      headers: kind === 'http' ? kv : {},
+    }).then(
       ({ error: addErr, results }) => {
         setAdding(false);
         if (addErr) {
@@ -330,6 +430,8 @@ export function McpPanel(): React.ReactElement {
         setCommand('');
         setArgsText('');
         setEnvText('');
+        setUrlText('');
+        setHeadersText('');
         const skipped = results.filter((r) => !r.registered).length;
         useFlux
           .getState()
@@ -376,9 +478,12 @@ export function McpPanel(): React.ReactElement {
                 <McpRow
                   key={s.id}
                   id={s.id}
+                  kind={s.kind}
                   command={s.command}
                   args={s.args}
+                  url={s.url}
                   envKeys={s.env_keys}
+                  headerKeys={s.header_keys}
                   state={s.state}
                   toolNames={s.tool_names}
                   onRemove={() => remove(s.id)}
@@ -389,16 +494,22 @@ export function McpPanel(): React.ReactElement {
         </div>
         <McpForm
           id={id}
+          kind={kind}
           command={command}
           argsText={argsText}
           envText={envText}
+          urlText={urlText}
+          headersText={headersText}
           adding={adding}
           canAdd={canAdd}
           addError={addError}
           setId={setId}
+          setKind={setKind}
           setCommand={setCommand}
           setArgsText={setArgsText}
           setEnvText={setEnvText}
+          setUrlText={setUrlText}
+          setHeadersText={setHeadersText}
           onSubmit={runAdd}
         />
       </div>
@@ -418,7 +529,7 @@ export function McpPanel(): React.ReactElement {
               onClick={() => choose(s.id)}
               ariaLabel={`Select server ${s.id}`}
               title={s.id}
-              sub={[s.command, ...s.args].join(' ')}
+              sub={connectLine(s)}
             />
           ))}
           {servers.length === 0 && (
@@ -444,16 +555,22 @@ export function McpPanel(): React.ReactElement {
               </NoticeBar>
               <McpForm
                 id={id}
+                kind={kind}
                 command={command}
                 argsText={argsText}
                 envText={envText}
+                urlText={urlText}
+                headersText={headersText}
                 adding={adding}
                 canAdd={canAdd}
                 addError={addError}
                 setId={setId}
+                setKind={setKind}
                 setCommand={setCommand}
                 setArgsText={setArgsText}
                 setEnvText={setEnvText}
+                setUrlText={setUrlText}
+                setHeadersText={setHeadersText}
                 onSubmit={runAdd}
               />
             </>

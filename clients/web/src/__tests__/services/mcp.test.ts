@@ -26,21 +26,34 @@ describe('mcp service', () => {
     expect(vi.mocked(grpc.grpcFetchMcpServers)).toHaveBeenCalled();
   });
 
-  it('addMcpServer delegates with the launch triple (the inline error + per-tool results ride the promise)', async () => {
+  it('addMcpServer delegates the connect config (the inline error + per-tool results ride the promise)', async () => {
     await expect(
-      addMcpServer({ id: 'fs', command: 'npx', args: ['-y', '@mcp/fs'], env: { TOKEN: 'v' } }),
+      addMcpServer({
+        id: 'fs',
+        kind: 'stdio',
+        command: 'npx',
+        args: ['-y', '@mcp/fs'],
+        env: { TOKEN: 'v' },
+        url: '',
+        headers: {},
+      }),
     ).resolves.toEqual({ results: [] });
     expect(vi.mocked(grpc.grpcAddMcpServer)).toHaveBeenCalledWith({
       id: 'fs',
+      kind: 'stdio',
       command: 'npx',
       args: ['-y', '@mcp/fs'],
       env: { TOKEN: 'v' },
+      url: '',
+      headers: {},
     });
     vi.mocked(grpc.grpcAddMcpServer).mockResolvedValueOnce({
       error: 'failed to spawn',
       results: [],
     });
-    await expect(addMcpServer({ id: 'x', command: 'x', args: [], env: {} })).resolves.toEqual({
+    await expect(
+      addMcpServer({ id: 'x', kind: 'stdio', command: 'x', args: [], env: {}, url: '', headers: {} }),
+    ).resolves.toEqual({
       error: 'failed to spawn',
       results: [],
     });

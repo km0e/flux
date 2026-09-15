@@ -44,7 +44,7 @@ flowchart LR
  SRV["Transport + Session<br/>ServerState"]
  CHAT["Chat 循环<br/>(每对话一个 tokio task)"]
  STORE[("SQLite (WAL)")]
- MCP["MCP 子进程桥 (rmcp)"]
+ MCP["MCP 服务器桥 (rmcp)"]
  end
  SRV --> CHAT
  CHAT <--> STORE
@@ -112,7 +112,7 @@ graph LR
 | `flux-macros` | `#[derive(Tool)]` 过程宏：字段推断 JSON Schema + `call` 反序列化 |
 | `flux-provider` | OpenAI 兼容实现 + SSE 解析，实现 flux-core 的 `Provider` 会话工厂（实例按模型钉定；`begin` 开出 `Connection`） |
 | `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list / skill_read）+ 共享 subprocess 执行器 |
-| `flux-mcp` | MCP 客户端桥：启动外部 MCP 服务器子进程并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用）；接收 server 通知——`tools/list_changed` 走「通知钩子 + subscriptions/listen 订阅」双路径（覆盖 spec ≤ 2025-06-18 与 2026-07-28），`notifications/message` 日志转发到 UI |
+| `flux-mcp` | MCP 客户端桥：连接外部 MCP 服务器——本地 stdio 子进程或远程 Streamable HTTP 端点——并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用；headers/env 值永不离开服务端）；接收 server 通知——`tools/list_changed` 走「通知钩子 + subscriptions/listen 订阅」双路径（覆盖 spec ≤ 2025-06-18 与 2026-07-28），`notifications/message` 日志转发到 UI |
 | `flux-store` | SQLite 持久化（sqlx，WAL：chats / messages / state / providers / mcp_servers） |
 | `flux-loop` | 对话内核：纯状态机（`machine.rs`）+ 纯泵驱动（`runtime.rs`：消费输入、步进、按序转发事实）——零 I/O、零 trait 对象 |
 | `flux-chat` | 会话层·数据平面：单 chat 任务机制（`chat` 实体 / `domain` 状态与 state 工具 / `handle` 控制句柄 / `spawn` 装配 / `round` 轮次消费者（事实 fold + 飞行监督；Rebuild → 机器门原地重建，任务不退出）/ `tool_exec` 飞行监督库（无独立任务）/ `buf` 溢出缓冲（store 支撑）/ `question` 提问工具 / `reserved` 保留工具名检查）。只依赖 flux-core 端口（`OutputPort`），对控制平面无反向依赖 |
@@ -238,7 +238,7 @@ graph TB
  subgraph IMPL["实现来源"]
  BUILTIN["内置工具 (flux-tools)<br/>read_file · edit_file · write_file · replace_lines · list_directory<br/>grep · glob · bash<br/>skill_list · skill_read"]
  STATE["state_get / state_set<br/>(per-chat 注册表工具，绑定 StateManager)"]
- MCPT["MCP 工具 (flux-mcp)<br/>McpToolWrapper — rmcp 子进程桥"]
+ MCPT["MCP 工具 (flux-mcp)<br/>McpToolWrapper — rmcp 服务器桥"]
  end
  REG["ToolRegistry<br/>Arc&lt;dyn Tool&gt; · O(1) 按名查找"]
  CTX["ToolCtx (每调用)<br/>cancel · call_id<br/>workdir · current_dir（适配器填充）"]
@@ -258,7 +258,7 @@ graph TB
 - **glob 以 `current_dir` 为基**：glob 的搜索根 = ctx 的 `current_dir`（与 bash 的 shell cwd 语义一致——模型用 `state_set current_dir` 挪动后 glob 跟随）；bash 的 cwd = `ctx.current_dir`（空 → `InvalidArguments`，fail-closed）。
 - **Agent Skills（skill_list / skill_read，工具式渐进披露）**：skill = 自包含能力包（含 `SKILL.md` 的目录：frontmatter `name`/`description`，正文为指令）。**无任何 prompt 注入**——工具自身的 description（随每请求的 `tools` 数组对模型可见）是唯一常驻面；`skill_list` 每次调用即时扫描（无重启语义），`skill_read` 才加载内容。位置：项目 `<workdir>/.flux/skills/`（边界内）+ 全局 `~/.flux/skills/`（用户安装的可信内容，同 MCP 服务器的信任层级）；同名时项目覆盖全局。`skill_read` **按名寻址**——模型永不传路径，请求文件相对技能根做严格包含检查（canonicalize + 前缀，symlink 安全），读取结构上不可能离开技能目录；
 - **输出溢出缓冲（集中式、锚定、持久化）**：所有工具结果经 `Chat::bounded_output` 统一截断——超 8000 chars **写穿透传**至每-chat `buf_entries` 表（按产生它的 tool call id 锚定，`ToolCtx::call_id`），返回 head + 该 call id 引用；模型用 `buf_read {ref, offset, limit}`（字符制分页，页 ≤ 6000 chars，无递归；读穿 store）读取余下。**从不覆盖、无代际清空**：引用自描述且稳定（transcript 里的就是同一 id），跨引擎重建与进程重启可读，无需任何外壳传递（内存缓冲已删，store 是唯一真相）；生命周期 = chat 生命周期（transcript 只增不减，无归档边界，无需 GC）；fork 复制其副本携带的调用条目，`buf_read` 引用在 fork 内继续可读；chat 删除级联。entry ≤ 1M chars。per-tool 上限并入集中层：bash 8KB / read_file 行长与总量截断删除；grep 保留匹配窗口塑形 + 匹配数 500；glob 500 条。grep 路径以搜索根为基准；read_file 页脚 `end` 为最后展示行（含），恰好剩 `limit+1` 行时必触发；
-- **MCP**：自由函数 `connect_with_peer` 启动外部 MCP 服务器（stdio 子进程，30s 初始化超时），获取其工具列表包装为 `McpToolWrapper`（单次调用 60s 超时）；`McpSession` 为 RAII 保活守卫。启动列表在服务端数据库（UI 管理，persist-first + 即时应用：`McpManager` 持全局注册表引用——连接成功即注册、移除即按 owner 精确注销，随后扇出引擎重建；spawn 失败随 ack 内联、行保留，启动时以 warn 跳过、不阻塞——管理入口始终可用，可修改后重试）。
+- **MCP**：自由函数 `connect_with_peer` 连接外部 MCP 服务器（`McpServerConfig` 枚举：`Stdio` 子进程 / `Http` Streamable HTTP 端点——rmcp `StreamableHttpClientTransport`，自定义 header 携带鉴权，`allow_stateless` 接受无会话服务器、`reinit_on_expired_session` 在 404 会话过期时传输层内自愈重握手；代理随进程环境 `http_proxy/https_proxy/all_proxy` 自动生效；30s 初始化超时），获取其工具列表包装为 `McpToolWrapper`（单次调用 60s 超时）；`McpSession` 为 RAII 保活守卫（两传输共用，`QuitReason::Closed` 在 HTTP 下即连接断开，由同一 supervisor 退避重连——传输层内的 SSE 重试/会话恢复是内圈自愈，supervisor 是外圈）。启动列表在服务端数据库（UI 管理，persist-first + 即时应用：`McpManager` 持全局注册表引用——连接成功即注册、移除即按 owner 精确注销，随后扇出引擎重建；连接失败随 ack 内联、行保留，启动时以 warn 跳过、不阻塞——管理入口始终可用，可修改后重试）。
 
 ### 3.5 工具上下文与边界（无审批直接执行）
 

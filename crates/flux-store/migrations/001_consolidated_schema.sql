@@ -80,18 +80,23 @@ CREATE TABLE IF NOT EXISTS models (
     PRIMARY KEY (provider_id, model_id)
 );
 
--- MCP servers to launch as child processes. The ONLY home (the server
--- has no config file); the UI manages the rows (AddServer /
--- RemoveServer RPCs) — persist-first + LIVE apply: the manager spawns
--- and registers the tools immediately, and a self-healing supervisor
--- respawns a dead child. args/env are JSON (array / object) — env
--- VALUES are stored here but never leave the server over the wire
--- (secrets parity with api_key).
+-- MCP servers to connect to. The ONLY home (the server has no config
+-- file); the UI manages the rows (AddServer / RemoveServer RPCs) —
+-- persist-first + LIVE apply: the manager connects and registers the
+-- tools immediately, and a self-healing supervisor re-connects a dead
+-- session. Two transports share the table: kind='stdio' rows carry the
+-- child-process launch (command/args/env); kind='http' rows carry the
+-- Streamable HTTP endpoint (url/headers). args/env/headers are JSON —
+-- env/headers VALUES are stored here but never leave the server over
+-- the wire (secrets parity with api_key).
 CREATE TABLE IF NOT EXISTS mcp_servers (
     id      TEXT PRIMARY KEY,
-    command TEXT NOT NULL,
+    kind    TEXT NOT NULL DEFAULT 'stdio' CHECK (kind IN ('stdio', 'http')),
+    command TEXT NOT NULL DEFAULT '',
     args    TEXT NOT NULL DEFAULT '[]',
-    env     TEXT NOT NULL DEFAULT '{}'
+    env     TEXT NOT NULL DEFAULT '{}',
+    url     TEXT NOT NULL DEFAULT '',
+    headers TEXT NOT NULL DEFAULT '{}'
 );
 
 -- Buffered tool outputs — per-chat persistence for the overflow buffer.

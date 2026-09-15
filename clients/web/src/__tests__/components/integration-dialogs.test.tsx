@@ -214,9 +214,12 @@ describe('integration panels', () => {
       mcpServers: [
         {
           id: 'fs',
+          kind: 'stdio',
           command: 'npx',
           args: ['-y', '@mcp/fs'],
           env_keys: ['TOKEN'],
+          url: '',
+          header_keys: [],
           state: 'running',
           tool_names: ['fs_read', 'fs_write'],
         },

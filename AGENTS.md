@@ -24,7 +24,7 @@ It is built as a Cargo workspace:
 - [`flux-provider`](crates/flux-provider/) — OpenAI-compatible implementation + SSE client, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`).
 - [`flux-context`](crates/flux-context/) — pure scaffold data-production (no driver/trait coupling): the pluggable scaffold information blocks (`blocks.rs` compute engines + frequency bases), `build_scaffold_text` (project profile/tree/git/conventions/decisions), and project introspection (`detector.rs`: language/build/test detection; `collector.rs`: per-source info collectors; `git.rs`: change-frequency measurement; `.flux` project config). The information-collection system's growth point — may split into `flux-project` when it outgrows this layout.
 - [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, and skill tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
-- [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: spawns external MCP servers (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
+- [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: connects external MCP servers — stdio child processes OR remote Streamable HTTP endpoints (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
 - [`flux-store`](crates/flux-store/) — SQLite persistence layer (chats, messages, state, provider registry).
 - [`flux-loop`](crates/flux-loop/) — conversation kernel: pure state machine (`machine.rs`) + the single pump (`runtime.rs` — machine + two channels, zero I/O); the I/O vocabulary (`LoopInput`/`LoopFact`/`StreamEvent`/`StreamHandle`/`Connection`) and the tool/boundary contracts live in flux-core, the round consumer (which supervises the tool flights) is the flux-chat channel peer.
 - [`flux-session`](crates/flux-session/) — session layer, CONTROL plane: the chat manager (`ServerState` — global config, the chat cache hydrated from the store, the session identity registry), lease/viewers operations (`ops`), session identity objects (`Session`/`SessionRef` — opaque handles carrying the typed sink; lease/viewers keyed by handle, not string), session detach/resume/reap, the per-chat event router (mapping the kernel's WireEvents onto the proto stream elements), and task lifecycle. Depends on flux-chat and flux-proto; never the reverse.
@@ -75,7 +75,7 @@ flux/
 │ │ ├── src/
 │ │ │ ├── lib.rs # Store struct, migrations, open, vacuum
 │ │ │ ├── chats.rs # insert_chat, list_chats, delete_chat, rename_chat
-│ │ │ ├── mcp.rs # list/insert/delete MCP-server launch rows (the MCP launch list's ONLY home)
+│ │ │ ├── mcp.rs # list/insert/delete MCP-server connect rows (the MCP launch list's ONLY home; kind = stdio | http)
 │ │ ├── messages.rs # load_messages, append_messages
 │ │ │ ├── providers.rs # list_providers, insert_provider, delete_provider — the provider registry's ONLY home
 │ │ │ └── state.rs # load_state, save_state_entry
@@ -398,7 +398,7 @@ gap notices).
 | FileSystemService | FsList / FsRead | Workdir picker + explorer (git status per entry; inline errors; 256KB preview budget) |
 | ProviderService | ListProviders / GetModels / AddProvider / RemoveProvider | Registry (api_key never leaves); probe = GET /models (inline error) |
 | ModelService | ListModels / SaveModel / RemoveModel / SyncModels | LOCAL model registry (`params_json`/`meta_json` verbatim passthrough; models.dev auto-fill on create; matching chats rebuild) |
-| McpService | ListServers / AddServer / RemoveServer | Launch list (persist-first + live apply; apply failure rides the ack inline, row stays) |
+| McpService | ListServers / AddServer / RemoveServer | Launch list (persist-first + live apply; apply failure rides the ack inline, row stays); rows are stdio child processes OR Streamable HTTP endpoints (url + headers, header values never leave) |
 | SkillService | ListSkills / AddSkill / RemoveSkill | Global skills (immediate effect; chat_id scopes project skills, read-only) |
 
 **Subscribe stream elements** (`SubscribeResponse {chat_seq, chat_id, kind}` —
@@ -451,7 +451,7 @@ kernel, no lease gate (same-origin trust; a UI affordance for the human).
 - State: `load_state`, `save_state_entry`
 - Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 AddProvider/RemoveProvider RPC 管理，**先写库后改内存**）
 - Saved models: `list_models`, `upsert_model`（**只写 params 保留 meta**）, `update_model_meta`（**只写 meta 保留 params**）, `delete_model` —— 本地模型注册表的唯一家（`(provider_id, model_id)` 主键 + `params`/`meta` 两个写权分离的 JSON 列；provider 删除级联；UI 经 `model_save`/`model_remove`/`model_sync` 管理，models.dev 填充仅在创建/刷新路径写 `meta`）
-- MCP servers: `list_mcp_servers`, `insert_mcp_server`, `delete_mcp_server` —— MCP 启动列表的唯一家（启动时 McpManager 读行连接注册，UI 管理变更 **persist-first + 即时应用**，spawn 失败的行保留、下次启动重试）
+- MCP servers: `list_mcp_servers`, `insert_mcp_server`, `delete_mcp_server` —— MCP 启动列表的唯一家（kind = `stdio` 子进程启动三无组 / `http` Streamable HTTP 端点 url+headers；headers 值同 env 值：入库不上线。启动时 McpManager 读行连接注册，UI 管理变更 **persist-first + 即时应用**，连接失败的行保留、下次启动重试）
 - Buffered outputs: `save_buf_entry`, `load_buf_entry` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；生命周期 = chat 生命周期，fork 复制其副本携带的调用条目；chat 删除级联）
 - Called from `ServerState` and `Chat`. Async `sqlx::SqlitePool`, WAL mode.
 - Opens with `auto_vacuum = INCREMENTAL` ensured (a legacy NONE-mode database's one-time rebuild VACUUM runs at open, before the listener binds); hourly conditional `PRAGMA incremental_vacuum` (freelist ≥ 1000 pages) for maintenance — a short normal write transaction, never a whole-db VACUUM while serving.

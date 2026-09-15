@@ -134,10 +134,22 @@ message ModelCatalogEntry {
   optional uint64 context_length = 2;
 }
 
-// One registered MCP server — the launch triple EXCEPT the env values
-// (secrets parity with the provider api_key: only the KEYS leave).
+// How flux connects to one registered MCP server.
+enum McpKind {
+  MCP_KIND_UNSPECIFIED = 0;
+  // A child process flux spawns (command/args/env; stdio transport).
+  MCP_KIND_STDIO = 1;
+  // A remote Streamable HTTP endpoint (url/headers).
+  MCP_KIND_HTTP = 2;
+}
+
+// One registered MCP server — the connection config EXCEPT the secret
+// values (secrets parity with the provider api_key: only the KEYS of
+// env/headers leave; a stdio row carries the launch triple, an http row
+// the endpoint URL).
 message McpServerSummary {
   string id = 1;
+  // Executable to run (MCP_KIND_STDIO; empty for MCP_KIND_HTTP).
   string command = 2;
   repeated string args = 3;
   repeated string env_keys = 4;
@@ -151,6 +163,11 @@ message McpServerSummary {
   // Empty when no live session exists — distinguish that from
   // "connected but registered nothing" via `state`.
   repeated string tool_names = 6;
+  McpKind kind = 7;
+  // The Streamable HTTP endpoint (MCP_KIND_HTTP; empty for stdio).
+  string url = 8;
+  // Header NAMES for the HTTP transport — values never leave the server.
+  repeated string header_keys = 9;
 }
 
 // Live state of one MCP server (self-healing supervisor).

@@ -13,7 +13,7 @@
  * Depends: core/grpc.ts
  */
 import { grpcAddMcpServer, grpcFetchMcpServers, grpcRemoveMcpServer } from '../core/grpc';
-import type { McpToolRegistration } from '../core/types';
+import type { McpKind, McpToolRegistration } from '../core/types';
 import { log } from '../logger';
 
 export function fetchMcpServers(): void {
@@ -28,9 +28,12 @@ export function fetchMcpServers(): void {
  * Empty args/env are omitted on the wire. */
 export function addMcpServer(input: {
   id: string;
+  kind: McpKind;
   command: string;
   args: string[];
   env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
 }): Promise<{ error?: string; results: McpToolRegistration[] }> {
   return grpcAddMcpServer(input);
 }

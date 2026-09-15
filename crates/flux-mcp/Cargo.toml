@@ -7,7 +7,12 @@ license.workspace = true
 
 [dependencies]
 flux-core = { path = "../flux-core" }
-rmcp = { workspace = true, features = ["client", "transport-child-process"] }
+rmcp = { workspace = true, features = [
+    "client",
+    "transport-child-process",
+    "transport-streamable-http-client-reqwest",
+] }
+http = "1"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
@@ -16,4 +21,12 @@ tracing = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+# The Streamable HTTP loopback test hosts a real rmcp server (axum-mounted
+# StreamableHttpService) and connects to it through production_connect's
+# HTTP path — the features unify into the test build only.
+rmcp = { workspace = true, features = [
+    "server",
+    "transport-streamable-http-server",
+] }
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { workspace = true }
