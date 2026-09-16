@@ -61,3 +61,16 @@
   uses: actions/setup-node@v7
   with:
     node-version: 24
+
+# Prebuild the EMBEDDED UI as a VISIBLE step: the script's stdout/stderr
+# (pnpm/buf/vite) print to the job log and a failure fails the job LOUDLY.
+# This guarantees the environment for flux-server's build.rs — the script it
+# would otherwise invoke runs with output CAPTURED by cargo (invisible), so
+# the release build must never depend on it (v0.2.0's Windows job embedded a
+# silent placeholder because the PS1 path failed invisibly). build.rs then
+# finds dist present + fresh and no-ops. `shell: bash` is the same
+# git-bash path the v0.1.5 pipeline proved on Windows runners.
+- name: Build embedded web UI → clients/web/dist
+  shell: bash
+  run: |
+    ./scripts/package-web.sh

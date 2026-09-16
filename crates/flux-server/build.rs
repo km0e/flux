@@ -25,7 +25,9 @@
 //! no-op build costs one directory stat.
 
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::time::Duration;
 
 /// Repo root = crate dir / ../..
 fn repo_root() -> PathBuf {
@@ -174,22 +176,58 @@ fn build_ui(root: &Path, quiet: bool) -> bool {
         c
     };
     cmd.current_dir(root);
-    match cmd.status() {
-        Ok(s) if s.success() => true,
-        Ok(s) => {
+    // CAPTURE the script's stdout/stderr: cargo swallows build-script stdio
+    // when the build script itself succeeds (ours handles the failure and
+    // keeps building), so without capture a script failure is completely
+    // invisible — exactly what made the v0.2.0 Windows release job
+    // undiagnosable. On failure the tail is re-emitted as cargo:warning.
+    //
+    // WATCHDOG (20 min): a hung `pnpm install` (network) would otherwise
+    // stall the build silently and indefinitely — indistinguishable from
+    // the fat-LTO link phase, which also prints nothing for minutes. On
+    // timeout we fall through to the placeholder; the orphaned script may
+    // still land a dist later, and the next build's rerun-if-changed check
+    // embeds it then.
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let out = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).output();
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(Duration::from_secs(20 * 60)) {
+        Ok(Ok(out)) if out.status.success() => true,
+        Ok(Ok(out)) => {
             if !quiet {
                 println!(
-                    "cargo:warning=flux-server: web UI build script exited with {s} — embedding a placeholder; run scripts/package-web.sh manually for the real UI"
+                    "cargo:warning=flux-server: web UI build script exited with {} — embedding a placeholder; run scripts/package-web.sh manually for the real UI",
+                    out.status
                 );
+                for line in String::from_utf8_lossy(&out.stderr)
+                    .lines()
+                    .chain(String::from_utf8_lossy(&out.stdout).lines())
+                    .filter(|l| !l.trim().is_empty())
+                    .rev()
+                    .take(30)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                {
+                    println!("cargo:warning=flux-server: [web-build] {line}");
+                }
             }
             false
         }
-        Err(e) => {
+        Ok(Err(e)) => {
             if !quiet {
                 println!(
                     "cargo:warning=flux-server: web UI build script failed to launch ({e}) — embedding a placeholder; install node 24 + pnpm or set FLUX_WEB_UI_NO_BUILD=1"
                 );
             }
+            false
+        }
+        Err(_) => {
+            println!(
+                "cargo:warning=flux-server: web UI build script timed out after 20min — embedding a placeholder; check network/proxy for pnpm, or set FLUX_WEB_UI_NO_BUILD=1"
+            );
             false
         }
     }
@@ -210,6 +248,19 @@ fn write_placeholder(dist: &Path) {
     // naturally; a belt-and-braces removal anyway.
     let _ = std::fs::write(dist.join(PLACEHOLDER_MARKER), "");
     let _ = std::fs::remove_file(dist.join("web-ui-version.txt"));
+    // Minimal hashed-shape assets: the embedded-serving unit tests drive
+    // assertions off WebAssets::iter() and expect at least one
+    // assets/*.js — keep the placeholder bundle self-consistent so
+    // toolchain-less builds (hermetic CI) pass the same suite.
+    let _ = std::fs::create_dir_all(dist.join("assets"));
+    let _ = std::fs::write(
+        dist.join("assets/index-placeholder.js"),
+        "// flux placeholder bundle",
+    );
+    let _ = std::fs::write(
+        dist.join("assets/index-placeholder.css"),
+        "/* flux placeholder bundle */",
+    );
     let index = r#"<!doctype html>
 <html lang="en">
 <head><meta charset="utf-8"><title>Flux — web UI not built</title></head>

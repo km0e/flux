@@ -745,10 +745,15 @@ container/VM.
  headless-only builds: `--no-default-features`). rust-embed validates the folder at macro
  expansion in ALL modes, so the placeholder is load-bearing, not cosmetic.
 - Packaging: the dist pipeline (`dist-workspace.toml` → `.github/workflows/release.yml`,
- tag-driven) builds each target natively on its runner — the UI is built INSIDE the cargo
- build (`.github/build-setup.yml` supplies protoc + node/pnpm). Archives carry the binary
+ tag-driven) builds each target natively on its runner — the UI is PREBUILT as a
+ visible CI step (`.github/build-setup.yml` supplies protoc + node/pnpm and
+ runs package-web.sh — build.rs's own script path is captured by cargo and
+ must never be the release load-bearer; dist present ⇒ build.rs no-ops). Archives carry the binary
  only; there is NO separate `flux-web-ui.tar.gz` artifact (removed with the embedded UI).
- Local release-shaped artifacts: `dist build [--target …]`. `[profile.dist]` ships
+ Local release-shaped artifacts: `dist build [--target …]`. Expect SILENCE in the
+ build log for ~3–10 min per platform before `Finished` — that is the fat-LTO final
+ link (cargo prints nothing while linking; `rustc` is alive), not a hang. The v0.2.0
+ x86_64-darwin job was killed by hand 8 min into exactly that phase. `[profile.dist]` ships
  `lto = "fat"` + `codegen-units = 1` + `strip = "symbols"` → ~20MB binaries (was ~32MB;
  the RUST_BACKTRACE tradeoff is documented there). flux-server is `publish = false` +
  `[package.metadata.dist] dist = true` (the dist opt-in is REQUIRED once publish is

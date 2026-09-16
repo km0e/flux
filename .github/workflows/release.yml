@@ -158,6 +158,10 @@ jobs:
         uses: "actions/setup-node@v7"
         with:
           "node-version": 24
+      - name: "Build embedded web UI → clients/web/dist"
+        run: |
+          ./scripts/package-web.sh
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

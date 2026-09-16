@@ -665,10 +665,23 @@ mod csp_pairing {
     fn csp_hash_covers_every_inline_script_in_the_built_index() {
         let dist = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../clients/web/dist/index.html");
+        let placeholder = dist.with_file_name("web-ui-placeholder");
+        if !dist.is_file() || placeholder.is_file() {
+            // No built UI in this checkout (test-only crates, fresh clone),
+            // or the build.rs PLACEHOLDER (which has no theme script):
+            // nothing to cross-check — the pairing is enforced on real
+            // builds. The marker file makes the placeholder machine-readable
+            // (a placeholder index.html EXISTS, which is how this test once
+            // false-failed on CI).
+            eprintln!(
+                "skipping: {} not built (placeholder={})",
+                dist.display(),
+                placeholder.is_file()
+            );
+            return;
+        }
         let Ok(html) = std::fs::read_to_string(&dist) else {
-            // No built UI in this checkout (test-only crates, fresh clone):
-            // nothing to cross-check — the pairing is enforced on builds.
-            eprintln!("skipping: {} not built", dist.display());
+            eprintln!("skipping: {} unreadable", dist.display());
             return;
         };
 
