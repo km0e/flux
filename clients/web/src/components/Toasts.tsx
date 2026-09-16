@@ -10,7 +10,7 @@
  * refreshes one card instead of stacking spam.
  *
  * Provides: Toasts
- * Depends: core/state.ts, components/ui.tsx
+ * Depends: core/state.ts, components/ui
  */
 import { useEffect } from 'react';
 import { X } from 'lucide-react';

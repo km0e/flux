@@ -43,3 +43,7 @@ Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机
 ### T-12 bash 输出 ANSI 只在 bash 工具层 strip，不上提统一漏斗、不做前端兜底
 
 捕获层已是管道（isatty=false），自觉程序自动关色；对无视 isatty 的程序（开 ansi feature 的 tracing subscriber 是典型），strip 只放在 flux-tools `BashTool::execute`（结果进入 `bounded_output` 之前），不放在 flux-chat 的统一漏斗。范围决策：① 文件类工具（read_file/grep/glob）**绝不 strip**——模型基于其内容做 edit_file，strip 会让模型视图与磁盘内容错位（字符数/偏移不一致，edit 往返失败），保真优先于观感；② MCP 结果不清理（协议文本，风险低）；③ 前端不兜底——改动前已入库的带 ANSI 历史重开时原样显示，不做数据迁移；④ 裸 `\r` 丢弃——进度条覆盖帧折叠为残字连排（与主流 coding agent 的 exec 输出 strip 同取舍）。重开评估条件：带色 MCP 工具成为高频困扰（可泛化为 per-tool 卫生声明），或旧历史可读性抱怨集中（做一次性迁移清洗）。
+
+### T-13 Skill 激活去重由 transcript 派生：不建专表、不建目录文件 watch
+
+chat-owned `skill_read` 的去重索引在两个组装点（spawn / apply_rebuild）从 history 重派生——transcript 只增不减（T-08），已提交的 skill_read 结果永远在模型可见上下文里，transcript 本身就是激活记录的真相源；专用表只会引入第二真相源与 fork keep-set 复制 SQL。Tier-1 目录是 begin 点的快照，不做文件 watch（Claude Code 做 watch；flux 的活刷新口是 `skill_list` 的每调用即扫 + `skill_read` 未知名自纠错，全局技能在边界外只有它能枚举）。为何接受：派生的 store 读仅发生在「溢出过的技能路径」（每路径至多一次，技能文件 ≤256KB、路径屈指可数）；快照过期由节内文案显式声明并指向 `skill_list`。词法规范化键（非 canonical）的代价 = 技能内 symlink 别名至多多一次全文读。重开评估条件：目录过期被证明高频影响任务（再议 SkillService 安装即触发的 gate 重建钩子——机制已存在，只需接线），或压缩（T-08 落地时）需要把派生源切换为压缩视图（索引语义不变，只换输入）。

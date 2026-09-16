@@ -59,15 +59,14 @@ impl Chat {
     /// copies the entries of the calls its copied transcript carries, so
     /// `buf_read` references stay resolvable in the new chat.
     pub(crate) async fn bounded_output(&self, call_id: &str, result: &str) -> String {
-        const INLINE_BUDGET: usize = 8000;
         // Byte fast path: bytes bound chars — results within the budget in
         // bytes are within it in chars, so the common case skips the O(n)
         // char walk entirely (every tool result passes through here).
-        if result.len() <= INLINE_BUDGET {
+        if result.len() <= buf::INLINE_BUDGET {
             return result.to_string();
         }
         let total = result.chars().count();
-        if total <= INLINE_BUDGET {
+        if total <= buf::INLINE_BUDGET {
             return result.to_string();
         }
         buf::store_overflow(&self.store, &self.id, call_id, result).await;
@@ -75,7 +74,7 @@ impl Chat {
         // collect.
         let head_end = result
             .char_indices()
-            .nth(INLINE_BUDGET)
+            .nth(buf::INLINE_BUDGET)
             .map_or(result.len(), |(i, _)| i);
         let mut out = String::with_capacity(head_end + 192);
         out.push_str(&result[..head_end]);
@@ -86,7 +85,7 @@ impl Chat {
         out.push_str("\"; read with buf_read {\"ref\": \"");
         out.push_str(call_id);
         out.push_str("\", \"offset\": ");
-        out.push_str(&INLINE_BUDGET.to_string());
+        out.push_str(&buf::INLINE_BUDGET.to_string());
         out.push_str(", \"limit\": ");
         out.push_str(&buf::BUF_PAGE_CHARS.to_string());
         out.push_str("} ---");

@@ -17,9 +17,10 @@ vi.mock('../../services/fs', async (importOriginal) => ({
 }));
 
 // The ProviderPicker's registry fetch is a different surface (the tests
-// seed the store instead) — stub it so no real fetch escapes.
+// seed the store instead) — stub it so no real fetch escapes. The
+// saved-model list needs no stub: it is session-level (preloaded at
+// attach) and the picker never fetches it.
 vi.mock('../../services/providers', () => ({ fetchProviders: vi.fn() }));
-vi.mock('../../services/models', () => ({ fetchModels: vi.fn() }));
 
 const listingFor = (path: string): FsListing => ({
   type: 'fs_listing',

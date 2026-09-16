@@ -18,3 +18,7 @@ tokio = { workspace = true }
 tokio-util = { workspace = true }
 async-stream = "0.3.6"
 bytes = "1.12.0"
+
+[dev-dependencies]
+# Hermeticity guard + proxy-proof loopback client (see the crate's docs).
+flux-test-support = { workspace = true }

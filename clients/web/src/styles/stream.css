@@ -832,7 +832,7 @@
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  gap: 6px;
+  gap: 8px;
   min-height: 55vh;
   text-align: center;
   animation: fadeIn 0.4s var(--fx-ease-out) both;
@@ -840,7 +840,7 @@
 
 .fx-empty-mark {
   color: var(--fx-accent);
-  margin-bottom: 10px;
+  margin-bottom: 14px;
   user-select: none;
 }
 
@@ -879,15 +879,21 @@
   padding: 7px 12px;
   border-radius: var(--fx-radius-sm);
   cursor: pointer;
+  /* The sidebar's selection-rail vocabulary, borrowed for intent: a 2px
+     accent rail fades in on the row the pointer is about to pick (inset
+     shadow — no layout shift). One marker language across surfaces. */
+  box-shadow: inset 2px 0 0 transparent;
   transition:
     color var(--fx-duration-fast),
-    background-color var(--fx-duration-fast);
+    background-color var(--fx-duration-fast),
+    box-shadow var(--fx-duration-fast);
 }
 
 .fx-empty-prompt:hover,
 .fx-empty-prompt:focus-visible {
   color: var(--fx-fg);
   background: var(--fx-hover);
+  box-shadow: inset 2px 0 0 var(--fx-accent);
 }
 
 /* ── Syntax highlighting (hljs) — the code voice, token-mapped, both themes ──

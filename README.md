@@ -51,7 +51,9 @@ cargo build --release
 ```
 
 没有配置文件——一切要么是 CLI flag（`--host`、`--port`、`--db-path`、
-`--preamble`、`--no-web`、`--web-assets-dir`；见 `flux-server --help`），
+`--preamble`、`--no-web`、`--web-assets-dir`；每个 flag 都有同名 `FLUX_*`
+环境变量回退，优先级 flag > env > 默认值；`--generate-completions
+bash|zsh|fish|powershell|elvish` 生成 shell 补全；见 `flux-server --help`），
 要么由 UI 管理进服务端数据库。
 
 打开 `http://127.0.0.1:8080`，在顶栏的 Providers 对话框添加一个 provider

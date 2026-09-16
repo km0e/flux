@@ -17,6 +17,9 @@ use crate::domain::{StateGetTool, StateManager, StateSetTool};
 use crate::handle::ChatHandle;
 use crate::question::QuestionTool;
 use crate::round::{RoundControl, RoundDeps, run_round};
+use crate::skills::{
+    SkillActivationIndex, SkillReadTool, compose_system_prompt, derive_activation_index,
+};
 use flux_core::{OutputPort, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
@@ -34,10 +37,10 @@ pub(crate) struct ChatKit<'a> {
 }
 
 /// Build the per-chat registry: global entries plus the chat-owned tools
-/// bound to this chat (question, buf_read, state tools). Chat-owned
-/// tools use `register_if_absent` — FIRST registration wins, so a global
-/// entry with the same name would shadow the chat-owned one; that cannot
-/// happen through MCP (assembly-time reserved-name check in
+/// bound to this chat (question, buf_read, skill_read, state tools).
+/// Chat-owned tools use `register_if_absent` — FIRST registration wins,
+/// so a global entry with the same name would shadow the chat-owned one;
+/// that cannot happen through MCP (assembly-time reserved-name check in
 /// `reserved.rs`), which is what keeps the chat-owned tools
 /// authoritative for their names.
 pub(crate) fn assemble_tools(
@@ -46,6 +49,7 @@ pub(crate) fn assemble_tools(
     kit: &ChatKit<'_>,
     chat_id: &str,
     store: &Arc<Store>,
+    skill_index: Arc<SkillActivationIndex>,
 ) -> ToolRegistry {
     let registry = ToolRegistry::new();
     for tool in global.entries() {
@@ -66,6 +70,10 @@ pub(crate) fn assemble_tools(
         Arc::clone(store),
         chat_id.to_string(),
     )));
+    // skill_read — the chat-owned activation tool (see skills.rs): the
+    // derived activation index turns a re-read of unchanged skill content
+    // into a short note instead of a duplicate injection.
+    registry.register_if_absent(Arc::new(SkillReadTool::new(skill_index)));
     registry
 }
 
@@ -87,6 +95,14 @@ pub async fn spawn(
 ) -> ChatHandle {
     let state_manager =
         Arc::new(StateManager::for_chat(store.clone(), &init.id, &initial_state).await);
+    // The Tier-1 catalog rides the preamble as a begin-time snapshot; the
+    // base stays unpolluted in RoundDeps so every rebuild recomposes
+    // fresh (skills.rs).
+    let composed_prompt = compose_system_prompt(&system_prompt, state_manager.workdir());
+    // The activation index derives from the handed-over history — a fork
+    // or respawn therefore inherits exactly the activations its copied
+    // transcript carries (skills.rs).
+    let skill_index = derive_activation_index(&store, &init.id, &init.history).await;
     // The question tool emits straight to the router (adapter-side tooling;
     // the loop's fact trace carries everything else).
     let question = QuestionTool::new(Arc::clone(&init.questions), Arc::clone(&wire));
@@ -100,6 +116,7 @@ pub async fn spawn(
         &kit,
         &init.id,
         &store,
+        skill_index,
     ));
 
     let tool_defs: Arc<[flux_core::ToolDefinition]> =
@@ -110,7 +127,7 @@ pub async fn spawn(
     // assembly point, not a selection point.
     let connection = init
         .provider
-        .begin(&system_prompt, &tool_defs, &init.history);
+        .begin(&composed_prompt, &tool_defs, &init.history);
 
     let chat = Arc::new(Chat {
         id: init.id.clone(),

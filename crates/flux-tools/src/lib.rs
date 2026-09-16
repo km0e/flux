@@ -26,7 +26,11 @@ pub(crate) mod test_util;
 pub use fs::{EditFileTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool, WriteFileTool};
 pub use search::{GlobTool, GrepTool};
 pub use shell::BashTool;
-pub use skills::{SkillEntry, SkillListTool, SkillReadTool, discover_skills, validate_skill_dir};
+pub use skills::{
+    SkillEntry, SkillListTool, catalog_for_workdir, catalog_section, discover_for_workdir,
+    discover_skills, format_skill_activation, normalize_rel, read_skill_file, skill_content,
+    validate_skill_dir,
+};
 pub use subprocess::arm_parent_death_signal;
 
 use std::collections::HashSet;

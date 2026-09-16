@@ -10,7 +10,7 @@
  *
  * Provides: TopBar
  * Depends: core/state.ts, core/bridge.ts, hooks/useTheme.ts,
- *          components/ui/*, components/dialogs/SettingsDialog
+ *          components/ui/*, component./settings/SettingsDialog
  */
 import { lazy, Suspense, useState } from 'react';
 import { useFlux } from '../core/state';
@@ -27,6 +27,7 @@ import {
   Settings,
   Sun,
   WifiOff,
+  X,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -61,7 +62,7 @@ const THEME_LABEL: Record<ThemeChoice, string> = {
 // module loads exactly once, so the last-visited-section memory (module
 // state inside the dialog) survives close/reopen as before.
 const SettingsDialog = lazy(() =>
-  import('./dialogs/SettingsDialog').then((m) => ({ default: m.SettingsDialog })),
+  import('./settings/SettingsDialog').then((m) => ({ default: m.SettingsDialog })),
 );
 
 /** The MCP notice bell (F-10b): the notification center over the
@@ -86,7 +87,7 @@ function McpNoticeBell(): React.ReactElement {
           {unread > 0 && (
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute -top-0.5 -right-0.5 grid size-3.5 place-items-center rounded-full bg-accent text-[8px] font-bold text-accent-fg"
+              className="pointer-events-none absolute -top-1 -right-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-2xs leading-none font-bold text-accent-fg"
             >
               {unread > 9 ? '9+' : unread}
             </span>
@@ -159,7 +160,13 @@ export function TopBar(): React.ReactElement {
         onClick={() => useFlux.setState({ sidebarOpen: !sidebarOpen })}
         className="size-7"
       >
-        <Menu size={15} aria-hidden="true" />
+        {/* The drawer regime (mobile) flips the glyph to an X while open —
+            the drawer starts below this bar, so the X is its always-visible
+            close control. Desktop keeps the stable Menu glyph (the sidebar
+            is a pane, not a modal surface). CSS-only switch: layout never
+            depends on the JS breakpoint. */}
+        <Menu size={15} aria-hidden="true" className={cn(sidebarOpen && 'max-md:hidden')} />
+        <X size={15} aria-hidden="true" className={cn('md:hidden', !sidebarOpen && 'hidden')} />
       </IconButton>
 
       {/* Brand — the app's identity. The conversation's identity lives in

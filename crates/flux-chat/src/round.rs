@@ -86,7 +86,8 @@ pub(crate) struct RoundDeps {
     /// place at every fired gate — the in-place rebuild's whole point.
     pub(crate) connection: Box<dyn Connection>,
     // ── in-place rebuild materials (read fresh at every gate) ──
-    /// The agent preamble — every re-begin carries it.
+    /// The agent preamble (base, WITHOUT the skill catalog) — every
+    /// re-begin recomposes the prompt over it (skills.rs).
     pub(crate) system_prompt: Arc<str>,
     /// The global tool registry (the shell's Arc — MCP mutations are
     /// visible through it at every gate).
@@ -296,7 +297,11 @@ async fn apply_rebuild(deps: &mut RoundDeps) {
     // Re-assemble the per-chat registry from the current global truth —
     // the same assembly every spawn runs — and swap the chat's lookup
     // surface atomically (tool calls between rebuilds never observe a
-    // half-swapped set).
+    // half-swapped set). The activation index re-derives from the freshly
+    // loaded history: the gate sees only round-atomic transcripts, so the
+    // index matches exactly what the model's context carries.
+    let skill_index =
+        crate::skills::derive_activation_index(&deps.chat.store, &deps.chat.id, &history).await;
     let question = QuestionTool::new(Arc::clone(&deps.questions), Arc::clone(&deps.wire));
     let kit = ChatKit {
         descriptions: &deps.descriptions,
@@ -308,12 +313,18 @@ async fn apply_rebuild(deps: &mut RoundDeps) {
         &kit,
         &deps.chat.id,
         &deps.chat.store,
+        skill_index,
     );
     let tool_defs: Arc<[ToolDefinition]> = Arc::from(fresh.definitions().into_boxed_slice());
     deps.chat.tools.replace_with(&fresh);
-    deps.connection = deps
-        .provider
-        .begin(&deps.system_prompt, &tool_defs, &history);
+    // The catalog recomposes at every gate — a rebuild is the one point a
+    // begin happens anyway, so the snapshot refreshes for free (the base
+    // preamble in `system_prompt` stays untouched; see skills.rs).
+    let composed_prompt = crate::skills::compose_system_prompt(
+        &deps.system_prompt,
+        deps.chat.state_manager.workdir(),
+    );
+    deps.connection = deps.provider.begin(&composed_prompt, &tool_defs, &history);
     tracing::info!(
         chat_id = %deps.chat.id,
         history = history.len(),

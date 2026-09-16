@@ -1,6 +1,10 @@
 //! Model-catalog tests: `list_models` against a canned local HTTP server
 //! (no real upstream — the wire shape and error mapping are what matter).
 
+// Hermeticity guard — this file is a SEPARATE test binary (the lib's ctor
+// does not cover it); see flux-test-support's docs.
+flux_test_support::test_env_guard!();
+
 use flux_core::Provider;
 use flux_provider::{OpenAiConfig, OpenAiProvider};
 use std::time::Duration;
@@ -38,7 +42,8 @@ fn provider(base_url: String) -> OpenAiProvider {
         "gpt-4o-mini".into(),
         // The /models probe never carries generation params.
         flux_provider::OpenAiParams::default(),
-        reqwest::Client::builder()
+        // Proxy-proof: a host `http_proxy` must never detour loopback.
+        flux_test_support::loopback_client_builder()
             .connect_timeout(Duration::from_secs(5))
             .build()
             .unwrap(),

@@ -21,6 +21,7 @@ It is built as a Cargo workspace:
 
 - [`flux-core`](crates/flux-core/) — the agent-runtime contract layer: pure types (`Message`, `Role`, `ToolCall`, `CoreError`, `ErrorCode`, `ChatStateKind`), `WireEvent` (kernel output vocabulary), `Tool` trait + `ToolRegistry` + `ToolCtx` (cancel token, call id, sandbox boundary with `resolve`), the four kernel ports, and the `Provider` session factory (deps: `serde`, `serde_json`, `strum`, `thiserror`, `async-trait`, `tracing`, `futures`).
 - [`flux-macros`](crates/flux-macros/) — proc-macro for `#[derive(Tool)]`.
+- [`flux-test-support`](crates/flux-test-support/) — shared test support, a DEV-DEPENDENCY ONLY crate (never a regular dep — the guard mutates process env): the hermeticity guard (`test_env_guard!` — strips proxy/`FLUX_*` vars pre-`main`, single home for the var list) and the proxy-proof loopback test HTTP client.
 - [`flux-provider`](crates/flux-provider/) — OpenAI-compatible implementation + SSE client, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`).
 - [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, and skill tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
 - [`flux-mcp`](crates/flux-mcp/) — MCP client bridge: connects external MCP servers — stdio child processes OR remote Streamable HTTP endpoints (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools.
@@ -90,6 +91,7 @@ flux/
 │ │ ├── lib.rs # Re-exports (ServerState, Session/SessionRef/Sink, ops outcomes, protocol types)
 │ │ ├── manager.rs # ServerState (ChatManager) — global config + Chat cache (RwLock) + session registry (live/detached), UUID IDs
 │ │ ├── ops.rs # Lease/subscribe/broadcast + session detach/resume/reap + claim (3-way snapshot)
+│ │ ├── ops_tests.rs # ops test suite (#[path]-mounted as ops.rs's `mod tests` — the implementation file stays lean)
 │ │ ├── identity.rs # Session identity object (opaque handle: token/sn/sink/detached state) + SessionSink trait
 │ │ ├── router.rs # Per-chat event router (fanout, slow-viewer gap handling, parked questions, delta batching, activity touch)
 │ │ ├── lifecycle.rs # Task lifecycle (lazy spawn, stale replacement, engine rebuild: Rebuild cmd → in-place gate rebuild)
@@ -134,14 +136,15 @@ flux/
 │ ├── components/ # React UI: App, TopBar, ChatHeader, Sidebar, ChatView, MessageList, ChatInput,
 │ │ # UsageStats, Explorer (react-arborist), RightDock (round-artifacts tab + file tabs + terminal),
 │ │ # RoundPanel, FileTabView, TerminalPanel, FileIcon, Toasts, ErrorBoundary
-│ │ ├── ui.tsx # control primitives (Button/IconButton/TextField/Badge/Spinner) — styling authority
-│ │ ├── ui/ # Radix wrappers (shadcn conventions): dialog, dropdown-menu, tooltip, tabs
-│ │ └── dialogs/ # first-party dialogs: impl (service registration), ConfirmDialog,
-│ │ # NewChatDialog (fs browser + kind picker), QuestionCard, SettingsDialog
-│ │ # (Providers / MCP / Skills panels over one tabbed dialog; the Providers panel
-│ │ # carries the LOCAL model registry — saved models + models.dev metadata;
-│ │ # desktop master-detail —
-│ │ # rail + preview/form detail; mobile stacked; integration-ui = shared building blocks)
+│ │ ├── ui/ # the component library: control primitives (button/fields/badge/spinner +
+│ │ # index barrel — styling authority) and Radix wrappers (shadcn conventions):
+│ │ # dialog, dropdown-menu, tooltip, tabs
+│ │ ├── dialogs/ # first-party promise-shaped dialogs: registry (service registration), ConfirmDialog,
+│ │ # NewChatDialog (fs browser + kind picker), QuestionCard
+│ │ └── settings/ # the Settings surface: SettingsDialog (one tabbed dialog, Providers / MCP /
+│ │ # Skills sections) + the panels; the Providers panel carries the LOCAL model registry
+│ │ # (saved models + models.dev metadata; desktop master-detail —
+│ │ # rail + preview/form detail; mobile stacked; shared.ts = shared building blocks)
 │ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
 │ ├── services/ # panes, stream, stream-handler, history, dispatch, handlers,
 │ │ # artifacts (per-round touched files + invocations, F-11), filePreview, code-copy, lease, forkDraft,
@@ -481,7 +484,7 @@ selectors (`useFlux((s) => s.chats)`); the imperative services read/write throug
 the state object, so a snapshot taken at mount would read stale fields forever.
 
 **Dialogs are first-party**: `services/dialogs.ts` exposes promise-shaped `confirmDelete` /
-`pickNewChat` / `askQuestion`; `components/dialogs/impl.tsx` registers the UI
+`pickNewChat` / `askQuestion`; `components/dialogs/registry.tsx` registers the UI
 implementations at mount (Radix dialogs rendered into a body overlay with their own
 React roots; the question renders as an inline card inside the active chat pane).
 Tests inject stubs via `setDialogImpls`.
@@ -627,7 +630,7 @@ top-edge sweep, the one non-user-triggered animation, encoding round state);
 `styles/stream.css` styles the imperative streaming DOM (bubbles/tool cards with
 their status rail/prose/hljs via the `--fx-code-*` voice + the empty-state prompt
 card `.fx-empty-*`) which cannot carry utilities. Control primitives in
-`components/ui.tsx` own control styling.
+`components/ui/` own control styling.
 
 **Build toolchain**
 
@@ -747,7 +750,7 @@ container/VM.
 - Run `cargo fmt` and `cargo clippy --workspace --tests -- -D warnings` before committing.
 - `flux-core` owns the agent-runtime contracts — core types and errors, `Tool` trait + registry + `ToolCtx` (with the boundary resolver), kernel ports, and the `Provider` session factory. It is a pure library with zero knowledge of persistence, transport, or provider MANAGEMENT (the registry lives in flux-server; the chat layer receives resolved instances and only calls `begin`). The wire vocabulary is flux-proto's generated `flux.v1` surface; flux-session's router maps WireEvents onto the stream elements (the ONE mapping point), and flux-server only imports it.
 - No `#[allow(dead_code)]` without a comment explaining why.
-- Frontend: React 19 + TypeScript on Vite; zustand for state; Radix UI primitives (shadcn-style wrappers in `components/ui/`) own dialog/menu/tooltip/tabs behavior; `marked` + `DOMPurify` + highlight.js drive the imperative markdown pipeline; Tailwind v4 for component styling, `styles/stream.css` for the imperative DOM; `components/ui.tsx` primitives own control styling .
+- Frontend: React 19 + TypeScript on Vite; zustand for state; Radix UI primitives (shadcn-style wrappers in `components/ui/`) own dialog/menu/tooltip/tabs behavior; `marked` + `DOMPurify` + highlight.js drive the imperative markdown pipeline; Tailwind v4 for component styling, `styles/stream.css` for the imperative DOM; `components/ui/` primitives own control styling .
 - Frontend code is organized by layer — see the layered structure above. Dependencies flow inward.
 - Chat IDs: UUID v4 (`uuid` crate).
 - Transport: default bind `127.0.0.1`. No application-level auth — remote exposure goes through a reverse proxy with TLS and its own authentication.

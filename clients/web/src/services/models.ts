@@ -17,8 +17,9 @@ import { log } from '../logger';
 import { useFlux } from '../core/state';
 import type { ModelParams, SavedModelInfo } from '../core/types';
 
-/** Fetch the LOCAL saved-model list. The Providers dialog pulls on
- * section show. */
+/** Fetch the LOCAL saved-model list. Preloaded once per session attach
+ * (handlers.session_resumed — every reconnect re-pulls); dialogs and
+ * pickers only read the store. */
 export function fetchModels(): void {
   // Fire-and-forget (see providers.ts) — logged, never unhandled.
   grpcFetchModels().catch((e) => log.warn('model fetch failed', e));

@@ -20,19 +20,19 @@
  * after a successful add the new entry is auto-selected once its broadcast
  * lands.
  *
- * Presentation shares the integration-ui building blocks with McpPanel /
+ * Presentation shares the shared building blocks (settings/shared) with McpPanel /
  * SkillsPanel — one typography scale, one spacing rhythm, one
  * two-step-remove control, one rail-selection repair.
  *
  * Provides: ProvidersPanel
  * Depends: core/state.ts, services/providers.ts, hooks/useIsMobile.ts,
- *          components/ui/*, components/dialogs/integration-ui.tsx
+ *          components/ui/*, components/settings/shared.tsx
  */
 import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight, CircleX, Download, RefreshCw } from 'lucide-react';
 import { useFlux } from '../../core/state';
 import { addProvider, fetchProviders, probeProvider, removeProvider } from '../../services/providers';
-import { fetchModels, saveModel } from '../../services/models';
+import { saveModel } from '../../services/models';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { fmtTokens } from '../../lib/format';
 import type { ProviderModelInfo, ProviderSummary } from '../../core/types';
@@ -53,7 +53,7 @@ import {
   RowTitle,
   SectionLabel,
   useRailSelection,
-} from './integration-ui';
+} from './shared';
 
 /** The rail selection key of one provider row (stable reference). */
 const keyOf = (p: ProviderSummary): string => p.id;
@@ -427,10 +427,11 @@ export function ProvidersPanel(): React.ReactElement {
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
 
-  // The lists may be cold (the pickers fetch lazily) — pull on section show.
+  // The provider registry may be cold (the pickers fetch lazily) — pull
+  // on section show. The saved-model list is session-level (preloaded at
+  // attach, handlers.session_resumed); this panel only edits it.
   useEffect(() => {
     fetchProviders();
-    fetchModels();
   }, []);
 
   /** Import one catalog row: a create via model_save — the server

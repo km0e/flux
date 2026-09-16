@@ -1,20 +1,20 @@
 /**
- * integration-ui.tsx — shared building blocks for the server-integration
- * panels (Providers / MCP servers): one typography scale, one spacing
- * rhythm, one row/field shell. Control styling authority stays in
- * components/ui.tsx — these compose layout and text only.
+ * shared.tsx — shared building blocks for the settings panels (Providers /
+ * MCP servers / Skills): one typography scale, one spacing rhythm, one
+ * row/field shell, and the master-detail rail. Control styling authority
+ * stays in components/ui — these compose layout and text only.
  *
- * Type scale: section labels 12px uppercase faint · row titles 14px
+ * Type scale: section labels 12px sentence-case faint · row titles 14px
  * medium · secondary mono (urls/commands) 13px muted · hints 12px
- * faint · badges and actions per ui.tsx. Field labels 13px with hints
- * on their own line beneath. Widths: the settings dialog is
- * w-[min(94vw,720px)].
+ * faint · badges and actions per components/ui. Field labels 13px with
+ * hints on their own line beneath. Widths: the settings dialog body is
+ * w-[min(94vw,900px)].
  *
  * Provides: DialogHint, NoticeBar, SectionLabel, RowShell, RowTitle,
  *           RowSub, EmptyState, FormField, RemoveControl,
  *           useRailSelection, MasterDetail, Rail, RailButton,
  *           NewRailButton, DetailPane
- * Depends: lib/cn.ts, components/ui.tsx (Button/IconButton/TextField/
+ * Depends: lib/cn.ts, components/ui (Button/IconButton/TextField/
  *          TextArea — the control styling authority)
  */
 import { useEffect, useRef, useState } from 'react';

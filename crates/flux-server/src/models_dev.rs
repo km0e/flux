@@ -22,6 +22,7 @@
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const MODELS_DEV_URL: &str = "https://models.dev/api.json";
@@ -81,7 +82,9 @@ pub type Catalog = HashMap<String, HashMap<String, ModelEntry>>;
 
 struct Cached {
     fetched_at: Instant,
-    catalog: Catalog,
+    /// Shared with every cache hit — hits clone the `Arc`, never the
+    /// multi-MB catalog map.
+    catalog: Arc<Catalog>,
 }
 
 /// The lazy models.dev client. Cheap to clone conceptually — one instance
@@ -104,9 +107,10 @@ impl ModelsDev {
     }
 
     /// The catalog, fresh per the TTL (or force-refreshed for an explicit
-    /// user sync). The fetch failure surfaces as Err — the CALLER decides
-    /// it is non-fatal.
-    pub async fn catalog(&self, force: bool) -> Result<Catalog, String> {
+    /// user sync). Cache hits hand out an `Arc` clone — the full catalog
+    /// (thousands of models) is never copied per hit. The fetch failure
+    /// surfaces as Err — the CALLER decides it is non-fatal.
+    pub async fn catalog(&self, force: bool) -> Result<Arc<Catalog>, String> {
         // Cache hit — the fresh-download story stays in the info log; this
         // debug line names the local-cache existence explicitly for diagnosis.
         if !force {
@@ -119,7 +123,7 @@ impl ModelsDev {
                     age_secs = c.fetched_at.elapsed().as_secs(),
                     "models.dev catalog served from local cache"
                 );
-                return Ok(c.catalog.clone());
+                return Ok(Arc::clone(&c.catalog));
             }
         }
         let _guard = self.fetch_lock.lock().await;
@@ -134,7 +138,7 @@ impl ModelsDev {
                     age_secs = c.fetched_at.elapsed().as_secs(),
                     "models.dev catalog served from local cache"
                 );
-                return Ok(c.catalog.clone());
+                return Ok(Arc::clone(&c.catalog));
             }
         }
         let started = Instant::now();
@@ -162,13 +166,13 @@ impl ModelsDev {
             tracing::warn!(http_status = %status, "models.dev download rejected");
             return Err(format!("models.dev HTTP {status}: {excerpt}"));
         }
-        let catalog = match parse_catalog(&body) {
+        let catalog = Arc::new(match parse_catalog(&body) {
             Ok(c) => c,
             Err(e) => {
                 tracing::warn!(error = %e, "models.dev catalog parse failed");
                 return Err(e);
             }
-        };
+        });
         tracing::info!(
             providers = catalog.len(),
             models = catalog.values().map(|m| m.len()).sum::<usize>(),
@@ -177,7 +181,7 @@ impl ModelsDev {
         );
         *self.cache.write().await = Some(Cached {
             fetched_at: Instant::now(),
-            catalog: catalog.clone(),
+            catalog: Arc::clone(&catalog),
         });
         Ok(catalog)
     }

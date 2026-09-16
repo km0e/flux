@@ -31,3 +31,5 @@ rmcp = { workspace = true, features = [
 ] }
 axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
 tokio = { workspace = true }
+# Hermeticity guard (see the crate's docs) for the Streamable HTTP test.
+flux-test-support = { workspace = true }

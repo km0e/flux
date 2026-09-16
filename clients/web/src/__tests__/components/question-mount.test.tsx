@@ -10,7 +10,7 @@
  */
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { fireEvent, waitFor } from '@testing-library/react';
-import { registerDialogs } from '../../components/dialogs/impl';
+import { registerDialogs } from '../../components/dialogs/registry';
 import { dialogs, QUESTION_DISMISSED, resetDialogsForTest } from '../../services/dialogs';
 import {
   ensurePane,

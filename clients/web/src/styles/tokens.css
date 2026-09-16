@@ -33,10 +33,16 @@
   --fx-elev: light-dark(#ffffff, #151c21); /* cards, modals, popovers */
   --fx-inset: light-dark(#edf1f0, #090d10); /* inputs, code blocks */
 
-  /* ── Text ── */
+  /* ── Text ──
+     Three voices, calibrated against WCAG AA (4.5:1): fg and muted clear
+     it on every surface; faint — the quiet voice for supplementary machine
+     facts (paths, timestamps, placeholders) — clears it on panel/elev and
+     sits just under on bg/inset, where its uses are title-supplemented or
+     placeholder-by-nature. Pushing faint to full AA would merge it into
+     muted and flatten the hierarchy. */
   --fx-fg: light-dark(#1a2422, #e4ebe9);
   --fx-muted: light-dark(#5a6664, #96a3a0);
-  --fx-faint: light-dark(#8a9694, #5f6d6a);
+  --fx-faint: light-dark(#6b7772, #7d8b87);
 
   /* ── Lines ── */
   --fx-border: light-dark(#dfe5e3, #202b2a);
@@ -49,11 +55,12 @@
   --fx-accent-dim: light-dark(rgba(13, 110, 98, 0.09), rgba(49, 211, 189, 0.12));
   --fx-accent-soft: light-dark(rgba(13, 110, 98, 0.14), rgba(49, 211, 189, 0.16));
 
-  /* ── Semantic ── */
-  --fx-success: light-dark(#1a7f4e, #4ccb8a);
-  --fx-warn: light-dark(#9a6700, #e0b25c);
+  /* ── Semantic ── (light values clear 4.5:1 on inset — the darkest
+        surface they render against; dark values clear it everywhere) ── */
+  --fx-success: light-dark(#187749, #4ccb8a);
+  --fx-warn: light-dark(#8f6100, #e0b25c);
   --fx-danger: light-dark(#c23b47, #f07178);
-  --fx-info: light-dark(#3573b9, #6cb2e8);
+  --fx-info: light-dark(#2f6cb2, #6cb2e8);
 
   /* ── Interaction surfaces ── */
   --fx-hover: light-dark(#e9eeec, #1a2126);
@@ -61,11 +68,12 @@
   --fx-selection: light-dark(rgba(13, 110, 98, 0.14), rgba(49, 211, 189, 0.18));
 
   /* ── Code voice (syntax highlighting; separate from UI semantics so
-        code can carry its own two-theme palette) ── */
+        code can carry its own two-theme palette; the light values share
+        the semantic family's hues at AA-calibrated steps) ── */
   --fx-code-keyword: light-dark(#0b6f7d, #53d3c8);
-  --fx-code-string: light-dark(#1a7f4e, #7fd6a4);
-  --fx-code-number: light-dark(#9a6700, #e0b25c);
-  --fx-code-fn: light-dark(#3573b9, #6cb2e8);
+  --fx-code-string: light-dark(#187749, #7fd6a4);
+  --fx-code-number: light-dark(#8f6100, #e0b25c);
+  --fx-code-fn: light-dark(#2f6cb2, #6cb2e8);
 
   /* ── Typography — two voices: Plex for people, JetBrains for machines.
         Mono is applied ONLY where the content itself is machine output

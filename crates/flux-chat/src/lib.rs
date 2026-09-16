@@ -25,6 +25,7 @@ pub mod history;
 pub mod question;
 pub mod reserved;
 pub mod round;
+pub mod skills;
 pub mod spawn;
 pub mod tool_exec;
 

@@ -5,6 +5,11 @@
 //! the initialize handshake, tool listing/wrapping, a wrapped tool CALL,
 //! and that the configured custom headers reach the server.
 
+// Hermeticity guard: proxy/`FLUX_*` env vars must never leak into the test
+// process (the rmcp HTTP client would detour loopback through a host
+// proxy). Shared via flux-test-support; runs pre-`main`.
+flux_test_support::test_env_guard!();
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 

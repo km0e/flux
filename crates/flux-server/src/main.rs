@@ -12,13 +12,14 @@ mod web;
 use crate::registry::ProviderRegistry;
 
 use anyhow::Context;
-use clap::Parser;
+use clap::{CommandFactory, Parser};
+use clap_complete::Shell;
 use flux_core::ToolRegistry;
 use flux_session::ServerState;
 use flux_store::Store;
 use flux_tools::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    SkillListTool, SkillReadTool, WriteFileTool,
+    SkillListTool, WriteFileTool,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -88,40 +89,75 @@ fn flux_home() -> Option<PathBuf> {
 /// (host/port/db/preamble/web), the database (providers, MCP servers,
 /// chats) or the UI. One listener serves the Connect surface, the
 /// terminal side channel, and the web UI.
+/// `--help` footer: copy-pasteable usage examples.
+const AFTER_HELP: &str = "\
+Examples:
+  flux-server                            Serve the UI + API on 127.0.0.1:8080
+  flux-server --port 9000 --no-web       Headless: API only, no browser UI
+  flux-server --db-path ./dev.db         Project-local database
+  flux-server --generate-completions bash >> ~/.bash_completion";
+
 #[derive(Parser)]
 #[command(
     name = "flux-server",
-    about = "Flux agent server (Connect API + terminal channel + web UI on one port)"
+    version,
+    about = "Flux agent server (Connect API + terminal channel + web UI on one port)",
+    after_help = AFTER_HELP
 )]
 struct Args {
     /// Host address to bind to. Loopback by default (no app-level auth —
     /// expose remotely only behind a TLS reverse proxy with its own auth).
-    #[arg(long, value_name = "HOST", default_value = "127.0.0.1")]
+    #[arg(
+        long,
+        value_name = "HOST",
+        default_value = "127.0.0.1",
+        env = "FLUX_HOST"
+    )]
     host: String,
     /// Port to listen on (the Connect surface, the terminal side channel,
     /// and the web UI share it).
-    #[arg(long, short, value_name = "PORT", default_value_t = 8080)]
+    #[arg(
+        long,
+        short,
+        value_name = "PORT",
+        default_value_t = 8080,
+        env = "FLUX_PORT"
+    )]
     port: u16,
     /// SQLite database path (chats, providers, MCP servers). Default:
     /// `~/.flux/flux.db` — the global flux home (USERPROFILE fallback on
     /// Windows), next to the global skills dir; NEVER the process CWD.
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", env = "FLUX_DB_PATH")]
     db_path: Option<PathBuf>,
     /// System prompt / instructions sent to the agent on every request.
-    #[arg(long, value_name = "TEXT")]
+    #[arg(long, value_name = "TEXT", env = "FLUX_PREAMBLE")]
     preamble: Option<String>,
     /// Do NOT serve the browser chat UI (headless: API only). The UI is
     /// served by default.
-    #[arg(long)]
+    #[arg(long, env = "FLUX_NO_WEB")]
     no_web: bool,
     /// Web UI assets directory override (default: `web-ui/` next to the
     /// binary — the packaged layout; no assets found = headless).
-    #[arg(long, value_name = "PATH")]
+    #[arg(long, value_name = "PATH", env = "FLUX_WEB_ASSETS_DIR")]
     web_assets_dir: Option<PathBuf>,
+    /// Generate a shell completion script for SHELL, print it to stdout,
+    /// and exit. The script wires up flag/tab completion for this binary.
+    #[arg(long, value_enum)]
+    generate_completions: Option<Shell>,
 }
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    // Shell completion generation: print to stdout and exit before ANY
+    // server (or logging) setup, so the stream stays clean.
+    if let Some(shell) = args.generate_completions {
+        let mut cmd = Args::command();
+        clap_complete::generate(shell, &mut cmd, "flux-server", &mut std::io::stdout());
+        return Ok(());
+    }
+
     tracing_subscriber::fmt()
         // RUST_LOG wins when set; without it the filter defaults to INFO
         // (an empty EnvFilter shows ERRORS only, hiding the startup and
@@ -134,7 +170,6 @@ async fn main() -> anyhow::Result<()> {
         .with_writer(std::io::stderr)
         .init();
 
-    let args = Args::parse();
     let db_path = args.db_path.unwrap_or_else(default_db_path);
     // The global home (`~/.flux`) may not exist yet — create it so the
     // SQLite file (and its WAL/SHM siblings) has somewhere to land.
@@ -162,8 +197,11 @@ async fn main() -> anyhow::Result<()> {
     // Agent Skills (progressive disclosure by tools): the tools' own
     // descriptions are the only always-visible surface — content loads
     // only when the model calls skill_read (see flux_tools::skills).
+    // Agent Skills: skill_list is the live-scan listing surface; the
+    // skill catalog additionally rides the system prompt as a begin-time
+    // snapshot, and skill_read is CHAT-OWNED (activation dedup, see
+    // flux_chat::skills) — assembled per chat in spawn::assemble_tools.
     tool_registry.register(Arc::new(SkillListTool::new()));
-    tool_registry.register(Arc::new(SkillReadTool::new()));
 
     // ── Store ────────────────────────────────────────────────────────────
     info!(db_path = %db_path.display(), "opening store");
@@ -331,6 +369,18 @@ fn resolve_assets_dir_in(
     }
     None
 }
+
+// Tests are hermetic w.r.t. the host shell: proxy vars (`http_proxy` et
+// al.) silently hijack reqwest's in-process clients — every 127.0.0.1
+// request detours through the proxy and comes back 502, which surfaced
+// as 17 phantom grpc test failures — and `FLUX_*` vars re-point the very
+// flags the tests assert on (the e2e child processes inherit them too).
+// The guard lives in flux-test-support (single home for the var list);
+// the macro's ctor runs before `main`, i.e. before the harness spawns ANY
+// test thread. connect_e2e.rs is a SEPARATE binary and carries its own.
+// cfg(test): the crate is a dev-dependency, invisible to the release build.
+#[cfg(test)]
+flux_test_support::test_env_guard!();
 
 #[cfg(test)]
 mod tests {

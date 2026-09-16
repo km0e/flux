@@ -1,4 +1,11 @@
 use super::spawn::assemble_tools;
+
+/// A fresh (empty) activation index for registry assembly in tests — no
+/// skill reads recorded, so `skill_read` behaves as a plain reader.
+fn skills_index() -> Arc<crate::skills::SkillActivationIndex> {
+    Arc::new(crate::skills::SkillActivationIndex::default())
+}
+
 use crate::chat::{Chat, ChatInit};
 use crate::domain::StateManager;
 use crate::handle::ChatHandle;
@@ -227,6 +234,7 @@ async fn test_chat() -> (Chat, Arc<MockSink>) {
             &kit,
             "test-chat",
             &store,
+            skills_index(),
         )),
         store,
     };
@@ -699,6 +707,7 @@ async fn chat_with_tools(tools: ToolRegistry) -> (Chat, Arc<MockSink>) {
             &kit,
             "test-chat",
             &store,
+            skills_index(),
         )),
         store,
     };
@@ -836,6 +845,7 @@ async fn tool_port_enriches_ctx_with_chat_boundary() {
             &kit,
             "test-chat",
             &store,
+            skills_index(),
         )),
         store,
     };
@@ -995,7 +1005,7 @@ async fn assemble_tools_includes_state_tools_and_global_entries() {
         descriptions: &HashMap::new(),
         question: question_tool(sink_for_assemble()),
     };
-    let registry = assemble_tools(&global, sm, &kit, "c1", &store);
+    let registry = assemble_tools(&global, sm, &kit, "c1", &store, skills_index());
     let names: Vec<String> = registry
         .entries()
         .iter()

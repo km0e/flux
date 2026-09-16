@@ -24,13 +24,13 @@
  * draft lives at panel level so switching the selection never loses a
  * half-typed source.
  *
- * Presentation shares the integration-ui building blocks with
+ * Presentation shares the shared building blocks (settings/shared) with
  * ProvidersPanel / McpPanel — one typography scale, one spacing rhythm,
  * one two-step-remove control, one rail-selection repair.
  *
  * Provides: SkillsPanel
  * Depends: core/state.ts, services/skills.ts, hooks/useIsMobile.ts,
- *          components/ui/*, components/dialogs/integration-ui.tsx
+ *          components/ui/*, components/settings/shared.tsx
  */
 import { useEffect, useState } from 'react';
 import { useFlux } from '../../core/state';
@@ -54,7 +54,7 @@ import {
   RowTitle,
   SectionLabel,
   useRailSelection,
-} from './integration-ui';
+} from './shared';
 
 /** Selection key — names can collide across sources, so the key carries
  * the source too. */

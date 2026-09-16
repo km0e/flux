@@ -353,6 +353,16 @@ dependencies = [
  "anstyle",
  "clap_lex",
  "strsim",
+ "terminal_size",
+]
+
+[[package]]
+name = "clap_complete"
+version = "4.6.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "037e2a1a92236d0aff7e845093f64661d6df4c02c9fcc61a60e9e1d736fa392f"
+dependencies = [
+ "clap",
 ]
 
 [[package]]
@@ -530,6 +540,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "ctor"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ec09e802f5081de6157da9a75701d6c713d8dc3ba52571fd4bd25f412644e8a6"
+dependencies = [
+ "ctor-proc-macro",
+ "dtor",
+]
+
+[[package]]
+name = "ctor-proc-macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e2931af7e13dc045d8e9d26afccc6fa115d64e115c9c84b1166288b46f6782c2"
+
+[[package]]
 name = "ctutils"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -616,6 +642,21 @@ name = "dotenvy"
 version = "0.15.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
+name = "dtor"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "97cbdf2ad6846025e8e25df05171abfb30e3ababa12ee0a0e44b9bbe570633a8"
+dependencies = [
+ "dtor-proc-macro",
+]
+
+[[package]]
+name = "dtor-proc-macro"
+version = "0.0.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7454e41ff9012c00d53cf7f475c5e3afa3b91b7c90568495495e8d9bf47a1055"
 
 [[package]]
 name = "dunce"
@@ -734,13 +775,14 @@ dependencies = [
 
 [[package]]
 name = "flux-chat"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
  "flux-core",
  "flux-loop",
  "flux-store",
+ "flux-tools",
  "futures",
  "serde",
  "serde_json",
@@ -753,7 +795,7 @@ dependencies = [
 
 [[package]]
 name = "flux-core"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "futures",
@@ -769,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "flux-loop"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -782,7 +824,7 @@ dependencies = [
 
 [[package]]
 name = "flux-macros"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -796,11 +838,12 @@ dependencies = [
 
 [[package]]
 name = "flux-mcp"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "axum",
  "flux-core",
+ "flux-test-support",
  "http",
  "reqwest",
  "rmcp",
@@ -813,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "flux-proto"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "flux-core",
  "prost",
@@ -824,13 +867,14 @@ dependencies = [
 
 [[package]]
 name = "flux-provider"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
  "bytes",
  "flux-core",
+ "flux-test-support",
  "futures",
  "reqwest",
  "serde",
@@ -842,7 +886,7 @@ dependencies = [
 
 [[package]]
 name = "flux-server"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -850,6 +894,7 @@ dependencies = [
  "base64 0.23.1",
  "bytes",
  "clap",
+ "clap_complete",
  "e4pty",
  "flate2",
  "flux-chat",
@@ -860,6 +905,7 @@ dependencies = [
  "flux-provider",
  "flux-session",
  "flux-store",
+ "flux-test-support",
  "flux-tools",
  "futures",
  "futures-util",
@@ -884,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "flux-session"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -904,7 +950,7 @@ dependencies = [
 
 [[package]]
 name = "flux-store"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "anyhow",
  "flux-core",
@@ -917,8 +963,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "flux-test-support"
+version = "0.1.5"
+dependencies = [
+ "ctor",
+ "reqwest",
+]
+
+[[package]]
 name = "flux-tools"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "flux-core",
@@ -2982,8 +3036,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
+ "rustix",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "terminal_size"
+version = "0.4.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "230a1b821ccbd75b185820a1f1ff7b14d21da1e442e22c0863ea5f08771a8874"
+dependencies = [
  "rustix",
  "windows-sys 0.61.2",
 ]

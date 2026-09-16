@@ -9,13 +9,14 @@ members = [
     "crates/flux-chat",
     "crates/flux-session",
     "crates/flux-store",
+    "crates/flux-test-support",
     "crates/flux-mcp",
     "crates/flux-server",
     "crates/flux-tools",
 ]
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 description = "A general-purpose coding agent framework in Rust with a browser chat UI frontend"
 edition = "2024"
 authors = ["Flux Contributors"]
@@ -39,6 +40,8 @@ tempfile = "3"
 
 # P4 spike — generated wire contracts (proto/ is the single source)
 flux-proto = { path = "crates/flux-proto" }
+# Test-only shared support (dev-dependency ONLY — see its crate docs)
+flux-test-support = { path = "crates/flux-test-support" }
 # reqwest 0.13 made rustls the default TLS backend (default-tls = ["rustls"]);
 # native-tls was a leftover from the 0.12 era and dragged the whole OpenSSL
 # stack into the tree — fatal for cross-compilation (zigbuild/xwin paths).

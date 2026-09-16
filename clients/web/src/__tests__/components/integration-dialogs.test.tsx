@@ -6,10 +6,10 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, fireEvent, screen, waitFor } from '@testing-library/react';
-import { ProvidersPanel } from '../../components/dialogs/ProvidersPanel';
-import { McpPanel } from '../../components/dialogs/McpPanel';
-import { SkillsPanel } from '../../components/dialogs/SkillsPanel';
-import { SettingsDialog } from '../../components/dialogs/SettingsDialog';
+import { ProvidersPanel } from '../../components/settings/ProvidersPanel';
+import { McpPanel } from '../../components/settings/McpPanel';
+import { SkillsPanel } from '../../components/settings/SkillsPanel';
+import { SettingsDialog } from '../../components/settings/SettingsDialog';
 import { useFlux, resetFluxForTest } from '../../core/state';
 import { dispatchMessage } from '../../services/dispatch';
 import { registerAllHandlers } from '../../services/handlers';
@@ -93,11 +93,12 @@ describe('integration panels', () => {
       return r;
     });
     render(<ProvidersPanel />);
-    // Mount → fetchProviders + fetchModels (the panel owns both registries'
-    // fetches; the pickers read the caches only), plus the automatic
-    // catalog probe of the selected entry.
+    // Mount → fetchProviders only (the panel owns the registry fetch; the
+    // saved-model list is SESSION-level — preloaded at attach — so the
+    // panel never pulls it), plus the automatic catalog probe of the
+    // selected entry.
     await waitFor(() => expect(fetchProviders).toHaveBeenCalled());
-    expect(fetchModels).toHaveBeenCalled();
+    expect(fetchModels).not.toHaveBeenCalled();
     await waitFor(() => expect(probeProvider).toHaveBeenCalledWith('main'));
     // The rail lists the entry; the first one is preselected (preview-first).
     expect(screen.getByRole('button', { name: 'Select provider main' })).toBeTruthy();

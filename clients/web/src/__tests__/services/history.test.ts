@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
-import { renderHistoryMessages, historyPageStart } from '../../services/history';
+import { renderHistoryMessages, historyPageStart, historyFingerprint } from '../../services/history';
 import { useFlux } from '../../core/state';
-import { _resetPanesForTest, getPane } from '../../services/panes';
+import { _resetPanesForTest, getPane, clearPaneMessages } from '../../services/panes';
 import { markPaneStale } from '../../services/stream-handler';
 import type { HistoryMessage } from '../../core/types';
 
@@ -180,6 +180,74 @@ describe('renderHistoryMessages', () => {
     await renderHistoryMessages('test-chat', [{ role: 'user', content: 'second', tool_calls: [] }]);
     expect(pane.textContent).toContain('first');
     expect(pane.textContent).not.toContain('second');
+  });
+
+  it('skips the rebuild when the re-delivered snapshot is unchanged (switch-back fast path)', async () => {
+    // The claim re-delivers the full snapshot on EVERY switch back; when it
+    // is identical to what the pane already shows (the A↔B toggle with the
+    // pane parked at the bottom), the tear-down + rebuild + msgIn replay is
+    // the switch flash — the pane must survive untouched.
+    const msgs: HistoryMessage[] = [{ role: 'user', content: 'hello', tool_calls: [] }];
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+    // Sentinel: a rebuild removes every child, so its survival proves the skip.
+    const sentinel = document.createElement('div');
+    sentinel.className = 'sentinel';
+    pane.appendChild(sentinel);
+
+    // A fresh copy of the same snapshot — structurally what the wire redelivers.
+    await renderHistoryMessages('test-chat', msgs.map((m) => ({ ...m })));
+
+    expect(pane.querySelector('.sentinel')).toBeTruthy();
+    expect(pane.querySelector('.message.user')?.textContent).toContain('hello');
+  });
+
+  it('re-renders when the snapshot changed while away (messages appended elsewhere)', async () => {
+    const msgs: HistoryMessage[] = [{ role: 'user', content: 'first', tool_calls: [] }];
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+
+    // Another window streamed while this one was unsubscribed: the count
+    // changed, the fingerprint misses, the full path must run.
+    const grown: HistoryMessage[] = [
+      ...msgs,
+      { role: 'assistant', content: 'second', tool_calls: [] },
+    ];
+    await renderHistoryMessages('test-chat', grown);
+
+    expect(pane.textContent).toContain('second');
+  });
+
+  it('never skips onto a wiped pane (cursor survives clearPaneMessages)', async () => {
+    const msgs: HistoryMessage[] = [{ role: 'user', content: 'hello', tool_calls: [] }];
+    await renderHistoryMessages('test-chat', msgs);
+    // switchLease's stale-wipe path clears the DOM but the pane's cursor
+    // (and its fingerprint) survive in the WeakMap.
+    clearPaneMessages('test-chat');
+    const pane = getPane('test-chat');
+    expect(pane.querySelector('.message')).toBeNull();
+
+    // The identical snapshot returns — the DOM-presence gate must force the
+    // full render; cursor-only matching would skip onto an empty pane and
+    // leave the chat blank.
+    await renderHistoryMessages('test-chat', msgs.map((m) => ({ ...m })));
+    expect(pane.querySelector('.message.user')?.textContent).toContain('hello');
+  });
+});
+
+describe('historyFingerprint', () => {
+  it('separates an unchanged snapshot from an appended or edited one', () => {
+    const base: HistoryMessage[] = [{ role: 'user', content: 'hello', tool_calls: [] }];
+    // Structural copy (what the wire redelivers) → identical fingerprint.
+    expect(historyFingerprint(base)).toBe(historyFingerprint(base.map((m) => ({ ...m }))));
+    // Appended message → count changed.
+    expect(historyFingerprint(base)).not.toBe(
+      historyFingerprint([...base, { role: 'assistant', content: 'reply', tool_calls: [] }]),
+    );
+    // Same count, different tail content → length changed.
+    expect(historyFingerprint(base)).not.toBe(
+      historyFingerprint([{ role: 'user', content: 'hello!!', tool_calls: [] }]),
+    );
   });
 });
 

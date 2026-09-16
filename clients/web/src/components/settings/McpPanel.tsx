@@ -21,13 +21,13 @@
  * loses a half-typed entry; after a successful add the new entry is
  * auto-selected once its broadcast lands.
  *
- * Presentation shares the integration-ui building blocks with
+ * Presentation shares the shared building blocks (settings/shared) with
  * ProvidersPanel / SkillsPanel — one typography scale, one spacing
  * rhythm, one two-step-remove control, one rail-selection repair.
  *
  * Provides: McpPanel
  * Depends: core/state.ts, services/mcp.ts, hooks/useIsMobile.ts,
- *          components/ui/*, components/dialogs/integration-ui.tsx
+ *          components/ui/*, components/settings/shared.tsx
  */
 import { useEffect, useState } from 'react';
 import { useFlux } from '../../core/state';
@@ -52,7 +52,7 @@ import {
   RowTitle,
   SectionLabel,
   useRailSelection,
-} from './integration-ui';
+} from './shared';
 
 /** The rail selection key of one server row (stable reference). */
 const keyOf = (s: McpServerSummary): string => s.id;

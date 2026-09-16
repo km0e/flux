@@ -3,15 +3,12 @@
  * (no synthetic "server default" option — `chat_create` requires an
  * explicit pin) and the model probe follows the selection.
  */
-import { describe, it, expect, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 import { render, screen, fireEvent } from '@testing-library/react';
 import { useState } from 'react';
 import { ProviderPicker } from '../../components/ProviderPicker';
 import { useFlux, resetFluxForTest } from '../../core/state';
 import { resetBridgeForTest } from '../../core/bridge';
-import { fetchModels } from '../../services/models';
-
-vi.mock('../../services/models', () => ({ fetchModels: vi.fn() }));
 
 /** Controlled harness mirroring the dialogs' wiring (state flows back). */
 function Harness() {
@@ -84,26 +81,15 @@ describe('ProviderPicker', () => {
     expect(screen.queryByText(/ctx/)).toBeNull();
   });
 
-  it('pulls the LOCAL saved-model list on first open (fresh-session datalist)', async () => {
-    // Fresh session: the store's savedModels is empty even though models
-    // persist server-side — the picker's first open must fetch the list
-    // (the ListModels RPC), or the datalist renders nothing until the
-    // Providers dialog opens.
-    vi.mocked(fetchModels).mockClear();
-    render(<Harness />);
-    await vi.waitFor(() => expect(fetchModels).toHaveBeenCalled());
-  });
-
-  it('a populated store skips the saved-model pull and lists saved rows', () => {
+  it('lists saved rows in the datalist (star-marked)', () => {
+    // The saved-model list is session-level (preloaded at attach) — the
+    // picker only reads the store; no fetch belongs here.
     useFlux.setState({
       savedModels: [
         { provider: 'alpha', model: 'm-a', params: { context_length: 131072 }, meta: {} },
       ],
     });
-    vi.mocked(fetchModels).mockClear();
     render(<Harness />);
-    // The populated store skips the pull.
-    expect(fetchModels).not.toHaveBeenCalled();
     // The saved row feeds the datalist (star-marked) once its provider is picked.
     fireEvent.change(screen.getByLabelText(/Provider/), { target: { value: 'alpha' } });
     expect(screen.getByText('★ m-a')).toBeTruthy();

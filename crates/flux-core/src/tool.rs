@@ -20,6 +20,12 @@ pub const BUF_READ_TOOL: &str = "buf_read";
 /// agent-produced).
 pub const QUESTION_TOOL: &str = "question";
 
+/// Canonical name of the skill reader tool — chat-owned like `buf_read`
+/// (it needs the store + chat id to dedup activations against the
+/// transcript, see `flux_chat::skills`), so MCP registration must skip
+/// the name (reserved set).
+pub const SKILL_READ_TOOL: &str = "skill_read";
+
 /// Per-invocation context handed to every tool execution.
 ///
 /// Carries the kernel-owned cancellation token for the current tool

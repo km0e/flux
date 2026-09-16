@@ -303,16 +303,20 @@
 }
 
 /* MOBILE regime (<768px, the one breakpoint): the layer becomes a fixed
-   overlay drawer; the sidebar slides, the backdrop dims the conversation,
-   the resizer disappears and the toggle is always available (hidden while
-   the drawer is open — the backdrop owns closing then). Kept OUTSIDE the
-   layer: the drawer's fixed-position overrides must beat the base rules
-   above regardless of what utilities the markup carries. Safe-area: the
-   drawer content clears the top notch / home indicator. */
+   overlay drawer that starts BELOW the top bar — the bar (and its toggle,
+   which flips to an X while the drawer is open) stays exposed and tappable,
+   so there is always a VISIBLE way back to the conversation without
+   selecting anything. The backdrop dims what's left of the conversation;
+   a tap on it closes too. The sidebar slides, the resizer disappears.
+   Kept OUTSIDE the layer: the drawer's fixed-position overrides must beat
+   the base rules above regardless of what utilities the markup carries. */
 @media (max-width: 767.5px) {
   #sidebar-layer {
     position: fixed;
     inset: 0;
+    /* TopBar is h-12 (3rem) here — its safe-area padding rides INSIDE that
+       height (border-box), so 3rem is the bar's full extent. */
+    top: 3rem;
     z-index: 40;
     pointer-events: none;
   }
@@ -322,6 +326,14 @@
   }
 
   #sidebar {
+    /* `flex: none` is LOAD-BEARING: the Tabs root carries `flex-1`
+       (flex: 1 1 0%), and this layer is a definite-width fixed box —
+       without it the grow fills the viewport and the drawer silently
+       becomes a full-screen sheet (the authored width below, the dimmed
+       backdrop, and the "tap outside to close" affordance all die).
+       flex:none lets the authored width govern; desktop sizing (the
+       --fx-sidebar-w var) is unaffected — its layer sizes to content. */
+    flex: none;
     width: min(80vw, 300px);
     pointer-events: auto;
     transform: translateX(-105%);
@@ -345,9 +357,9 @@
     display: none;
   }
 
-  /* Drawer content clears the notch (top) and the home indicator (bottom). */
+  /* Drawer content clears the home indicator (bottom); the notch is already
+     cleared by the layer's top offset (below the bar). */
   #sidebar {
-    padding-top: env(safe-area-inset-top);
     padding-bottom: env(safe-area-inset-bottom);
   }
 }

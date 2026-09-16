@@ -20,7 +20,6 @@
 import { useEffect } from 'react';
 import { useFlux } from '../core/state';
 import { fetchProviders } from '../services/providers';
-import { fetchModels } from '../services/models';
 import { fmtTokens } from '../lib/format';
 import { SelectField, TextField } from './ui';
 
@@ -33,22 +32,14 @@ export function ProviderPicker(props: {
   const catalog = useFlux((s) => s.providerModels[props.providerId]);
   const saved = useFlux((s) => s.savedModels).filter((m) => m.provider === props.providerId);
   const needsFetch = providers.length === 0;
-  // The LOCAL saved-model list persists server-side but was only pulled by
-  // the Providers dialog — a fresh session (new page / first server run)
-  // opened the picker with an EMPTY model datalist even though models were
-  // saved. First picker open pulls it (same lazy pattern as the registry
-  // summary); a legitimately empty registry doesn't re-fire.
-  const needsModels = useFlux((s) => s.savedModels.length === 0);
+  // The saved-model list is SESSION-level: preloaded at attach
+  // (handlers.session_resumed) and refreshed by the mutation broadcasts —
+  // the picker only reads it.
 
   // Registry summary: fetched once on first open (the store caches it).
   useEffect(() => {
     if (needsFetch) fetchProviders();
   }, [needsFetch]);
-
-  // Saved models: fetched once on first open (the store caches it).
-  useEffect(() => {
-    if (needsModels) fetchModels();
-  }, [needsModels]);
 
   // The hint follows the typed model: a SAVED row speaks first (its
   // editable params are the user's deployment truth), the probed catalog

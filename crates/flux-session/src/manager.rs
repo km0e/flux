@@ -24,7 +24,7 @@ use tokio::sync::RwLock;
 /// reaped after this.
 pub(crate) const SESSION_GRACE: std::time::Duration = std::time::Duration::from_secs(30);
 
-type ChatId = String;
+pub(crate) type ChatId = String;
 
 /// One-shot hydration closure: resolves a persisted provider pin (id +
 /// the chat's explicitly persisted model) into an instance. Used once

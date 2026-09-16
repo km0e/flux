@@ -51,8 +51,11 @@ cargo build --release
 ```
 
 There is no config file — everything is a CLI flag (`--host`, `--port`,
-`--db-path`, `--preamble`, `--no-web`, `--web-assets-dir`; see
-`flux-server --help`) or managed from the UI into the server database.
+`--db-path`, `--preamble`, `--no-web`, `--web-assets-dir`; each flag has a
+same-named `FLUX_*` environment fallback, precedence flag > env > default;
+`--generate-completions bash|zsh|fish|powershell|elvish` emits shell
+completions; see `flux-server --help`) or managed from the UI into the
+server database.
 
 Open `http://127.0.0.1:8080`, add a provider endpoint in the Providers dialog
 (top bar), then pick a working directory in the new-chat dialog and chat.

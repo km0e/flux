@@ -20,7 +20,7 @@ const panes = new Map<string, HTMLDivElement>();
 
 /** The brand wave, inline (no tile, no gradient — the mark alone). */
 const WAVE_SVG =
-  '<svg viewBox="22 22 84 46" width="52" height="29" fill="currentColor" aria-hidden="true">' +
+  '<svg viewBox="22 22 84 46" width="64" height="36" fill="currentColor" aria-hidden="true">' +
   '<path d="M 8 28 C 32 28, 48 56, 64 56 C 80 56, 96 44, 120 44 L 120 52 ' +
   'C 96 52, 80 64, 64 64 C 48 64, 32 44, 8 44 Z"/></svg>';
 
@@ -191,15 +191,29 @@ export function switchToChat(chatId: string): void {
     }
   }
 
-  // Show and fade in the target pane
+  // Show the target pane. Fading it in from opacity 0 while the outgoing
+  // pane fades OUT (the .switching-out overlay) dips BOTH to ~50% opacity
+  // at the transition midpoint — the background bleeds through and the
+  // switch reads as a flash. A pane that already carries rendered history
+  // goes straight to full opacity (a true crossfade: the outgoing pane
+  // dissolves ON TOP of it); only a blank pane — first open or post-evict,
+  // still awaiting its history snapshot — keeps the fade-in to soften the
+  // load window.
   if (chatId) {
     const target = getPane(chatId);
     // Pane may still carry the fade-out class if it was re-selected mid-switch
     target.classList.remove('switching-out');
-    target.style.opacity = '0';
     target.style.display = '';
-    void target.offsetHeight; // force reflow so the CSS transition fires
-    target.style.opacity = ''; // clear inline opacity; CSS rule (opacity 1) takes over
+    // Already-rendered panes reveal INSTANTLY — no inline opacity write at
+    // all (removing .switching-out restores the stylesheet opacity). Only a
+    // blank pane (first open / post-evict, still awaiting its history
+    // snapshot) runs the fade-in: set 0 → reflow → clear so the CSS
+    // transition fires.
+    if (!target.querySelector('.message, .history-load-earlier')) {
+      target.style.opacity = '0';
+      void target.offsetHeight; // force reflow so the CSS transition fires
+      target.style.opacity = ''; // clear inline opacity; CSS rule (opacity 1) takes over
+    }
   } else {
     for (const [, pane] of panes) {
       pane.style.display = 'none';

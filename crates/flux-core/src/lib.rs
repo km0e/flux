@@ -28,7 +28,7 @@ pub use loop_io::{
 };
 pub use ports::{OutputPort, ToolPort};
 pub use provider::{ModelInfo, Provider};
-pub use tool::{BUF_READ_TOOL, QUESTION_TOOL, Tool, ToolCtx, ToolRegistry};
+pub use tool::{BUF_READ_TOOL, QUESTION_TOOL, SKILL_READ_TOOL, Tool, ToolCtx, ToolRegistry};
 pub use types::{
     ChatStateKind, INTERRUPTED_MARK, Message, Role, StreamChunk, ToolCall, ToolDefinition,
 };

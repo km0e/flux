@@ -1,0 +1,13 @@
+[package]
+name = "flux-test-support"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# Re-exported so the `test_env_guard!` expansion can name the attribute
+# without consumers needing a direct `ctor` dependency.
+ctor = "0.4"
+reqwest = { workspace = true }

@@ -21,6 +21,11 @@
  *   5. Fork semantics — the copy EXCLUDES the fork point (the redo turn):
  *      the forked pane carries no copied messages and its composer opens
  *      prefilled with the forked message's content.
+ *   6. Mobile drawer — the drawer keeps its authored width (`flex: none`
+ *      against the Tabs root's flex-1, else the grow makes it a full-screen
+ *      sheet), starts below the top bar (toggle/X + backdrop stay reachable
+ *      as the way back), and the row ⋯ menu opens WITHOUT closing the
+ *      drawer (the tap's click must not bubble into the row's select).
  *
  * Usage:
  *   npm run ui-check          (from clients/web)
@@ -844,8 +849,9 @@ async function main() {
   // 10. MOBILE regime — device-metrics + touch emulation at 390×844: the
   // responsive shell must hold the geometry floors (no horizontal
   // overflow, touch-visible hover affordances, 16px composer input
-  // against iOS auto-zoom, full-screen dock sheet). Restores the desktop
-  // metrics after.
+  // against iOS auto-zoom, full-screen dock sheet) and the drawer must
+  // stay a drawer (authored width below the bar, ⋯ menu contained).
+  // Restores the desktop metrics after.
   {
     await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
     await send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 5 });
@@ -891,6 +897,93 @@ async function main() {
     await sleep(300);
     // Leave it closed (the chat must be visible for the dock check below).
     check('mobile: drawer toggles from the header button', before !== after, `open ${before} → ${after}`);
+
+    // Drawer geometry + the way-back affordances (regression-pinned):
+    // the Tabs root carries `flex-1`, and this layer is a definite-width
+    // fixed box — without `flex: none` on #sidebar the grow silently turns
+    // the drawer into a full-screen sheet (backdrop + every close path
+    // dead except selecting a chat). With it: authored width, below the
+    // top bar, the toggle (X) reachable, and a dimmed backdrop that
+    // closes on tap.
+    {
+      const drawerOpen = await evalJs(`document.getElementById('sidebar-layer').classList.contains('open')`);
+      if (!drawerOpen) {
+        await evalJs(`document.getElementById('sidebar-toggle').click()`);
+        await sleep(400);
+      }
+      const geom = JSON.parse(
+        await evalJs(`(() => {
+          const s = document.getElementById('sidebar').getBoundingClientRect();
+          const bar = document.getElementById('top-bar').getBoundingClientRect();
+          return JSON.stringify({ w: s.width, left: s.left, top: s.top, barBottom: bar.bottom });
+        })()`),
+      );
+      check(
+        'mobile: drawer keeps its authored width, below the top bar',
+        geom.left === 0 && Math.abs(geom.top - geom.barBottom) < 1 && geom.w <= 301,
+        `w=${Math.round(geom.w)} top=${Math.round(geom.top)} bar=${Math.round(geom.barBottom)}`,
+      );
+      const toggle = JSON.parse(
+        await evalJs(`(() => {
+          const t = document.getElementById('sidebar-toggle').getBoundingClientRect();
+          const el = document.elementFromPoint(t.x + t.width / 2, t.y + t.height / 2);
+          return JSON.stringify({ reachable: !!el && !!el.closest('#sidebar-toggle') });
+        })()`),
+      );
+      check('mobile: toggle reachable while the drawer is open (visible close control)', toggle.reachable);
+      const dimmed = JSON.parse(
+        await evalJs(`(() => {
+          const x = innerWidth - 20;
+          const y = Math.round(innerHeight / 2);
+          const el = document.elementFromPoint(x, y);
+          return JSON.stringify({ x, y, hit: el ? el.id : 'none' });
+        })()`),
+      );
+      if (dimmed.hit !== 'sidebar-backdrop') {
+        check('mobile: dimmed backdrop exposed right of the drawer', false, `hit=${dimmed.hit}`);
+      } else {
+        await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: dimmed.x, y: dimmed.y, button: 'left', buttons: 1, clickCount: 1 });
+        await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: dimmed.x, y: dimmed.y, button: 'left', clickCount: 1 });
+        await sleep(400);
+        const closed = await evalJs(`document.getElementById('sidebar-layer').classList.contains('closed')`);
+        check('mobile: backdrop tap closes the drawer without selecting', closed);
+      }
+      // Reopen, then the ⋯ tap must open the row menu WITHOUT closing the
+      // drawer (the tap's click used to bubble into the row = select =
+      // drawer close; rename/delete became unreachable mid-action).
+      await evalJs(`document.getElementById('sidebar-toggle').click()`);
+      await sleep(400);
+      const menuRect = JSON.parse(
+        await evalJs(
+          `(() => { const b = document.querySelector('#conversation-list [aria-label^="Chat actions"]'); const r = b.getBoundingClientRect(); return JSON.stringify({ x: r.x + r.width / 2, y: r.y + r.height / 2 }); })()`,
+        ),
+      );
+      await send('Input.dispatchMouseEvent', { type: 'mousePressed', x: menuRect.x, y: menuRect.y, button: 'left', buttons: 1, clickCount: 1 });
+      await send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: menuRect.x, y: menuRect.y, button: 'left', clickCount: 1 });
+      await sleep(400);
+      const menuAndDrawer = JSON.parse(
+        await evalJs(`JSON.stringify({
+          menu: !!document.querySelector('[role="menu"]'),
+          drawerOpen: document.getElementById('sidebar-layer').classList.contains('open'),
+        })`),
+      );
+      check(
+        'mobile: ⋯ tap opens the row menu and keeps the drawer open',
+        menuAndDrawer.menu && menuAndDrawer.drawerOpen,
+        JSON.stringify(menuAndDrawer),
+      );
+      await evalJs(
+        `[...document.querySelectorAll('[role="menuitem"]')].find((i) => i.textContent.includes('Rename'))?.click()`,
+      );
+      await waitFor(`!!document.querySelector('#conversation-list input[aria-label="Chat name"]')`, 'mobile rename input');
+      const renameInDrawer = await evalJs(
+        `document.getElementById('sidebar-layer').classList.contains('open') && !!document.querySelector('#conversation-list input[aria-label="Chat name"]')`,
+      );
+      check('mobile: Rename keeps the drawer open with the inline input', renameInDrawer === true);
+      await send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27 });
+      await sleep(300);
+    }
 
     // The dock is a full-screen sheet on mobile. The drawer must be OPEN —
     // a closed drawer sits at translateX(-105%), putting the tab's rect

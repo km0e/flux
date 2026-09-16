@@ -33,6 +33,14 @@ use futures_util::{SinkExt as _, StreamExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
+// Same hermeticity guard as main.rs — this is a SEPARATE test binary the
+// bin's ctor does not cover: proxy vars would hijack the reqwest clients
+// below (502s masquerading as failures) and `FLUX_*` vars leak through
+// the env into the spawned server children. Shared with every other test
+// binary via flux-test-support; runs pre-`main`, before the harness
+// spawns any test thread.
+flux_test_support::test_env_guard!();
+
 /// Serializes SERVER STARTS across the parallel tests. The start sequence
 /// (pick a "free" port → release → the child binds it) has an unavoidable
 /// race window: the OS can re-hand the port to an ephemeral outbound

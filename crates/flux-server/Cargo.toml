@@ -45,7 +45,9 @@ tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 toml = "1.1"
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "wrap_help", "env"] }
+# Shell completion script generation (--generate-completions <SHELL>)
+clap_complete = "4"
 reqwest = { workspace = true }
 futures-util = "0.3"
 uuid = { workspace = true }
@@ -67,6 +69,9 @@ tower-http = { version = "0.7", default-features = false, features = [
 ] }
 
 [dev-dependencies]
+# Hermeticity guard for main.rs + connect_e2e.rs (replaces the two
+# copy-pasted ctor modules — the var list lives once in the support crate)
+flux-test-support = { workspace = true }
 sha2 = "0.11"
 base64 = "0.23"
 tokio = { workspace = true }

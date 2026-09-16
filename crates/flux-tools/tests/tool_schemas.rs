@@ -14,7 +14,7 @@
 use flux_core::Tool;
 use flux_tools::{
     BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    SkillListTool, SkillReadTool, WriteFileTool,
+    SkillListTool, WriteFileTool,
 };
 
 fn expected_schema(name: &str) -> serde_json::Value {
@@ -100,15 +100,6 @@ fn expected_schema(name: &str) -> serde_json::Value {
             "required": [],
             "additionalProperties": false,
         }),
-        "skill_read" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "name": { "type": "string", "description": "Skill name as listed by skill_list." },
-                "path": { "type": "string", "description": "File to read, relative to the skill's directory. Defaults to SKILL.md." },
-            },
-            "required": ["name"],
-            "additionalProperties": false,
-        }),
         other => panic!("unexpected tool name: {other}"),
     }
 }
@@ -125,7 +116,6 @@ fn all_tool_schemas_match_the_pinned_contract() {
         ("glob", Box::new(GlobTool::new())),
         ("bash", Box::new(BashTool::new())),
         ("skill_list", Box::new(SkillListTool::new())),
-        ("skill_read", Box::new(SkillReadTool::new())),
     ];
 
     for (name, tool) in &tools {

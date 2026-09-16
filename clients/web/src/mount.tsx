@@ -15,7 +15,7 @@
  * persisted active chat (the web UI's white-screen bug).
  *
  * Provides: mountChat, MountOptions
- * Depends: components/App.tsx, components/dialogs/impl.tsx, core/*, services/*
+ * Depends: components/App.tsx, components/dialogs/registry.tsx, core/*, services/*
  */
 import { createRoot } from 'react-dom/client';
 import { flushSync } from 'react-dom';
@@ -30,7 +30,7 @@ import { switchToChat } from './services/panes';
 import { resetStreamingForReconnect } from './services/stream-handler';
 import { installCodeCopyHandler } from './services/code-copy';
 import { switchLease } from './services/lease';
-import { registerDialogs } from './components/dialogs/impl';
+import { registerDialogs } from './components/dialogs/registry';
 import { initViewportHeight } from './core/viewport';
 import { installFailsafe } from './core/failsafe';
 import { syncTitle, initTitleAttention } from './services/title';

@@ -175,7 +175,7 @@ export function ChatView(): React.ReactElement {
                   type="button"
                   disabled={connStatus !== 'connected'}
                   className={cn(
-                    'min-w-0 max-w-56 cursor-pointer truncate rounded-md border border-border bg-inset px-1.5 py-0.5 max-md:min-h-9 max-md:py-1.5',
+                    'min-w-0 max-w-56 cursor-pointer truncate rounded-sm border border-border bg-inset px-1.5 py-0.5 max-md:min-h-9 max-md:py-1.5',
                     'font-mono text-2xs text-muted transition-colors duration-fast hover:border-border-strong hover:text-fg',
                     'disabled:cursor-not-allowed disabled:opacity-40',
                   )}

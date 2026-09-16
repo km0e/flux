@@ -44,9 +44,9 @@ function freePort() {
 }
 
 const children = [];
-function startDetached(cmd, args, logFile) {
+function startDetached(cmd, args, logFile, opts = {}) {
   const out = { 'ignore': 'ignore', 'inherit': 'inherit' }[logFile] ?? logFile;
-  children.push(spawn(cmd, args, { stdio: ['ignore', out, out] }));
+  children.push(spawn(cmd, args, { stdio: ['ignore', out, out], ...opts }));
 }
 function cleanup() {
   for (const c of children) {
@@ -224,6 +224,11 @@ async function main() {
     ['--db-path', path.join(tmp, 'shots.db'), '--web-assets-dir', DIST,
      '--host', '127.0.0.1', '--port', String(serverPort)],
     'inherit',
+    // The server's reqwest honors env-var proxies — on a proxied dev machine
+    // the upstream POST to the loopback fake provider would route through the
+    // proxy and answer 502 (the same guard ui-check.mjs carries). Scope
+    // no_proxy to THIS child only; the user's shell is untouched.
+    { env: { ...process.env, no_proxy: '127.0.0.1,localhost', NO_PROXY: '127.0.0.1,localhost' } },
   );
   for (let i = 0; i < 60; i++) {
     try { if ((await fetch(`http://127.0.0.1:${serverPort}/`)).ok) break; } catch { /* not up */ }

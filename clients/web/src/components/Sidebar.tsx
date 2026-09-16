@@ -36,37 +36,56 @@ import type { Chat } from '../core/state';
 
 /** The chat row's ⋯ menu (Rename/Delete) — a feature composite over the
  * generic dropdown primitives (ui/dropdown-menu owns only styling); hover
- * reveals on pointer devices, always visible on touch. */
+ * reveals on pointer devices, always visible on touch.
+ *
+ * The row itself is an activation surface for OPENING the chat (click +
+ * Enter/Space on its role="button"), so the menu's own activators must be
+ * contained here: a tap on ⋯ bubbles a click (touch always synthesizes
+ * one, even though Radix opens on pointerdown), and Enter/Space on the
+ * focused trigger bubble too — either leaking into the row selects the
+ * chat, and on the mobile drawer selection CLOSES the drawer, yanking the
+ * list away mid-action (rename/delete became unreachable). Radix ignores
+ * click and handles Enter/Space/ArrowDown itself, so stopping just those
+ * at this wrapper costs nothing. */
 function ChatRowMenu(props: {
   label: string;
   onRename: () => void;
   onDelete: () => void;
 }): React.ReactElement {
+  const stopRowActivation = (e: React.SyntheticEvent) => e.stopPropagation();
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <IconButton
-          label={props.label}
-          className={cn(
-            'size-6 max-md:size-9 rounded-md',
-            'opacity-0 touch:opacity-100 group-hover/row:opacity-100 focus-visible:opacity-100',
-            'data-[state=open]:bg-hover data-[state=open]:text-fg data-[state=open]:opacity-100',
-          )}
-        >
-          <MoreHorizontal size={14} />
-        </IconButton>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent>
-        <DropdownMenuItem onSelect={props.onRename}>
-          <Pencil size={12} aria-hidden="true" className="text-muted" />
-          Rename
-        </DropdownMenuItem>
-        <DropdownMenuItem danger onSelect={props.onDelete}>
-          <Trash2 size={12} aria-hidden="true" />
-          Delete
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <span
+      className="flex shrink-0 items-center"
+      onClick={stopRowActivation}
+      onKeyDown={(e) => {
+        if (e.key === 'Enter' || e.key === ' ') stopRowActivation(e);
+      }}
+    >
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <IconButton
+            label={props.label}
+            className={cn(
+              'size-6 max-md:size-9 rounded-md',
+              'opacity-0 touch:opacity-100 group-hover/row:opacity-100 focus-visible:opacity-100',
+              'data-[state=open]:bg-hover data-[state=open]:text-fg data-[state=open]:opacity-100',
+            )}
+          >
+            <MoreHorizontal size={14} />
+          </IconButton>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent>
+          <DropdownMenuItem onSelect={props.onRename}>
+            <Pencil size={12} aria-hidden="true" className="text-muted" />
+            Rename
+          </DropdownMenuItem>
+          <DropdownMenuItem danger onSelect={props.onDelete}>
+            <Trash2 size={12} aria-hidden="true" />
+            Delete
+          </DropdownMenuItem>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </span>
   );
 }
 

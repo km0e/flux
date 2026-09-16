@@ -1,5 +1,5 @@
 /**
- * impl.tsx — dialog implementations: register the real UI behind the
+ * registry.tsx — dialog implementations: register the real UI behind the
  * promise-shaped services/dialogs API. Called once at mount.
  *
  * Confirm/NewChat render Radix dialogs into a document-body overlay host
@@ -8,7 +8,8 @@
  * conversation flow).
  *
  * Provides: registerDialogs
- * Depends: services/dialogs.ts, components/dialogs/*
+ * Depends: services/dialogs.ts, components/dialogs/{ConfirmDialog,
+ *          NewChatDialog,QuestionCard}
  */
 import { createRoot, type Root } from 'react-dom/client';
 import {

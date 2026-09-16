@@ -13,13 +13,15 @@
  */
 import { fileIcon } from '../lib/fileIcons';
 
-/** Tinted glyph chip for a file name (16×16). */
+/** Tinted glyph chip for a file name (16×16). The 8px glyph is a deliberate
+ * type-scale exception — this is an ICON, not text: two-letter language
+ * codes (TS, PY…) cannot clear 11px inside a 16px tile. */
 export function FileIcon({ name }: { name: string }): React.ReactElement {
   const { glyph, color } = fileIcon(name);
   return (
     <span
       aria-hidden="true"
-      className="inline-grid size-4 shrink-0 place-items-center rounded-[3px] font-mono text-[8px] leading-none font-bold tracking-[-0.02em]"
+      className="inline-grid size-4 shrink-0 place-items-center rounded-xs font-mono text-[8px] leading-none font-bold tracking-[-0.02em]"
       style={{
         color,
         background: `color-mix(in srgb, ${color} 16%, transparent)`,

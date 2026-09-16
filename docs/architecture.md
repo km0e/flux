@@ -111,13 +111,13 @@ graph LR
 | `flux-core` | 内核契约层：纯类型（`Message` / `Role` / `ToolCall` / `CoreError` / `ErrorCode` / `ChatStateKind`）、`WireEvent`（内核输出词汇）、内核 I/O 词汇（`loop_io.rs`：`LoopInput` / `LoopFact` + `RoundOutcome` / `StreamEvent` / `StreamHandle` / `Connection`）、`Tool` trait（`call(arguments, ctx: ToolCtx)`，每调用协作取消上下文 + `call_id` + 沙箱边界）+ `ToolRegistry`、边界解析（`boundary::resolve_path`，`ToolCtx::resolve` 的实现）、内核端口（`ToolPort` 工具执行 + `OutputPort` 适配器侧事件出口）、`Provider` 工厂（零 IO；依赖 serde、serde_json、strum、thiserror、async-trait、tracing、futures、tokio-util）。proto 契约（`flux.v1`）在 `flux-proto`（构建期生成），flux-session 的 router 是 WireEvent → 流元素的唯一映射点 |
 | `flux-macros` | `#[derive(Tool)]` 过程宏：字段推断 JSON Schema + `call` 反序列化 |
 | `flux-provider` | OpenAI 兼容实现 + SSE 解析，实现 flux-core 的 `Provider` 会话工厂（实例按模型钉定；`begin` 开出 `Connection`） |
-| `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list / skill_read）+ 共享 subprocess 执行器 |
+| `flux-tools` | 内置工具：文件 / shell / 搜索 / Agent Skills（skill_list + 技能格式权威：发现 / 读取 / 目录节 / 激活格式化）+ 共享 subprocess 执行器 |
 | `flux-mcp` | MCP 客户端桥：连接外部 MCP 服务器——本地 stdio 子进程或远程 Streamable HTTP 端点——并暴露其工具（启动列表在 DB，UI 管理，persist-first + 即时应用；headers/env 值永不离开服务端）；接收 server 通知——`tools/list_changed` 走「通知钩子 + subscriptions/listen 订阅」双路径（覆盖 spec ≤ 2025-06-18 与 2026-07-28），`notifications/message` 日志转发到 UI |
 | `flux-store` | SQLite 持久化（sqlx，WAL：chats / messages / state / providers / mcp_servers） |
 | `flux-loop` | 对话内核：纯状态机（`machine.rs`）+ 纯泵驱动（`runtime.rs`：消费输入、步进、按序转发事实）——零 I/O、零 trait 对象 |
-| `flux-chat` | 会话层·数据平面：单 chat 任务机制（`chat` 实体 / `domain` 状态与 state 工具 / `handle` 控制句柄 / `spawn` 装配 / `round` 轮次消费者（事实 fold + 飞行监督；Rebuild → 机器门原地重建，任务不退出）/ `tool_exec` 飞行监督库（无独立任务）/ `buf` 溢出缓冲（store 支撑）/ `question` 提问工具 / `reserved` 保留工具名检查）。只依赖 flux-core 端口（`OutputPort`），对控制平面无反向依赖 |
+| `flux-chat` | 会话层·数据平面：单 chat 任务机制（`chat` 实体 / `domain` 状态与 state 工具 / `handle` 控制句柄 / `spawn` 装配 / `round` 轮次消费者（事实 fold + 飞行监督；Rebuild → 机器门原地重建，任务不退出）/ `tool_exec` 飞行监督库（无独立任务）/ `buf` 溢出缓冲（store 支撑）/ `skills` chat-owned `skill_read`（激活去重）+ 技能目录合成 / `question` 提问工具 / `reserved` 保留工具名检查）。依赖 flux-core 端口（`OutputPort`）与 flux-tools 的技能格式权威，对控制平面无反向依赖 |
 | `flux-session` | 会话层·控制平面：跨 chat / 跨 session 的簿记——`manager`（`ServerState`：全局配置 + chat 缓存 + 身份注册表）/ `ops`（租约·订阅·广播）/ `router`（WireEvent → proto 流元素的映射 + fanout）/ `lifecycle`（懒 spawn 与任务替换）/ `identity`（会话标识·类型化 sink） |
-| `flux-server` | TCP 传输（Connect 面 `/flux.v1.*` + 终端侧信道 `/ws/term`）、`grpc/*`（chat/事件/管理/fs 服务的序列化薄层）、装配、CLI（无配置文件）、`ProviderRegistry`（provider 管理：选择 / 实例构建 / 模型探测，实例递入 chat 层）、`McpManager`（MCP 启动列表管理：persist-first + 即时应用） |
+| `flux-server` | TCP 传输（Connect 面 `/flux.v1.*` + 终端侧信道 `/ws/term`）、`grpc/*`（chat/事件/管理/fs 服务的序列化薄层）、装配、CLI（无配置文件：flag + `FLUX_*` 环境回退 + `--generate-completions` shell 补全）、`ProviderRegistry`（provider 管理：选择 / 实例构建 / 模型探测，实例递入 chat 层）、`McpManager`（MCP 启动列表管理：persist-first + 即时应用） |
 | `clients/web` | Web UI（唯一前端）：React 19 + Radix UI + Tailwind v4 + zustand，Vite 构建 |
 
 ## 3. 后端架构
@@ -236,14 +236,16 @@ sequenceDiagram
 graph TB
  MACRO["#[derive(Tool, Deserialize)]<br/>字段推断 JSON Schema<br/>call 经 Value 管道反序列化"]
  subgraph IMPL["实现来源"]
- BUILTIN["内置工具 (flux-tools)<br/>read_file · edit_file · write_file · replace_lines · list_directory<br/>grep · glob · bash<br/>skill_list · skill_read"]
+ BUILTIN["内置工具 (flux-tools)<br/>read_file · edit_file · write_file · replace_lines · list_directory<br/>grep · glob · bash<br/>skill_list"]
  STATE["state_get / state_set<br/>(per-chat 注册表工具，绑定 StateManager)"]
+ SKILL["skill_read<br/>(per-chat 注册表工具，绑定 SkillActivationIndex)"]
  MCPT["MCP 工具 (flux-mcp)<br/>McpToolWrapper — rmcp 服务器桥"]
  end
  REG["ToolRegistry<br/>Arc&lt;dyn Tool&gt; · O(1) 按名查找"]
  CTX["ToolCtx (每调用)<br/>cancel · call_id<br/>workdir · current_dir（适配器填充）"]
  MACRO --> BUILTIN
  BUILTIN --> REG
+ SKILL --> REG
  QUESTION["question 工具<br/>(QuestionBoard + OutputPort)"]
  QUESTION --> REG
  MCPT --> REG
@@ -254,9 +256,9 @@ graph TB
 - **工具上下文 + 纯执行（无审批直接执行）**：沙箱边界（`workdir` / `current_dir`）经 `ToolCtx` 作为**调用上下文**到达工具——内核构造 ctx 时只填取消令牌与 call_id（内核边界无关）；`Chat`（ToolPort 适配器）在派发点从权威 state 填充边界字段后调 `tool.call`。工具内经 `ctx.resolve(path)` 解析路径参数（绝对路径必须落在边界内，相对路径拼接边界；不存在路径走最深已存在祖先 + 尾部拼接）。解析/执行失败都是工具结果字符串（`Error: {reason}`），模型可见并自纠——**不阻塞轮次**。工具是纯执行器：不接触 state 存储；schema 不携带任何边界参数，LLM 传入的多余键不参与解析——伪造路径参数结构上无效。
 - **协作取消契约**：`Tool::call(arguments, ctx: ToolCtx)` 携带内核所有的 `CancellationToken`——用户中断时工具应尽快停止并返回手头的部分输出（bash 转发给 subprocess 执行器：杀进程组 + drain 保留部分输出；MCP 停止等待请求）。忽略 token 的工具由内核宽限期后强制终止。工具结果永不自述取消——中断标记由内核统一添加。derive 宏把 ctx 透传给 `execute(ctx)`。
 - **Value 参数管道**：args 全程 `HashMap<String, Value>`——JSON 解析一步到位，数字/嵌套对象原样保留（MCP 嵌套参数直达）；工具结构体保持强类型字段（`read_file` 的 `offset`/`limit` 仍为 `usize`，schema 仍为 `integer`），LLM 契约零变化。宏 body 经 `Value::Object(args)` 一步反序列化。
-- **schema/解析单源**：8 个内置工具都是字段结构体，宏从字段（含 doc comment）推断 JSON Schema，`call` 自动反序列化参数（失败 → `CoreError::InvalidArguments`）并透传 `ToolCtx`；`#[tool(skip)]` / `#[tool(required)]` / `Vec<T>` 推断保留；`#[serde(default)]` 字段不进 `required`。
+- **schema/解析单源**：9 个内置工具都是字段结构体，宏从字段（含 doc comment）推断 JSON Schema，`call` 自动反序列化参数（失败 → `CoreError::InvalidArguments`）并透传 `ToolCtx`；`#[tool(skip)]` / `#[tool(required)]` / `Vec<T>` 推断保留；`#[serde(default)]` 字段不进 `required`。
 - **glob 以 `current_dir` 为基**：glob 的搜索根 = ctx 的 `current_dir`（与 bash 的 shell cwd 语义一致——模型用 `state_set current_dir` 挪动后 glob 跟随）；bash 的 cwd = `ctx.current_dir`（空 → `InvalidArguments`，fail-closed）。
-- **Agent Skills（skill_list / skill_read，工具式渐进披露）**：skill = 自包含能力包（含 `SKILL.md` 的目录：frontmatter `name`/`description`，正文为指令）。**无任何 prompt 注入**——工具自身的 description（随每请求的 `tools` 数组对模型可见）是唯一常驻面；`skill_list` 每次调用即时扫描（无重启语义），`skill_read` 才加载内容。位置：项目 `<workdir>/.flux/skills/`（边界内）+ 全局 `~/.flux/skills/`（用户安装的可信内容，同 MCP 服务器的信任层级）；同名时项目覆盖全局。`skill_read` **按名寻址**——模型永不传路径，请求文件相对技能根做严格包含检查（canonicalize + 前缀，symlink 安全），读取结构上不可能离开技能目录；
+- **Agent Skills（目录快照进 prompt + 工具式渐进披露）**：skill = 自包含能力包（含 `SKILL.md` 的目录：frontmatter `name`/`description`，正文为指令）。三个消费面共享同一发现与格式权威（flux-tools::skills）：① **Tier-1 目录**——`spawn` / `apply_rebuild` 两个 begin 点把目录节（name + source + description；单条截 1024 chars、总预算 8000 chars、溢出「…N more」尾注；空目录整节不出现）追加到 preamble **之后**（前缀缓存保持 preamble 字节稳定）；目录是 begin 点的**快照**，节内文案显式声明并指向 `skill_list`；② `skill_list` 每次调用即时扫描（无重启语义）——快照的活刷新口与会话中途装卸 / 预算截断 / 名字幻觉的自纠错口（全局技能在边界外，它是模型唯一的全局枚举口）；③ `skill_read` **chat-owned**（flux-chat::skills，同 buf_read 的注册模式，reserved 名单）——**激活去重由 transcript 派生**：两个组装点从 history 派生已激活索引（键 = 名字 + 词法规范化 rel；溢出判别 = 结果字符数 > INLINE_BUDGET，溢出内容经 buf_entries 回读），命中（规范化内容 hash 相同）返回短注不重注（溢出过则附 buf_read ref），未命中返回全文并记账——**不建任何新存储**，fork / 重建 / 重启随重派生天然正确（store 是唯一真相、读侧派生，同 validate_history）。内容同一性单源 = `skill_content`：SKILL.md = 剥 frontmatter 的正文（元数据在 discovery 期已消费——只编辑 frontmatter 仍算命中），其他文件 = 原文；激活返回 = `<skill_content name>` 包装 + 资源清单（浅层 symlink 安全 walk、20 条封顶、只列路径不急切读；不返回技能根绝对路径——按名寻址契约不需要）。位置：项目 `<workdir>/.flux/skills/`（边界内）+ 全局 `~/.flux/skills/`（用户安装的可信内容，同 MCP 服务器的信任层级）；同名时项目覆盖全局。`skill_read` **按名寻址**——模型永不传路径，请求文件相对技能根做严格包含检查（canonicalize + 前缀，symlink 安全），读取结构上不可能离开技能目录；
 - **输出溢出缓冲（集中式、锚定、持久化）**：所有工具结果经 `Chat::bounded_output` 统一截断——超 8000 chars **写穿透传**至每-chat `buf_entries` 表（按产生它的 tool call id 锚定，`ToolCtx::call_id`），返回 head + 该 call id 引用；模型用 `buf_read {ref, offset, limit}`（字符制分页，页 ≤ 6000 chars，无递归；读穿 store）读取余下。**从不覆盖、无代际清空**：引用自描述且稳定（transcript 里的就是同一 id），跨引擎重建与进程重启可读，无需任何外壳传递（内存缓冲已删，store 是唯一真相）；生命周期 = chat 生命周期（transcript 只增不减，无归档边界，无需 GC）；fork 复制其副本携带的调用条目，`buf_read` 引用在 fork 内继续可读；chat 删除级联。entry ≤ 1M chars。per-tool 上限并入集中层：bash 8KB / read_file 行长与总量截断删除；grep 保留匹配窗口塑形 + 匹配数 500；glob 500 条。grep 路径以搜索根为基准；read_file 页脚 `end` 为最后展示行（含），恰好剩 `limit+1` 行时必触发；
 - **MCP**：自由函数 `connect_with_peer` 连接外部 MCP 服务器（`McpServerConfig` 枚举：`Stdio` 子进程 / `Http` Streamable HTTP 端点——rmcp `StreamableHttpClientTransport`，自定义 header 携带鉴权，`allow_stateless` 接受无会话服务器、`reinit_on_expired_session` 在 404 会话过期时传输层内自愈重握手；代理随进程环境 `http_proxy/https_proxy/all_proxy` 自动生效（loopback 目标豁免——`127.0.0.1`/`localhost` 是本地服务，与 stdio 子进程同层，绝不绕道代理）；30s 初始化超时），获取其工具列表包装为 `McpToolWrapper`（单次调用 60s 超时）；`McpSession` 为 RAII 保活守卫（两传输共用，`QuitReason::Closed` 在 HTTP 下即连接断开，由同一 supervisor 退避重连——传输层内的 SSE 重试/会话恢复是内圈自愈，supervisor 是外圈）。启动列表在服务端数据库（UI 管理，persist-first + 即时应用：`McpManager` 持全局注册表引用——连接成功即注册、移除即按 owner 精确注销，随后扇出引擎重建；连接失败随 ack 内联、行保留，启动时以 warn 跳过、不阻塞——管理入口始终可用，可修改后重试）。
 
@@ -475,8 +477,8 @@ graph TB
  end
  subgraph UI["hooks/ + components/ — React 组件层"]
  HOOKS["useEscapeKey"]
- PRIM["ui.tsx — Button · IconButton · TextField · Badge · Spinner（样式权威）<br/>ui/ — Radix 封装（dialog · dropdown-menu · tooltip · tabs，shadcn 惯例）"]
- COMP["App · TopBar · Sidebar（Radix Tabs + 搜索过滤 + 行内改名 + 行操作菜单）<br/>ChatView · MessageList · ChatInput · UsageStats<br/>Explorer（react-arborist + 文件图标）· RightDock（多文件 tab + 终端 tab）· FileTabView · TerminalPanel · FileIcon · ErrorBoundary · Toasts（统一报错）<br/>dialogs/ — impl 注册 + ConfirmDialog + NewChatDialog（目录浏览器 + kind 选择）+ QuestionCard"]
+ PRIM["ui/ — 控件原语（button · fields · badge · spinner，样式权威）<br/>+ Radix 封装（dialog · dropdown-menu · tooltip · tabs，shadcn 惯例）（dialog · dropdown-menu · tooltip · tabs，shadcn 惯例）"]
+ COMP["App · TopBar · Sidebar（Radix Tabs + 搜索过滤 + 行内改名 + 行操作菜单）<br/>ChatView · MessageList · ChatInput · UsageStats<br/>Explorer（react-arborist + 文件图标）· RightDock（多文件 tab + 终端 tab）· FileTabView · TerminalPanel · FileIcon · ErrorBoundary · Toasts（统一报错）<br/>dialogs/ — registry 注册 + ConfirmDialog + NewChatDialog（目录浏览器 + kind 选择）+ QuestionCard<br/>settings/ — SettingsDialog（单对话框三分节）+ Providers / MCP / Skills 面板"]
  end
  SVC --> LIB
  SVC --> CORE
@@ -495,8 +497,8 @@ graph TB
 - `services/`：命令式逻辑；服务端消息按 `dispatch.ts` 分发——`handlers.ts` 表驱动注册协议级 handler（键经 `satisfies` 编译期校验），流式 DOM 更新走 `stream-handler.ts`；
 - 流式期间**绕过 React 直接命令式改 DOM**（性能边界，见 4.3）；
 - **组件栈**：React 19 + zustand（状态）+ Radix UI（dialog/dropdown-menu/tooltip/tabs——shadcn 惯例封装）+ Tailwind v4（`@theme inline` 把 `--fx-*` token 桥接进工具类）+ react-arborist（Explorer 树）。行为组件零手写——成熟组件库承载全部交互难点（焦点陷阱/Esc/outside-click/roving tabindex/定位翻转）；
-- **对话框第一方化**：`services/dialogs.ts` 以 promise 型 `confirmDelete`/`pickNewChat`/`askQuestion` 承载确认/新建/提问能力，`components/dialogs/impl.tsx` 在 mount 时注册 UI 实现（Radix 模态渲染进 body overlay，各自持有 React root；模型提问的内联卡按 **chat id 挂进该 chat 自己的 pane**——后台会话来问题时 toast 提示，pane 清除/删除经 pending-question 注册表把悬挂应答以 DISMISSED 收束，绝不悬挂；同一 chat 的新问题取代旧的）。测试经 `setDialogImpls` 注入 stub；
-- **控制原语层**：`components/ui.tsx`（Button/IconButton/TextField/Badge/Spinner）是全部控件的唯一样式权威——只消费 `--fx-*` token 与标尺（`--fx-radius-*`、`--fx-control-h`）；全局 `:focus-visible` 焦点环 + 覆盖滚动条统一视觉；
+- **对话框第一方化**：`services/dialogs.ts` 以 promise 型 `confirmDelete`/`pickNewChat`/`askQuestion` 承载确认/新建/提问能力，`components/dialogs/registry.tsx` 在 mount 时注册 UI 实现（Radix 模态渲染进 body overlay，各自持有 React root；模型提问的内联卡按 **chat id 挂进该 chat 自己的 pane**——后台会话来问题时 toast 提示，pane 清除/删除经 pending-question 注册表把悬挂应答以 DISMISSED 收束，绝不悬挂；同一 chat 的新问题取代旧的）。测试经 `setDialogImpls` 注入 stub；
+- **控制原语层**：`components/ui/`（index barrel 汇出 Button/IconButton/TextField/SelectField/TextArea/Badge/Spinner；行为组件零手写的 Radix 封装同住该目录）是全部控件的唯一样式权威——只消费 `--fx-*` token 与标尺（`--fx-radius-*`、`--fx-control-h`）；全局 `:focus-visible` 焦点环 + 覆盖滚动条统一视觉；
 - **TopBar**：恒定可见的全局顶栏——toggle → 品牌标 → 流式指示（点击=取消）→ 连接（断线=重连按钮）→ MCP 通知铃（未读徽标，ring 上限 100）→ Settings 齿轮直开单个对话框（Providers/MCP/Skills 三个 tab 分节，懒加载 chunk，会话内记住上次分节）→ 主题切换（auto/dark/light 循环，localStorage 持久化，index.html 内联脚本首帧前应用——无闪烁）；不携带任何 chat 状态，布局不随活跃 chat 跳动。
 - **ChatHeader**：会话头行（消息列上方）——chat 名/mono workdir → spacer → 每-chat token 用量；会话身份住这里，不在 TopBar；
 - **可折叠侧栏**：Ctrl/Cmd+B + 栏内 toggle；移动档（<768px，唯一断点）转抽屉（backdrop 关闭、选中自动收起、**Escape 关闭**——抽屉是最顶层 surface，先于 round 取消；打开时主列与右坞 **`inert`**（`useCoveredByDrawer`：键盘/AT 焦点不落到覆盖层后面，TopBar 的开关保持可达））；桌面拖拽或 separator 方向键 ±24px 调宽 160–360px 持久化。**宽度权威在 app.css 的外壳布局段**（`#sidebar { width: var(--fx-sidebar-w) }` + `overflow: hidden`）——tab 切换/新建对话/树加载永不反推宽度（app.test 钉住）；拖动期间宽度直接走 CSS var（pointermove 零 React 渲染），pointerup 才提交 store + 持久化，pointercancel 提交最后移动宽度并拆卸（cancel 事件坐标不可信）；拖拽与键盘共用同一 spec（`useEdgeResize`/`edgeResizeKeys`），separator 暴露 splitter ARIA（tabindex + `aria-valuenow/min/max`）。新聊天按钮 + 客户端过滤（name/workdir 子串）；行操作（改名/删除）收敛为 Radix DropdownMenu 的 ⋯ 菜单（危险项红色）；改名走行内编辑器（受控 input，Enter/失焦提交、Esc 还原）；
@@ -508,12 +510,12 @@ graph TB
 - **右坞 = tab 化（多文件 + 终端）**：文件 tab 编辑器式多开、逐个关闭互不影响，Terminal tab 恒钉最后；坞级关闭仅隐藏（tab 保留，重开恢复视图）；tab 条是真实 ARIA tablist（roving tabindex——仅活动 tab 在 Tab 序内，←/→/Home/End 移动并激活，`aria-controls`/`aria-labelledby` 关联单个切换的 tabpanel）；
 - **停靠式，推动对话列**：body 行内的 flex 兄弟项而非覆盖层——拖宽即把对话列推走，永不遮挡内容；`max-w-[calc(100vw-280px)]` 钳制持久化宽值，移动档媒体查询翻成**全屏 sheet**（<768px 唯一断点；持久化桌面宽度被中和）；左缘拖拽手柄（window pointer 监听 + `body.resizing-preview` 禁选中 + 松手持久化；separator 方向键 ±24px）；文件正文恒 `white-space: pre` 横向滚动；
 - **终端 tab（可多个，“+”/空态动作按需创建）**：终端字体内置（JetBrains Mono + Nerd Font Mono 图标补丁，OFL-1.1——`styles/fonts.css` `local()` 优先、图标按字形需求加载，`scripts/fetch-fonts` 更新；该文件同时声明 UI 界面字体 IBM Plex Sans）；会话存于 `services/terminal.ts`（Map per tab），切 tab/chat 卸载面板但 PTY 与 xterm 缓冲继续；`sessionStorage` 按 chat 记住终端 id 列表，刷新后恢复全部 tab 并在宽限期内重连同一 PTY（服务端回放 256KB scrollback）；socket 自愈——任何异常断链（后端重启含在内）进入 1s→2s→4s→5s 封顶退避重试，stale term id 由服务端回落全新 spawn，killed/exited 两种终态除外；tab 独立关闭（杀各自 PTY）；shell 干净退出（code 0）自动关闭其 tab（PTY 已被服务端拆除、退出是用户主动行为），失败退出（非 0）保留 tab 与退出码状态行供排障；主题经 `html[data-theme]` MutationObserver 从 `--fx-*` token 重读；
-- **样式三层**：`styles/tokens.css` 定义 `--fx-*` 语义契约（CSS `light-dark` 一份声明承载双主题，`color-scheme` + `[data-theme]` 选择）——调色板由品牌标记推导（波形青绿族；暗面活在瓷砖的世界），圆角分层级（xs 3 / sm 5 / md 8 / lg 10，药丸仅限真药丸），字体双声部（IBM Plex Sans 说人话、JetBrains Mono 说机器话，后者只用于内容本身是机器输出的地方）；`styles/app.css` 是 Tailwind 入口——`@theme inline` 把 token 桥接进工具类，**自定义基础规则收进 `@layer base`**（utilities 可按预期覆盖——全局 `:focus-visible` 焦点环让位于 `focus:outline-none`），**并持有 ID 寻址的外壳布局**（`#sidebar-layer`/`#sidebar` 宽度/`#sidebar-resizer`/backdrop + + <768px 抽屉/全屏预览坞覆盖媒体查询与触屏几何——Tailwind 无法命中这些 id）与 **Flux 线**（composer 顶边扫过的电流，全站唯一非用户触发动效，编码轮次状态）；`styles/stream.css` 样式化命令式流式 DOM（气泡/带状态轨的工具卡/prose/hljs 代码声部 + 空状态提示卡 `.fx-empty-*`），无法承载工具类。
+- **样式三层**：`styles/tokens.css` 定义 `--fx-*` 语义契约（CSS `light-dark` 一份声明承载双主题，`color-scheme` + `[data-theme]` 选择）——调色板由品牌标记推导（波形青绿族；暗面活在瓷砖的世界），文本 token 按 WCAG AA 校准（fg/muted 全表面通过；faint 为辅助声部，panel/elev 通过），圆角分层级（xs 3 / sm 5 / md 8 / lg 10，药丸仅限真药丸），字体双声部（IBM Plex Sans 说人话、JetBrains Mono 说机器话，后者只用于内容本身是机器输出的地方）；`styles/app.css` 是 Tailwind 入口——`@theme inline` 把 token 桥接进工具类，**自定义基础规则收进 `@layer base`**（utilities 可按预期覆盖——全局 `:focus-visible` 焦点环让位于 `focus:outline-none`），**并持有 ID 寻址的外壳布局**（`#sidebar-layer`/`#sidebar` 宽度/`#sidebar-resizer`/backdrop + + <768px 抽屉/全屏预览坞覆盖媒体查询与触屏几何——Tailwind 无法命中这些 id）与 **Flux 线**（composer 顶边扫过的电流，全站唯一非用户触发动效，编码轮次状态）；`styles/stream.css` 样式化命令式流式 DOM（气泡/带状态轨的工具卡/prose/hljs 代码声部 + 空状态提示卡 `.fx-empty-*`），无法承载工具类。
 - **移动档（<768px，唯一断点）**：侧栏 = overlay 抽屉（打开时覆盖内容 `inert`）、预览坞 = 全屏 sheet；视口链 `100vh → 100dvh → var(--fx-vvh)`（`core/viewport.ts` 发布 visualViewport 高度——iOS 键盘覆盖布局视口，dvh 不足以救 composer；Chrome Android 走 `interactive-widget=resizes-content`）；`viewport-fit=cover` + safe-area 内边距（顶栏/抽屉/预览坞）；composer 输入 16px（字阶唯一例外——iOS 聚焦 <16px 必缩放）；hover 显形控件全部挂 `touch:` 变体（`@media (hover: none)`）保触屏可见，触点地板 36px（主控件 40px，e2e 在 390×844 钉住）；PWA manifest + theme-color，**刻意无 service worker**（应用绑定服务器，离线缓存只添陈旧风险）。
 
 ### 4.2 状态管理
 
-zustand store `useFlux`（`core/state.ts`）：`chats`、`activeChatId`、`connectionStatus`、`usage`、`streaming`、`scrollBtnVisible`、`loadedChatId`、`readonlyChats`（busy 降级 viewer 的只读标记——viewer 条的可见性来源）、`leaseSwitch`（租约交接在途标记——抑制被离开行的 In-use 徽标闪烁）、`toasts`（统一报错堆栈，`pushToast`/`dismissToast`——kind+text 去重 + 上限 4）、`sidebarOpen`/`sidebarWidth`（可折叠侧栏，`core/prefs.ts` localStorage 持久化）、`dockOpen`/`openFiles`/`activeDockTab`（右坞：开合、多文件 tab、激活 tab）、`previewWidth`（坞宽，prefs 持久化）、`providers`/`providerModels`/`providerProbeErrors`/`savedModels`（注册表 + 已探测目录缓存与失败标记 + 本地保存模型——picker 先读 saved 再读目录）、`mcpServers`/`mcpNotices`/`mcpNoticesUnread`（MCP 启动列表 + 通知铃 ring）、`skills`、`roundArtifacts`（每-chat 当轮工件）、`backgroundEvents`（后台注意力计数——document.title 的 "(n)" 前缀，仅隐藏标签页期间的事件计入）。**document.title 是状态面**（`services/title.ts`）：`(n) {会话名|Flux} — working… — Flux`，仅状态跃迁时写入（mount 一条跃迁门控订阅），页面重新可见时计数清零。**Composer 草稿**（`services/drafts.ts`）：切换对话不再丢失输入到一半的消息——pending 文本在 composer 卸载（切走）时保存、返回时恢复（fork 的重做轮预填优先），按 chat id 键控、LRU 上限 64、写穿 sessionStorage（页面刷新后同样恢复）；仅在保存/清除时写盘，删除路径按 id 剪枝。终端会话不走 store（高频 I/O），存于 `services/terminal.ts` 的 per-chat Map。组件经选择器订阅（`useFlux((s) => s.chats)`）；命令式服务经 `useFlux.getState`/store action 读写——store action 内聚派生逻辑（`setStreaming` 同步收敛滚动按钮、`deleteChat` 剪枝全部 per-chat 记录）。**`DispatchContext.state` 必须以 getter 接线**——zustand `setState` 替换状态对象，mount 时快照将永远读陈旧字段。高频流式数据（delta、DOM）**不经过** store，直接走命令式通道。
+zustand store `useFlux`（`core/state.ts`）：`chats`、`activeChatId`、`connectionStatus`、`usage`、`streaming`、`scrollBtnVisible`、`loadedChatId`、`readonlyChats`（busy 降级 viewer 的只读标记——viewer 条的可见性来源）、`leaseSwitch`（租约交接在途标记——抑制被离开行的 In-use 徽标闪烁）、`toasts`（统一报错堆栈，`pushToast`/`dismissToast`——kind+text 去重 + 上限 4）、`sidebarOpen`/`sidebarWidth`（可折叠侧栏，`core/prefs.ts` localStorage 持久化）、`dockOpen`/`openFiles`/`activeDockTab`（右坞：开合、多文件 tab、激活 tab）、`previewWidth`（坞宽，prefs 持久化）、`providers`/`providerModels`/`providerProbeErrors`/`savedModels`（注册表 + 已探测目录缓存与失败标记 + 本地保存模型——session 建立即预载（`handlers.session_resumed`，重连重拉），picker 先读 saved 再读目录）、`mcpServers`/`mcpNotices`/`mcpNoticesUnread`（MCP 启动列表 + 通知铃 ring）、`skills`、`roundArtifacts`（每-chat 当轮工件）、`backgroundEvents`（后台注意力计数——document.title 的 "(n)" 前缀，仅隐藏标签页期间的事件计入）。**document.title 是状态面**（`services/title.ts`）：`(n) {会话名|Flux} — working… — Flux`，仅状态跃迁时写入（mount 一条跃迁门控订阅），页面重新可见时计数清零。**Composer 草稿**（`services/drafts.ts`）：切换对话不再丢失输入到一半的消息——pending 文本在 composer 卸载（切走）时保存、返回时恢复（fork 的重做轮预填优先），按 chat id 键控、LRU 上限 64、写穿 sessionStorage（页面刷新后同样恢复）；仅在保存/清除时写盘，删除路径按 id 剪枝。终端会话不走 store（高频 I/O），存于 `services/terminal.ts` 的 per-chat Map。组件经选择器订阅（`useFlux((s) => s.chats)`）；命令式服务经 `useFlux.getState`/store action 读写——store action 内聚派生逻辑（`setStreaming` 同步收敛滚动按钮、`deleteChat` 剪枝全部 per-chat 记录）。**`DispatchContext.state` 必须以 getter 接线**——zustand `setState` 替换状态对象，mount 时快照将永远读陈旧字段。高频流式数据（delta、DOM）**不经过** store，直接走命令式通道。
 
 ### 4.3 流式渲染（rAF 合帧 + 结构性防跳变）
 
@@ -553,6 +555,8 @@ sequenceDiagram
 - **历史尾部分页**：首渲染只落最后一页（60 条；页起点对齐用户消息——轮的 assistant→tool 对永不跨页），更早的页经"加载更早消息"按需前插（fragment 单次插入 + scrollHeight 差值补偿滚动锚，阅读位置不动）；轮次 artifacts 重建仍消费全量快照，不受 DOM 分页影响；
 - **工具结果惰性物化**：结果字符串驻留 WeakMap 注册表、折叠态零结果 DOM（复制按钮照常可用——读注册表而非 `<pre>`）；`<pre>` 在卡片**首次展开**时才构建，展开态到达的结果立即物化。单卡上限由服务端 inline 预算（~8000 字符）保证，客户端不二次截断。
 
+**切回快路径**（`services/history.ts` + `services/panes.ts`）：`chat_close` = 退订 + 释放，切回已打开的会话时 claim 永远全量重发快照；`renderHistoryMessages` 以 pane 级指纹（条数 + 末条行 id/内容长度——转录 append-only）比对 incoming 快照与已渲染内容，一致即**跳过整页拆除重建**——DOM、滚动位置、stick 状态与已前插的更早页原样保留（被 wipe 的 stale pane 无消息 DOM，永不误跳；离开期间他处追加的消息指纹失配，照常全量重渲）。`switchToChat` 对已渲染 pane 不再做 0→1 淡入——与旧 pane 的淡出覆盖层叠加会让两者在过渡中点双双半透明、底色透出（即切换"闪一下"）；已渲染 pane 立即满透明度显示（旧 pane 在其上溶解 = 真 crossfade），只有空 pane（首开等快照）保留淡入。
+
 ### 4.4 构建与测试
 
 | 工具 | 用途 |
@@ -575,6 +579,7 @@ sequenceDiagram
 | 工具中断 | 受监督 flight（消费者折叠循环内驱动）+ 协作 token / abort 兜底两级取消 |
 | 轮次终局语义化 | 机器在唯一收尾点发出 `RoundEnded(RoundOutcome)` 分类，消费者折叠语义而非刮取 wire 事件 |
 | 输出缓冲 | 集中预算闸门 + 每-chat 溢出缓冲（按 call id 锚定、持久化、不覆盖，fork 复制）+ `buf_read` 分页 |
+| Skill 上下文 | 目录快照随 begin 注入 + `skill_list` 活扫描；激活去重由 transcript 派生（chat-owned `skill_read`），零新存储 |
 | 租约制 | 操作权（lease）与观看权（viewers）分离；释放不杀任务 |
 | 打开路径单消息化 | ClaimChat = 历史+订阅+租约一次完成；OpenChat 同锁原子（快照与订阅间事件不丢） |
 | 轮次状态权威化 | `chat_state` 快照随订阅下达，前端不从事件推断 |

@@ -29,6 +29,12 @@ use std::sync::Arc;
 /// dropped with an in-buffer marker — a 16MB subprocess dump must not sit
 /// in the store whole when the model can only ever page a fraction of it.
 const BUF_ENTRY_MAX_CHARS: usize = 1_000_000;
+/// The inline budget (`Chat::bounded_output`): results above it overflow
+/// into the store, results at/below it ride the transcript verbatim. The
+/// activation-dedup derivation uses the same threshold to tell an inline
+/// result (comparable as-is) from a truncated one (comparable only via
+/// its buffered full content).
+pub(crate) const INLINE_BUDGET: usize = 8000;
 /// Default and maximum page size for `buf_read` (chars). The maximum is
 /// deliberately at/below the inline budget (8000) so a buffer page can
 /// never trigger the overflow path itself (no recursion).

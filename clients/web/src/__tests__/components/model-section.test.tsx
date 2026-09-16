@@ -7,7 +7,7 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { render, screen } from '@testing-library/react';
-import { SavedModelsSection } from '../../components/dialogs/ModelSection';
+import { SavedModelsSection } from '../../components/settings/ModelSection';
 import { useFlux, resetFluxForTest } from '../../core/state';
 
 vi.mock('../../services/models', () => ({

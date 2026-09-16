@@ -1596,7 +1596,8 @@ mod retry_tests {
 
     /// A provider session pinned to the mock endpoint — the retry lives
     /// in `Connection::open`, not on SseClient::stream, so the tests drive
-    /// the real open path.
+    /// the real open path. The client is proxy-proof: a host shell's
+    /// `http_proxy` must never detour the loopback POSTs (phantom-502).
     fn session_for(addr: std::net::SocketAddr) -> Box<dyn flux_core::Connection> {
         let provider = OpenAiProvider::new(
             OpenAiConfig {
@@ -1605,7 +1606,7 @@ mod retry_tests {
             },
             "test-model".into(),
             OpenAiParams::default(),
-            reqwest::Client::new(),
+            flux_test_support::loopback_client(),
         )
         .unwrap();
         provider.begin("sys", &[], &[])

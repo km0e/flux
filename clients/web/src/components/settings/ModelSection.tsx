@@ -19,7 +19,7 @@
  *
  * Provides: SavedModelsSection
  * Depends: core/state.ts, services/models.ts, lib/format.ts,
- *          components/ui, components/dialogs/integration-ui.tsx
+ *          components/ui, components/settings/shared.tsx
  */
 import { useState } from 'react';
 import { RefreshCw } from 'lucide-react';
@@ -28,7 +28,7 @@ import { removeModel, saveModel, syncModels } from '../../services/models';
 import { fmtTokens } from '../../lib/format';
 import type { ModelParams, SavedModelInfo } from '../../core/types';
 import { Badge, Button, Spinner, TextField } from '../ui';
-import { RemoveControl, RowSub, SectionLabel } from './integration-ui';
+import { RemoveControl, RowSub, SectionLabel } from './shared';
 
 /** Common-value presets ("常见选项") — static frontend constants; the
  * models.dev snapshot refines the defaults per model where it can. */

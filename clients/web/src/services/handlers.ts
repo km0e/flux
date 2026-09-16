@@ -29,7 +29,7 @@ import { attachForkToLiveBubble, renderHistoryMessages } from './history';
 import { pairForkDraft } from './forkDraft';
 import { pruneDrafts } from './drafts';
 import { clearChatPane, getPaneIfExists, getPaneIds } from './panes';
-import { handleModelsFrame } from './models';
+import { fetchModels, handleModelsFrame } from './models';
 import { handleSkillsMessage } from './skills';
 import { pruneSessions } from './terminal';
 import { createNoticeBubble, scrollPaneToBottom } from '../lib/dom';
@@ -84,6 +84,12 @@ const HANDLERS = {
       useFlux.setState({ activeChatId: msg.leases[0] });
     }
     ctx.conn.send({ type: 'chat_list' });
+    // Session-level saved-model preload: the ContextMeter and the cost
+    // estimate read this list without any dialog ever opening. onReady
+    // synthesizes this frame on EVERY attach (initial + reconnect), so
+    // each connection re-pulls — fire-and-forget, the reply replaces the
+    // store and mutation broadcasts keep it fresh afterwards.
+    fetchModels();
   },
 
   chats: (msg, ctx) => {

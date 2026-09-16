@@ -51,12 +51,27 @@ interface HistoryCursor {
   messages: HistoryMessage[];
   /** Index of the first message currently rendered in the pane. */
   from: number;
+  /** Fingerprint of `messages` at render time — the switch-back skip in
+   * renderHistoryMessages compares the incoming snapshot against it. */
+  fingerprint: string;
 }
 
 /** Cursor keyed by the PANE element (not the chat id): pane removal GCs it
  * automatically, and a wiped pane (stale resync) only reaches it through
  * the button that wipe just removed — no stale-cursor path exists. */
 const historyCursors = new WeakMap<HTMLDivElement, HistoryCursor>();
+
+/**
+ * Cheap identity of a history snapshot. The transcript is append-only
+ * (store rows are persisted once, never edited in place), so the message
+ * count plus the last row's id/content-length separates "unchanged" from
+ * "anything happened" — the only two cases the switch-back skip cares
+ * about. Pure; exported for tests.
+ */
+export function historyFingerprint(messages: HistoryMessage[]): string {
+  const last = messages[messages.length - 1];
+  return `${messages.length}|${last?.id ?? ''}|${last?.content.length ?? 0}`;
+}
 
 /**
  * Align a candidate page start backwards to the nearest user message —
@@ -252,6 +267,32 @@ export async function renderHistoryMessages(
   // Dispose any active stream controller for this chat
   disposeController(chatId);
 
+  // Switch-back fast path: the claim re-delivers the FULL snapshot on every
+  // return (chat_close = unsubscribe, so a re-claim never hits the server's
+  // AlreadyOwned fast path), and the render below tears the pane down and
+  // rebuilds it — 60× markdown+highlight on the main thread plus a
+  // whole-page msgIn replay. For the common A↔B toggle with the pane
+  // parked at the bottom that teardown IS the switch "flash". When the
+  // incoming snapshot is byte-identical to what the pane already shows,
+  // skip everything: DOM, scroll position and stick state survive
+  // untouched. The DOM-presence check is load-bearing: a stale pane was
+  // wiped by switchLease while its cursor survives, and cursor-only
+  // matching would skip the resync onto an empty pane (paneStale guards
+  // that too, but the wipe can also arrive via clearPaneMessages without
+  // the mark). Snapshots changed elsewhere while away (another window
+  // streamed, messages appended) miss the fingerprint and take the full
+  // path below.
+  const existing = getPaneIfExists(chatId);
+  if (
+    !paneStale &&
+    existing &&
+    existing.querySelector('.message, .history-load-earlier') &&
+    historyCursors.get(existing)?.fingerprint === historyFingerprint(messages)
+  ) {
+    log.debug('renderHistory unchanged, skip re-render ' + chatId);
+    return;
+  }
+
   // The round artifact list rebuilds from the same snapshot (F-11): the
   // last user message starts the current round. Same skip rule as the
   // DOM above — a live round's list is already authoritative.
@@ -277,7 +318,7 @@ export async function renderHistoryMessages(
   // round list is unaffected by what the DOM shows.
   const from = historyPageStart(messages, Math.max(0, messages.length - HISTORY_PAGE));
   const page = messages.slice(from);
-  historyCursors.set(pane, { messages, from });
+  historyCursors.set(pane, { messages, from, fingerprint: historyFingerprint(messages) });
 
   if (from > 0) {
     const btn = buildLoadEarlierButton(from);

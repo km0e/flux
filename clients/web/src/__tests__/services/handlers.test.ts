@@ -11,6 +11,15 @@ import { setDialogImpls, resetDialogsForTest } from '../../services/dialogs';
 import type { ConnectionLike } from '../../services/dispatch';
 import type { ServerMessage } from '../../core/types';
 
+// The session attach preloads the saved-model list (handlers.session_resumed
+// → fetchModels) — stub the RPC so no real request escapes; every other
+// export stays real (the `models` frame handler is exercised below).
+vi.mock('../../services/models', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/models')>()),
+  fetchModels: vi.fn(),
+}));
+import { fetchModels } from '../../services/models';
+
 /** A controllable dialogs mock: askQuestion waits for the test to resolve
  * the deferred answer (the impl owns the UX; the service only calls it). */
 function makeDialogsMock() {
@@ -355,6 +364,18 @@ describe('handlers', () => {
     dispatchMessage({ type: 'session_resumed', session_id: 's-1', leases: [] }, ctx);
     expect(sessionStorage.getItem('flux.session.id')).toBe('s-1');
     expect(conn.send).toHaveBeenCalledWith({ type: 'chat_list' });
+  });
+
+  it('session_resumed preloads the saved-model list (reconnect re-pulls)', () => {
+    vi.mocked(fetchModels).mockClear();
+    const { ctx } = mockCtx();
+    // Session-level registry: every attach pulls once — the ContextMeter
+    // and cost estimates read the list without any dialog opening, and a
+    // reconnect re-aligns the store against the server truth.
+    dispatchMessage({ type: 'session_resumed', session_id: 's-1', leases: [] }, ctx);
+    expect(fetchModels).toHaveBeenCalledTimes(1);
+    dispatchMessage({ type: 'session_resumed', session_id: 's-1', leases: [] }, ctx);
+    expect(fetchModels).toHaveBeenCalledTimes(2);
   });
 
   it('session_resumed stores the authoritative id and restores a leased focus', () => {

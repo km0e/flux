@@ -2,12 +2,20 @@
 //!
 //! A skill is a self-contained capability package: a directory carrying a
 //! `SKILL.md` (frontmatter `name` + `description`, body = instructions)
-//! plus optional references/scripts/assets. Discovery is progressive
-//! disclosure BY TOOLS — nothing is injected into any prompt. The two
-//! tools' own descriptions (which ride every request's `tools` array) are
-//! the only always-visible surface; the content itself loads only when
-//! the model calls `skill_read` (and `skill_list` scans on every call, so
-//! installed skills appear without any restart semantics).
+//! plus optional references/scripts/assets. This module owns the skill
+//! FORMAT and its three consumption surfaces:
+//!
+//! - discovery + listing (`skill_list`, the always-cheap tool surface);
+//! - the Tier-1 catalog for the system prompt (`catalog_for_workdir` —
+//!   composed by flux-chat at every connection begin; the tools' own
+//!   descriptions remain the no-catalog fallback);
+//! - activation reads (`read_skill_file` → `format_skill_activation`):
+//!   the manifest returns as `<skill_content>` wrapping the
+//!   FRONTMATTER-STRIPPED body (metadata was already consumed at
+//!   discovery), other files return raw with a bundled-file listing on
+//!   manifest reads. The same normalization (`skill_content`) is what
+//!   flux-chat hashes for activation dedup — one function, one meaning
+//!   of "content".
 //!
 //! Locations (both follow the same `<root>/.flux/skills` layout):
 //! - project: `<workdir>/.flux/skills/` — inside the chat boundary
@@ -17,10 +25,11 @@
 //!   in by installing it)
 //!
 //! The boundary exception is structural, not a hole: `skill_read` is
-//! NAME-keyed — the model never passes a path to it. The requested file
-//! resolves relative to the discovered skill's directory under a strict
-//! containment check (canonicalize + prefix, symlink-safe), so a read
-//! cannot leave the skill directory regardless of the arguments.
+//! NAME-keyed — the model never passes a path to the skill root. The
+//! requested file resolves relative to the discovered skill's directory
+//! under a strict containment check (canonicalize + prefix, symlink-
+//! safe), so a read cannot leave the skill directory regardless of the
+//! arguments.
 
 use flux_core::{CoreError, ToolCtx};
 use std::path::{Path, PathBuf};
@@ -31,6 +40,25 @@ const MAX_SKILL_FILE_BYTES: u64 = 256 * 1024;
 /// Depth cap for the discovery walk below a skills root — skill packages
 /// are shallow; a deep tree is content, not a skill location.
 const MAX_SCAN_DEPTH: usize = 8;
+
+/// The skill manifest's path relative to the skill directory.
+const MANIFEST: &str = "SKILL.md";
+
+/// Cap on the per-skill description carried into the Tier-1 catalog
+/// (the spec's own `description` ceiling — the catalog never carries
+/// more than the format allows).
+const MAX_CATALOG_DESC_CHARS: usize = 1024;
+
+/// Total char budget for the catalog section appended to the system
+/// prompt. Fixed (not a window fraction): flux does not track per-model
+/// window sizes, and a fixed cap is honest about the worst case. Codex
+/// uses the same number as its "window unknown" floor.
+const CATALOG_MAX_CHARS: usize = 8000;
+
+/// Cap on the bundled-file listing attached to a manifest activation —
+/// a large tree is listed truncated with an explicit note, never
+/// silently.
+const MAX_RESOURCE_ENTRIES: usize = 20;
 
 // ── Discovery ───────────────────────────────────────────────────────────────
 
@@ -75,6 +103,17 @@ fn global_skills_dir() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
         .map(|home| Path::new(&home).join(".flux").join("skills"))
+}
+
+/// Discover skills for one chat workdir: global + project locations (the
+/// shared location composition behind `skill_list`, the activation
+/// reads, and the catalog — one place, so all three surfaces always see
+/// the same set).
+pub fn discover_for_workdir(workdir: &Path) -> Vec<SkillEntry> {
+    discover_skills(
+        global_skills_dir().as_deref(),
+        Some(&workdir.join(".flux").join("skills")),
+    )
 }
 
 /// Walk a skills root (explicit stack, symlink-safe, depth-capped) and
@@ -189,6 +228,73 @@ fn unquote(value: &str) -> String {
     }
 }
 
+/// Strip a leading frontmatter block: the body after the closing `---`
+/// when the file opens with `---` (the same first-line rule
+/// [`parse_frontmatter`] applies — one source for "what counts as
+/// frontmatter"), else the content unchanged. Unterminated blocks return
+/// the content unchanged — nothing safely strippable.
+pub fn strip_frontmatter(content: &str) -> &str {
+    let Some(first_end) = content.find('\n') else {
+        return content;
+    };
+    if content[..first_end].trim_end() != "---" {
+        return content;
+    }
+    let mut start = first_end + 1;
+    while let Some(end) = content[start..].find('\n') {
+        let line_end = start + end;
+        if content[start..line_end].trim_end() == "---" {
+            // Body starts after the closing line, without its leading
+            // blank line — the metadata block is discovery-only.
+            return content[line_end + 1..].trim_start();
+        }
+        start = line_end + 1;
+    }
+    content
+}
+
+/// Lexically normalize a `skill_read` `path` argument to the per-skill
+/// key form: missing/empty → the manifest (`SKILL.md`), `.` components
+/// dropped, `name/..` pairs cancelled. THE shared key derivation for
+/// activation dedup — the live tool and the transcript-derived index
+/// (flux-chat) must key identically. Note this is deliberately lexical,
+/// not canonical: a path that fails containment never reaches a key, and
+/// an in-skill symlink alias costs at worst a duplicate full read.
+pub fn normalize_rel(rel: Option<&str>) -> String {
+    use std::path::Component;
+    let raw = rel.map(str::trim).unwrap_or("");
+    if raw.is_empty() {
+        return MANIFEST.to_string();
+    }
+    let mut parts: Vec<&std::ffi::OsStr> = Vec::new();
+    for comp in Path::new(raw).components() {
+        match comp {
+            Component::Normal(p) => parts.push(p),
+            Component::ParentDir => {
+                parts.pop();
+            }
+            _ => {} // CurDir dropped; RootDir/Prefix cannot survive containment
+        }
+    }
+    if parts.is_empty() {
+        return MANIFEST.to_string();
+    }
+    parts
+        .iter()
+        .collect::<PathBuf>()
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// Char-boundary truncation for catalog descriptions.
+fn truncate_chars(s: &str, max: usize) -> &str {
+    if s.chars().count() <= max {
+        return s;
+    }
+    let end = s.char_indices().nth(max).map_or(s.len(), |(i, _)| i);
+    &s[..end]
+}
+
 /// Agent Skills name rules: 1–64 chars, lowercase a-z / digits / hyphens,
 /// no leading/trailing/consecutive hyphens.
 fn valid_skill_name(name: &str) -> bool {
@@ -241,13 +347,15 @@ fn format_skill_list(entries: &[SkillEntry]) -> String {
     out
 }
 
-/// List available skills (name + source + description). The always-cheap
-/// discovery surface of progressive disclosure: descriptions ride this
-/// result, full instructions load on demand via `skill_read`.
+/// List available skills (name + source + description). The live-scan
+/// complement to the snapshot catalog: the catalog rides the system
+/// prompt (a begin-time snapshot, budget-truncated), this rescans on
+/// every call — the freshness surface for mid-session installs and the
+/// self-correction path after an unknown-name rejection.
 #[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
 #[tool(
     name = "skill_list",
-    description = "List the available skills — self-contained capability packages (specialized workflows, instructions, helper scripts) that can be loaded on demand. Each entry carries a name, its source (project/global), and a description of when it applies. Call this at the start of a non-trivial task that might match a specialized skill, or before concluding that a capability is missing."
+    description = "List the available skills (name, source, description) — a live rescan, unlike the snapshot listing in your instructions. Call it when a skill you expect is missing from that listing, when a skill_read name was rejected, or when you suspect skills changed since the conversation started."
 )]
 pub struct SkillListTool {}
 
@@ -260,31 +368,117 @@ impl SkillListTool {
         // The project location rides the chat boundary (resolve(".") = the
         // canonical workdir); the global location is the user's home.
         let workdir = ctx.resolve(".")?;
-        let entries = discover_skills(
-            global_skills_dir().as_deref(),
-            Some(&workdir.join(".flux").join("skills")),
-        );
-        Ok(format_skill_list(&entries))
+        Ok(format_skill_list(&discover_for_workdir(&workdir)))
     }
+}
+
+// ── catalog (Tier-1, system-prompt injection) ───────────────────────────────
+
+/// The Tier-1 catalog section for the system prompt: every skill's name +
+/// source + description under one instruction block. `None` when no
+/// skills are discovered — an empty catalog block would mislead the
+/// model, so the section simply never appears. A snapshot by design: the
+/// text says so and points at `skill_list` for the live rescan.
+pub fn catalog_section(global_dir: Option<&Path>, project_dir: Option<&Path>) -> Option<String> {
+    const HEADER: &str = "## Skills\n\n\
+        Specialized instruction packages are available. When a task matches a skill's \
+        description, call skill_read with its name to load the full instructions before \
+        proceeding. This listing is a snapshot taken when the conversation started — call \
+        skill_list for the live list.\n\n<available_skills>\n";
+    let entries = discover_skills(global_dir, project_dir);
+    if entries.is_empty() {
+        return None;
+    }
+    // Fill entries in the stable discovery order until the budget; the
+    // remainder collapses into one explicit tail note (never a silent
+    // truncation).
+    let mut out = String::from(HEADER);
+    let mut shown = 0usize;
+    for e in &entries {
+        let source = if e.project { "project" } else { "global" };
+        let line = format!(
+            "- {} ({}): {}\n",
+            e.name,
+            source,
+            truncate_chars(&e.description, MAX_CATALOG_DESC_CHARS)
+        );
+        if out.len() + line.len() > CATALOG_MAX_CHARS {
+            break;
+        }
+        out.push_str(&line);
+        shown += 1;
+    }
+    if shown < entries.len() {
+        out.push_str(&format!(
+            "… {} more — skill_list has the full list.\n",
+            entries.len() - shown
+        ));
+    }
+    out.push_str("</available_skills>");
+    Some(out)
+}
+
+/// [`catalog_section`] resolved for one chat workdir (the same global +
+/// project composition discovery uses). An empty workdir (no boundary)
+/// yields no section — the project location would otherwise resolve
+/// against the server process's cwd.
+pub fn catalog_for_workdir(workdir: &Path) -> Option<String> {
+    if workdir.as_os_str().is_empty() {
+        return None;
+    }
+    catalog_section(
+        global_skills_dir().as_deref(),
+        Some(&workdir.join(".flux").join("skills")),
+    )
 }
 
 // ── skill_read ──────────────────────────────────────────────────────────────
 
+/// One successfully resolved skill file: everything the caller (the
+/// chat-owned activation tool) needs — identity for the dedup key, the
+/// manifest flag that decides normalization, and the raw bytes.
+#[derive(Debug)]
+pub struct SkillFile {
+    /// Skill name as listed by skill_list (the key's first half).
+    pub name: String,
+    /// Canonical path of the file inside the skill directory.
+    pub path: PathBuf,
+    /// `true` when the requested path IS the skill manifest — the only
+    /// file whose frontmatter was consumed at discovery, and thus the
+    /// only one whose frontmatter is stripped on return.
+    pub is_manifest: bool,
+    /// Raw file content.
+    pub raw: String,
+}
+
+/// The normalized content of a skill file — the ONE definition of
+/// "content" shared by the tool's return, the transcript, and the
+/// activation-dedup hash: the manifest returns as its frontmatter-
+/// stripped body (metadata was consumed at discovery), every other file
+/// returns raw.
+pub fn skill_content(file: &SkillFile) -> &str {
+    if file.is_manifest {
+        strip_frontmatter(&file.raw)
+    } else {
+        &file.raw
+    }
+}
+
 /// Read one file from a discovered skill, strictly contained in the
-/// skill's directory. Name-keyed: unknown names are tool errors the model
-/// self-corrects from (re-list via `skill_list`).
-fn read_skill_file(
+/// skill's directory. Name-keyed: unknown names are tool errors the
+/// model self-corrects from (re-list via `skill_list`).
+pub fn read_skill_file(
     entries: &[SkillEntry],
     name: &str,
     rel: Option<&str>,
-) -> Result<String, CoreError> {
+) -> Result<SkillFile, CoreError> {
     let entry = entries.iter().find(|e| e.name == name).ok_or_else(|| {
         CoreError::Tool(format!(
             "unknown skill `{name}` — call skill_list for the available names"
         ))
     })?;
-    let rel = rel.unwrap_or("SKILL.md");
-    if rel.is_empty() {
+    let shown = rel.unwrap_or(MANIFEST);
+    if shown.trim().is_empty() {
         return Err(CoreError::Tool("empty path".into()));
     }
     // Containment-scoped read: resolve against the canonical skill root,
@@ -296,65 +490,122 @@ fn read_skill_file(
         .canonicalize()
         .map_err(|e| CoreError::Tool(format!("skill directory unreadable: {e}")))?;
     let target_real = root_real
-        .join(rel)
+        .join(shown)
         .canonicalize()
-        .map_err(|e| CoreError::Tool(format!("cannot read `{rel}` in skill `{name}`: {e}")))?;
+        .map_err(|e| CoreError::Tool(format!("cannot read `{shown}` in skill `{name}`: {e}")))?;
     if !target_real.starts_with(&root_real) {
         return Err(CoreError::Tool(format!(
-            "path `{rel}` escapes the skill directory"
+            "path `{shown}` escapes the skill directory"
         )));
     }
     if !target_real.is_file() {
         return Err(CoreError::Tool(format!(
-            "`{rel}` in skill `{name}` is not a file"
+            "`{shown}` in skill `{name}` is not a file"
         )));
     }
     let meta = std::fs::metadata(&target_real)
         .map_err(|e| CoreError::Tool(format!("stat failed: {e}")))?;
     if meta.len() > MAX_SKILL_FILE_BYTES {
         return Err(CoreError::Tool(format!(
-            "`{rel}` is {} bytes — over the {MAX_SKILL_FILE_BYTES}-byte skill-read cap",
+            "`{shown}` is {} bytes — over the {MAX_SKILL_FILE_BYTES}-byte skill-read cap",
             meta.len()
         )));
     }
-    std::fs::read_to_string(&target_real).map_err(|e| CoreError::Tool(format!("read failed: {e}")))
+    let raw = std::fs::read_to_string(&target_real)
+        .map_err(|e| CoreError::Tool(format!("read failed: {e}")))?;
+    // The manifest is identified by the REQUESTED path (what the model
+    // activated), not by the canonical target — a symlinked `SKILL.md`
+    // is still the manifest discovery parsed, so stripping stays
+    // consistent with the frontmatter that was consumed.
+    let is_manifest = normalize_rel(rel) == MANIFEST;
+    Ok(SkillFile {
+        name: name.to_string(),
+        path: target_real,
+        is_manifest,
+        raw,
+    })
 }
 
-/// Read a skill's full instructions (its `SKILL.md`), or one file inside
-/// that skill's directory.
-#[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
-#[tool(
-    name = "skill_read",
-    description = "Read a skill's full instructions (its SKILL.md), or one file inside that skill's directory (references, scripts, assets — paths the skill text points to). Pass the skill `name` from skill_list; `path` is relative to the skill directory and cannot leave it. Follow the returned instructions for the current task."
-)]
-pub struct SkillReadTool {
-    /// Skill name as listed by skill_list.
-    name: String,
-    /// File to read, relative to the skill's directory. Defaults to SKILL.md.
-    path: Option<String>,
-}
-
-impl SkillReadTool {
-    pub fn new() -> Self {
-        Self::default()
+/// Bundled files of a skill directory (relative paths), for the
+/// manifest-activation listing: shallow, symlink-safe walk (same posture
+/// as [`scan_skills_dir`]), sorted, capped — a large tree is listed with
+/// an explicit incompleteness note by the formatter.
+pub fn skill_resources(root: &Path) -> Vec<String> {
+    const MAX_RESOURCE_DEPTH: usize = 3;
+    let Ok(root_real) = root.canonicalize() else {
+        return Vec::new();
+    };
+    let mut files: Vec<String> = Vec::new();
+    let mut complete = true;
+    let mut stack: Vec<(PathBuf, usize)> = vec![(root_real.clone(), 0)];
+    'walk: while let Some((dir, depth)) = stack.pop() {
+        let Ok(children) = std::fs::read_dir(&dir) else {
+            continue; // unreadable — skip (same posture as walk_dir)
+        };
+        for child in children.filter_map(|e| e.ok()) {
+            let Ok(real) = child.path().canonicalize() else {
+                continue; // dangling symlink — skip
+            };
+            if !real.starts_with(&root_real) {
+                continue; // symlink escape — never leave the skill directory
+            }
+            if real.is_dir() {
+                if depth < MAX_RESOURCE_DEPTH {
+                    stack.push((real, depth + 1));
+                }
+                continue;
+            }
+            if real == root_real.join(MANIFEST) {
+                continue; // the manifest itself is not a "bundled" resource
+            }
+            if files.len() >= MAX_RESOURCE_ENTRIES {
+                complete = false;
+                break 'walk;
+            }
+            if let Ok(rel) = real.strip_prefix(&root_real) {
+                files.push(rel.to_string_lossy().into_owned());
+            }
+        }
     }
+    files.sort();
+    if !complete {
+        files.push(format!("… list capped at {MAX_RESOURCE_ENTRIES} files"));
+    }
+    files
+}
 
-    async fn execute(&self, ctx: ToolCtx) -> Result<String, CoreError> {
-        let workdir = ctx.resolve(".")?;
-        let entries = discover_skills(
-            global_skills_dir().as_deref(),
-            Some(&workdir.join(".flux").join("skills")),
+/// Format one skill activation — the model-facing return of a full read:
+/// the manifest arrives as `<skill_content>` around the normalized body
+/// (structured wrapping — the model can tell skill instructions from
+/// conversation content, and a future compactor can recognize the block)
+/// plus the bundled-file listing (paths only — never eagerly loaded);
+/// a non-manifest file is returned raw.
+pub fn format_skill_activation(file: &SkillFile) -> String {
+    let body = skill_content(file);
+    if !file.is_manifest {
+        return body.to_string();
+    }
+    let mut out = format!(
+        "<skill_content name=\"{}\">\n{body}\n</skill_content>",
+        file.name
+    );
+    // The skill root is the manifest's parent (a canonical path).
+    let resources = skill_resources(file.path.parent().unwrap_or(Path::new("/")));
+    if !resources.is_empty() {
+        out.push_str(
+            "\n\nBundled files (relative to the skill root — read via skill_read `path`): ",
         );
-        read_skill_file(&entries, &self.name, self.path.as_deref())
+        out.push_str(&resources.join(", "));
     }
+    out
 }
 
+#[cfg(test)]
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::test_util::{boundary_ctx, processed, setup};
     use flux_core::Tool;
-    use serde_json::json;
     use std::fs;
 
     fn write_skill(root: &Path, dir_name: &str, name: &str, description: &str) -> PathBuf {
@@ -520,12 +771,19 @@ mod tests {
         let entries = discover_skills(None, Some(dir.path()));
 
         let whole = read_skill_file(&entries, "pdf", None).unwrap();
-        assert!(whole.contains("name: pdf"));
-        // The path form reaches files the skill text points to.
+        assert_eq!(whole.name, "pdf");
+        assert!(whole.is_manifest);
+        // The manifest's normalized content is the stripped body — the
+        // frontmatter was already consumed at discovery.
+        let body = skill_content(&whole);
+        assert_eq!(body, "# pdf\n".to_string());
+        assert!(!body.contains("name: pdf"));
+        // The path form reaches files the skill text points to, raw.
         fs::create_dir_all(skill_dir.join("references")).unwrap();
         fs::write(skill_dir.join("references/api.md"), "API reference body").unwrap();
         let reference = read_skill_file(&entries, "pdf", Some("references/api.md")).unwrap();
-        assert_eq!(reference, "API reference body");
+        assert!(!reference.is_manifest);
+        assert_eq!(skill_content(&reference), "API reference body");
     }
 
     #[test]
@@ -551,6 +809,111 @@ mod tests {
         }
     }
 
+    // ── normalization + formatting ──
+
+    #[test]
+    fn strip_removes_only_a_leading_frontmatter_block() {
+        // Plain strip: body after the closing `---`, leading blank line gone.
+        assert_eq!(
+            strip_frontmatter("---\nname: x\n---\n\n# Body\n"),
+            "# Body\n"
+        );
+        // No frontmatter — unchanged (including files that merely CONTAIN `---`).
+        assert_eq!(
+            strip_frontmatter("no frontmatter\n---\nstill body"),
+            "no frontmatter\n---\nstill body"
+        );
+        // Unterminated block — nothing safely strippable.
+        assert_eq!(strip_frontmatter("---\nname: x\n"), "---\nname: x\n");
+        // CRLF frontmatter.
+        assert_eq!(
+            strip_frontmatter("---\r\nname: x\r\n---\r\nBody\r\n"),
+            "Body\r\n"
+        );
+    }
+
+    #[test]
+    fn normalize_rel_converges_the_manifest_spellings() {
+        assert_eq!(normalize_rel(None), "SKILL.md");
+        assert_eq!(normalize_rel(Some("")), "SKILL.md");
+        assert_eq!(normalize_rel(Some("SKILL.md")), "SKILL.md");
+        assert_eq!(normalize_rel(Some("./SKILL.md")), "SKILL.md");
+        assert_eq!(normalize_rel(Some("sub/../SKILL.md")), "SKILL.md");
+        assert_eq!(
+            normalize_rel(Some("references/api.md")),
+            "references/api.md"
+        );
+    }
+
+    #[test]
+    fn manifest_activation_wraps_the_body_and_lists_resources() {
+        let dir = setup();
+        let skill_dir = write_skill(dir.path(), "pdf", "pdf", "PDF workflows.");
+        fs::create_dir_all(skill_dir.join("scripts")).unwrap();
+        fs::write(skill_dir.join("scripts/run.py"), "#!/usr/bin/env python3").unwrap();
+        let entries = discover_skills(None, Some(dir.path()));
+        let file = read_skill_file(&entries, "pdf", None).unwrap();
+        let out = format_skill_activation(&file);
+        assert!(out.starts_with("<skill_content name=\"pdf\">\n"));
+        assert!(out.contains("\n</skill_content>"));
+        assert!(!out.contains("name: pdf")); // frontmatter stripped
+        assert!(out.contains("scripts/run.py")); // bundled listing, path only
+        assert!(out.contains("read via skill_read"));
+        // The absolute skill root is deliberately NOT surfaced (global
+        // skills live outside the workdir boundary).
+        assert!(!out.contains(dir.path().to_str().unwrap()));
+    }
+
+    #[test]
+    fn non_manifest_reads_return_raw_without_wrapping() {
+        let dir = setup();
+        let skill_dir = write_skill(dir.path(), "pdf", "pdf", "PDF workflows.");
+        fs::write(skill_dir.join("refs.md"), "reference body").unwrap();
+        let entries = discover_skills(None, Some(dir.path()));
+        let file = read_skill_file(&entries, "pdf", Some("refs.md")).unwrap();
+        assert_eq!(format_skill_activation(&file), "reference body");
+    }
+
+    // ── catalog (Tier-1) ──
+
+    #[test]
+    fn catalog_is_none_without_skills_and_carries_entries_otherwise() {
+        let dir = setup();
+        // No skills — the section never appears (empty blocks mislead).
+        assert!(catalog_section(None, Some(&dir.path().join("skills"))).is_none());
+
+        write_skill(&dir.path().join("skills"), "pdf", "pdf", "PDF workflows.");
+        let section = catalog_section(None, Some(&dir.path().join("skills"))).unwrap();
+        assert!(section.starts_with("## Skills"));
+        assert!(section.contains("snapshot"));
+        assert!(section.contains("skill_list for the live list"));
+        assert!(section.contains("- pdf (project): PDF workflows."));
+        assert!(section.trim_end().ends_with("</available_skills>"));
+    }
+
+    #[test]
+    fn catalog_respects_its_budget_with_an_explicit_tail_note() {
+        let dir = setup();
+        let skills = dir.path().join("skills");
+        for i in 0..40 {
+            write_skill(
+                &skills,
+                &format!("s{i}"),
+                &format!("s{i}"),
+                &"x".repeat(300),
+            );
+        }
+        let section = catalog_section(None, Some(&skills)).unwrap();
+        assert!(section.len() <= 8000 + 200); // budget + tail-note slack
+        assert!(section.contains("more — skill_list has the full list"));
+        assert!(section.contains("- s0 (project):"));
+    }
+
+    #[test]
+    fn catalog_for_workdir_needs_a_boundary() {
+        assert!(catalog_for_workdir(Path::new("")).is_none());
+    }
+
     // ── tool surfaces (through the registry contract) ──
 
     #[tokio::test]
@@ -568,47 +931,6 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("- pdf (project) — PDF workflows."));
-    }
-
-    #[tokio::test]
-    async fn skill_read_tool_reads_within_the_boundary_contract() {
-        let dir = setup();
-        let skill_dir = write_skill(
-            &dir.path().join(".flux/skills"),
-            "pdf",
-            "pdf",
-            "PDF workflows.",
-        );
-        fs::write(skill_dir.join("refs.md"), "reference body").unwrap();
-
-        let tool = SkillReadTool::new();
-        let whole = tool
-            .call(
-                processed(vec![("name", json!("pdf"))]),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap();
-        assert!(whole.contains("name: pdf"));
-
-        let reference = tool
-            .call(
-                processed(vec![("name", json!("pdf")), ("path", json!("refs.md"))]),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(reference, "reference body");
-
-        // Escape attempt — a tool error the model sees.
-        let err = tool
-            .call(
-                processed(vec![("name", json!("pdf")), ("path", json!("../../x"))]),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("escapes") || err.to_string().contains("cannot read"));
     }
 
     #[tokio::test]

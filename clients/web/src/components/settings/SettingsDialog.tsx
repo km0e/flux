@@ -21,7 +21,7 @@
  * session (module state — the dialog itself unmounts).
  *
  * Provides: SettingsDialog, SettingsTab
- * Depends: components/dialogs/{ProvidersPanel,McpPanel,SkillsPanel},
+ * Depends: components/settings/{ProvidersPanel,McpPanel,SkillsPanel},
  *          components/ui/dialog, components/ui/tabs
  */
 import { useState } from 'react';
