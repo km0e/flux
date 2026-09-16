@@ -1,11 +1,13 @@
-# Build and package the browser chat UI.
+# Build the browser chat UI.
 #
 # Usage: package-web.ps1 [-Out <dir>]
 #   Builds clients/web -> a self-contained servable root (index.html +
-#   assets/*.{js,css} (content-hashed)). Default out: clients/web/dist.
+#   assets/*.{js,css,woff2} content-hashed). Default out: clients/web/dist —
+#   the folder flux-server EMBEDS via rust-embed (build.rs invokes this
+#   script when that dist is missing or stale). A --web-assets-dir given to
+#   the server is an override layer on top of the embedded bundle.
 param(
-    [string]$Out,
-    [string]$Tar
+    [string]$Out
 )
 
 $ErrorActionPreference = "Stop"
@@ -72,17 +74,12 @@ if (-not (Test-Path (Join-Path $Out "index.html")) -or
     exit 1
 }
 
-if ($Tar) {
-    # Release-asset form: a tarball whose top-level dir is web-ui/ —
-    # `tar xz -C ~/.flux` lands it on the server's asset-fallback path.
-    $staging = Join-Path ([System.IO.Path]::GetTempPath()) ("flux-web-ui-" + [System.Guid]::NewGuid().ToString("N"))
-    New-Item -ItemType Directory -Force -Path (Join-Path $staging "web-ui") | Out-Null
-    Copy-Item -Recurse -Force (Join-Path $Out "*") (Join-Path $staging "web-ui")
-    tar czf $Tar -C $staging web-ui
-    $hash = (Get-FileHash $Tar -Algorithm SHA256).Hash.ToLower()
-    Set-Content -Path "$Tar.sha256" -Value "$hash  $(Split-Path $Tar -Leaf)"
-    Remove-Item -Recurse -Force $staging
-    Get-Item $Tar, "$Tar.sha256" | Format-Table Name, Length
-}
+# Version stamp: flux-server's startup check compares a DISK override dir's
+# stamp against the running binary (CARGO_PKG_VERSION) and warns on a
+# mismatch - an override dir outlives binaries and its files shadow the
+# embedded bundle. The embedded bundle needs no stamp (built with the
+# binary); a dev dist (pnpm build without this script) carries none.
+$version = (Select-String -Path (Join-Path $repo "Cargo.toml") -Pattern '^version = "(.*)"').Matches[0].Groups[1].Value
+Set-Content -Path (Join-Path $Out "web-ui-version.txt") -Value $version -NoNewline
 
-Write-Host "==> Web UI packaged: $Out"
+Write-Host "==> Web UI built: $Out"

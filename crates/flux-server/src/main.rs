@@ -61,7 +61,7 @@ Guidelines:
 
 /// The default database location: `$HOME/.flux/flux.db` (`USERPROFILE`
 /// fallback) — the global flux home, consistent with the global skills
-/// dir (`$HOME/.flux/skills`) and the web-ui asset fallback
+/// dir (`$HOME/.flux/skills`) and the web UI override dir
 /// (`$HOME/.flux/web-ui`). Running `flux-server` in ANY directory
 /// must not litter the database into that directory. CWD-relative
 /// `flux.db` survives only as the no-home fallback (headless/service
@@ -78,7 +78,7 @@ fn default_db_path() -> PathBuf {
 
 /// The global flux home: `$HOME/.flux` (`USERPROFILE` fallback on
 /// Windows). Shared by the database default, the global skills dir and
-/// the web-ui asset fallback.
+/// the web UI override dir.
 fn flux_home() -> Option<PathBuf> {
     std::env::var_os("HOME")
         .or_else(|| std::env::var_os("USERPROFILE"))
@@ -137,8 +137,9 @@ struct Args {
     /// served by default.
     #[arg(long, env = "FLUX_NO_WEB")]
     no_web: bool,
-    /// Web UI assets directory override (default: `web-ui/` next to the
-    /// binary — the packaged layout; no assets found = headless).
+    /// Web UI override directory (Gitea `custom/` semantics): files here
+    /// shadow the embedded bundle per path — index.html, an extra asset,
+    /// anything the base serves. No directory = the pure embedded UI.
     #[arg(long, value_name = "PATH", env = "FLUX_WEB_ASSETS_DIR")]
     web_assets_dir: Option<PathBuf>,
     /// Generate a shell completion script for SHELL, print it to stdout,
@@ -297,19 +298,41 @@ async fn main() -> anyhow::Result<()> {
 
     // Web UI static site — served by DEFAULT on the SAME listener as the
     // Connect surface and the terminal side channel (one port; the page
-    // connects back same-origin). No startup validation: an incomplete
-    // build surfaces at request time (decisions.md T-06).
-    let web_root = if args.no_web {
+    // connects back same-origin). The UI bundle rides INSIDE the binary
+    // (feature `web-ui-embed`); the override dir is optional user
+    // customization. No startup validation: an incomplete override or a
+    // placeholder embed surfaces at request time (decisions.md T-14).
+    let web = if args.no_web {
         None
     } else {
-        let root = resolve_assets_dir(args.web_assets_dir.as_deref());
-        if root.is_none() {
-            info!(
-                "no web UI assets found (--web-assets-dir, web-ui/ next to the binary, or \
-                 ~/.flux/web-ui) — serving headless"
-            );
+        let override_dir = resolve_override_dir(args.web_assets_dir.as_deref());
+        match &override_dir {
+            None => info!("serving the web UI from the embedded bundle (no override dir)"),
+            Some(dir) => {
+                info!(
+                    override = %dir.display(),
+                    "serving the web UI — embedded bundle + per-path disk override"
+                );
+                // The embedded half cannot mismatch (same build as the
+                // binary). An override dir CAN: a directory populated by an
+                // older release shadows files of the new one, which is the
+                // stale-UI symptom back through the user-customization door.
+                // The stamp file is advisory-only, as before.
+                if let Some(stamp) = bundle_version(dir) {
+                    let server = env!("CARGO_PKG_VERSION");
+                    if stamp != server {
+                        tracing::warn!(
+                            bundle = %stamp,
+                            server = %server,
+                            "the web UI override dir was populated for a different Flux version \
+                             — its files shadow the embedded bundle; refresh or remove it \
+                             (default: ~/.flux/web-ui)"
+                        );
+                    }
+                }
+            }
         }
-        root
+        Some(web::WebUi { override_dir })
     };
 
     // Terminal side channel — one PTY per chat over /ws/term, scoped to
@@ -323,45 +346,45 @@ async fn main() -> anyhow::Result<()> {
         registry,
         mcp_manager,
         terminal_hub,
-        web_root,
+        web,
     )
     .await
     .context("Failed to initialize Flux server. Check the database path and port availability.")?;
     Ok(())
 }
 
-/// Web assets directory resolution (first match wins):
+/// The web bundle's version stamp file (scripts/package-web.sh writes it
+/// into every built servable root; only override DIRS still carry it —
+/// the embedded bundle is built with the binary and cannot mismatch).
+const BUNDLE_VERSION_FILE: &str = "web-ui-version.txt";
+
+/// The resolved bundle's version stamp, when one is present (trimmed;
+/// blank or absent = nothing to compare — the dev-flow dist).
+fn bundle_version(root: &Path) -> Option<String> {
+    let raw = std::fs::read_to_string(root.join(BUNDLE_VERSION_FILE)).ok()?;
+    let stamp = raw.trim();
+    (!stamp.is_empty()).then(|| stamp.to_string())
+}
+
+/// The web UI override directory (first match wins):
 /// 1. `--web-assets-dir` (CLI, used as-is)
-/// 2. `web-ui/` next to the running binary (packaged distribution layout)
-/// 3. `<flux-home>/web-ui` (the global flux home, `$HOME/.flux` — where
-///    the release's `flux-web-ui.tar.gz` unpacks; the script-installer
-///    layout)
+/// 2. `<flux-home>/web-ui` (`$HOME/.flux` — the user-customization slot,
+///    Gitea `custom/` style; only used when it EXISTS)
 ///
-/// Otherwise `None` — the UI is simply not served (headless). There is no
+/// Otherwise `None` — the pure embedded bundle is served. There is no
 /// CWD-relative repo guess: a hardcoded `clients/web/dist` silently works
 /// or breaks depending on where the process was launched from. Devs use
 /// `run-server.sh`, which always pins the repo dist with an absolute flag.
-fn resolve_assets_dir(cli: Option<&Path>) -> Option<PathBuf> {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf));
-    resolve_assets_dir_in(cli, exe_dir.as_deref(), flux_home().as_deref())
+fn resolve_override_dir(cli: Option<&Path>) -> Option<PathBuf> {
+    let flux_home = flux_home();
+    resolve_override_dir_in(cli, flux_home.as_deref())
 }
 
 /// The resolution chain with the environment sources injected — the pure,
-/// testable core of [`resolve_assets_dir`].
-fn resolve_assets_dir_in(
-    cli: Option<&Path>,
-    exe_dir: Option<&Path>,
-    flux_home: Option<&Path>,
-) -> Option<PathBuf> {
+/// testable core of [`resolve_override_dir`].
+fn resolve_override_dir_in(cli: Option<&Path>, flux_home: Option<&Path>) -> Option<PathBuf> {
     if let Some(d) = cli {
         return Some(d.to_path_buf());
-    }
-    if let Some(d) = exe_dir.map(|d| d.join("web-ui"))
-        && d.is_dir()
-    {
-        return Some(d);
     }
     if let Some(d) = flux_home.map(|d| d.join("web-ui"))
         && d.is_dir()
@@ -391,43 +414,51 @@ mod tests {
     fn cli_flag_wins_and_is_used_as_is() {
         let dir = std::env::temp_dir().join("flux-assets-cli");
         std::fs::create_dir_all(&dir).unwrap();
-        // The flag wins even over populated fallback levels.
-        let got = resolve_assets_dir_in(Some(&dir), Some(&dir), Some(&dir));
+        // The flag wins even over a populated flux home, and is used as-is:
+        // it is an override pointer, NOT an existence-checked resolution.
+        let got = resolve_override_dir_in(Some(&dir), Some(&dir));
         assert_eq!(got, Some(dir));
     }
 
     #[test]
-    fn binary_adjacent_beats_flux_home() {
-        let base = std::env::temp_dir().join("flux-assets-adjacent");
-        let exe_dir = base.join("bin");
-        std::fs::create_dir_all(exe_dir.join("web-ui")).unwrap();
-        let flux_home = base.join("home/.flux");
-        std::fs::create_dir_all(flux_home.join("web-ui")).unwrap();
-
-        let got = resolve_assets_dir_in(None, Some(&exe_dir), Some(&flux_home));
-        assert_eq!(got, Some(exe_dir.join("web-ui")));
-    }
-
-    #[test]
-    fn flux_home_fallback_when_no_packaged_layout() {
+    fn flux_home_web_ui_is_the_default_override_slot() {
         let base = std::env::temp_dir().join("flux-assets-home");
         // The parameter is the FLUX home ($HOME/.flux), matching what the
         // caller gets from flux_home().
         let flux_home = base.join("home/.flux");
         std::fs::create_dir_all(flux_home.join("web-ui")).unwrap();
 
-        // An exe dir WITHOUT a web-ui/ inside (installer layout).
-        let got = resolve_assets_dir_in(None, Some(&base.join("bin")), Some(&flux_home));
+        let got = resolve_override_dir_in(None, Some(&flux_home));
         assert_eq!(got, Some(flux_home.join("web-ui")));
     }
 
     #[test]
-    fn no_candidates_means_headless() {
+    fn absent_flux_home_override_means_pure_embedded() {
         let base = std::env::temp_dir().join("flux-assets-none");
-        std::fs::create_dir_all(base.join("bin")).unwrap(); // no web-ui inside
-        let flux_home = base.join("home/.flux"); // no web-ui inside either
+        let flux_home = base.join("home/.flux"); // no web-ui inside
+        std::fs::create_dir_all(&flux_home).unwrap();
 
-        let got = resolve_assets_dir_in(None, Some(&base.join("bin")), Some(&flux_home));
+        let got = resolve_override_dir_in(None, Some(&flux_home));
         assert_eq!(got, None);
+    }
+
+    #[test]
+    fn bundle_version_stamps_are_read_trimmed_or_ignored() {
+        let dir = std::env::temp_dir().join("flux-bundle-version-read");
+        std::fs::create_dir_all(&dir).unwrap();
+        let stamp = dir.join(BUNDLE_VERSION_FILE);
+
+        std::fs::write(&stamp, "0.1.5\n").unwrap();
+        assert_eq!(bundle_version(&dir).as_deref(), Some("0.1.5"));
+
+        // Whitespace-only stamp = no usable version (nothing to compare).
+        std::fs::write(&stamp, "   \n").unwrap();
+        assert_eq!(bundle_version(&dir), None);
+
+        // No stamp at all (a dev dist) — nothing to compare either.
+        let bare = std::env::temp_dir().join("flux-bundle-version-absent");
+        let _ = std::fs::remove_dir_all(&bare);
+        std::fs::create_dir_all(&bare).unwrap();
+        assert_eq!(bundle_version(&bare), None);
     }
 }

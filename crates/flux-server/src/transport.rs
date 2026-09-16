@@ -16,7 +16,6 @@ use axum::Router;
 use axum::routing::get;
 use flux_session::ServerState;
 use std::net::SocketAddr;
-use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tracing::info;
@@ -37,7 +36,7 @@ pub async fn run(
     registry: Arc<ProviderRegistry>,
     mcp: Arc<crate::mcp::McpManager>,
     hub: Arc<TerminalHub>,
-    web_root: Option<PathBuf>,
+    web: Option<web::WebUi>,
 ) -> anyhow::Result<()> {
     // Drive the resume grace window: expired detached sessions get
     // their leases released. ONE reaper for the transport's lifetime —
@@ -57,8 +56,8 @@ pub async fn run(
             Arc::clone(&mcp),
         ))
         .with_state((state.clone(), registry, mcp, hub) as SharedState);
-    if let Some(web_root) = web_root {
-        app = app.merge(web::router(&web_root));
+    if let Some(ui) = web {
+        app = app.merge(web::router(&ui));
     }
 
     let listener = TcpListener::bind(format!("{host}:{port}"))

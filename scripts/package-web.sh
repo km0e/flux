@@ -1,28 +1,22 @@
 #!/usr/bin/env bash
-# Build and package the browser chat UI.
+# Build the browser chat UI.
 #
-# Usage: package-web.sh [--out DIR] [--tar NAME.tar.gz]
-#   Builds clients/web (vite) → a self-contained servable root. The artifact
-#   is a DIRECTORY (flux-server's static layer serves a directory, not
-#   an archive): <out>/ contains index.html + assets/*.{js,css} (content-hashed).
-#   Default out: clients/web/dist (the in-repo build location run-server.sh
-#   pins via --web-assets-dir). The dist release pipeline stages it as
-#   web-ui/ next to the binary inside every archive (include = ["web-ui/"]).
-#
-#   --tar NAME.tar.gz additionally packs the servable root as a release
-#   asset (dist extra-artifacts): a tarball whose top-level dir is web-ui/,
-#   so `tar xz -C ~/.flux` lands it on the server's asset-fallback path
-#   (~/.flux/web-ui). Emits NAME.tar.gz + NAME.tar.gz.sha256 in the CWD.
+# Usage: package-web.sh [--out DIR]
+#   Builds clients/web (vite) → a self-contained servable root: <out>/
+#   contains index.html + assets/*.{js,css,woff2} (content-hashed).
+#   Default out: clients/web/dist — the folder flux-server EMBEDS via
+#   rust-embed (build.rs invokes THIS script when that dist is missing or
+#   stale, so the build procedure has one home). run-server.sh pins the
+#   same dist via --web-assets-dir; a --web-assets-dir given to the server
+#   is an override layer on top of the embedded bundle, not a replacement.
 set -euo pipefail
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 out="$repo/clients/web/dist"
-tar_name=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --out) out="${2:?--out requires a directory}"; shift 2 ;;
-        --tar) tar_name="${2:?--tar requires a filename}"; shift 2 ;;
-        *) echo "unknown argument: $1 (usage: package-web.sh [--out DIR] [--tar NAME.tar.gz])" >&2; exit 1 ;;
+        *) echo "unknown argument: $1 (usage: package-web.sh [--out DIR])" >&2; exit 1 ;;
     esac
 done
 
@@ -81,16 +75,13 @@ test -f "$out/index.html"
 ls "$out"/assets/*.js >/dev/null 2>&1
 ls "$out"/assets/*.css >/dev/null 2>&1
 
-if [ -n "$tar_name" ]; then
-    staging="$(mktemp -d)"
-    trap 'rm -rf "$staging"' EXIT
-    cp -r "$out" "$staging/web-ui"
-    tar czf "$tar_name" -C "$staging" web-ui
-    (
-        cd "$(dirname "$tar_name")" && \
-            sha256sum "$(basename "$tar_name")" > "$(basename "$tar_name").sha256"
-    )
-    ls -lh "$tar_name" "$tar_name.sha256"
-fi
+# Version stamp: flux-server's startup check compares a DISK override dir's
+# stamp against the running binary (CARGO_PKG_VERSION) and warns on a
+# mismatch — an override dir outlives binaries and its files shadow the
+# embedded bundle, so a stale dir means a stale UI. The embedded bundle
+# needs no stamp (built with the binary, cannot mismatch); a dev dist (pnpm
+# build without this script) carries none and nothing is checked.
+version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$repo/Cargo.toml" | head -1)"
+printf '%s' "$version" > "$out/web-ui-version.txt"
 
-echo "==> Web UI packaged: $out"
+echo "==> Web UI built: $out"

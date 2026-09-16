@@ -10,13 +10,17 @@
 # Database: ~/.flux/flux.db by default (the binary's global-home default —
 # no repo litter anywhere); --db-path overrides.
 #
-# Web (served BY DEFAULT — the UI rides the SAME listener as /ws):
-#   Unless --no-web is passed, the script ensures the UI build exists:
-#   builds clients/web via package-web.sh when the dist is missing (force a
-#   rebuild with --web-build; never build with --no-web-build), then pins
-#   the repo dist via --web-assets-dir. Skipped when --web-assets-dir is
-#   given (used as-is). --web-build/--no-web-build are SCRIPT options —
-#   consumed here, never passed to the binary.
+# Web (served BY DEFAULT — the UI rides the SAME listener as /ws and is
+# EMBEDDED in the binary):
+#   The embedded bundle follows the repo dist automatically (flux-server's
+#   build.rs rebuilds it when stale). Unless --no-web is passed, this
+#   script additionally pre-builds clients/web via package-web.sh when the
+#   dist is missing (force with --web-build; never with --no-web-build) and
+#   pins the repo dist via --web-assets-dir, so a plain `cargo build
+#   --release` binary serves the FRESH UI immediately instead of waiting
+#   for the embed. Skipped when --web-assets-dir is given (used as-is).
+#   --web-build/--no-web-build are SCRIPT options — consumed here, never
+#   passed to the binary.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."

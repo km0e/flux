@@ -6,7 +6,28 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 > parses this file); the full docs live in [`README.md`](README.md) and
 > [`docs/architecture.md`](docs/architecture.md).
 
-## [Unreleased]
+## [0.2.0] - 2026-09-16
+
+> **Migration (script-installer users)**: the browser UI now ships INSIDE the binary —
+> after upgrading, delete a previously unpacked `~/.flux/web-ui/` once (a stale dir
+> becomes a per-path OVERRIDE that shadows the embedded UI; the startup log warns when
+> it carries an old `web-ui-version.txt`). Source builds via `cargo` now need
+> node/pnpm by default (a toolchain-less build embeds a placeholder page; headless-only:
+> `--no-default-features`).
+
+### Changed
+
+- **The shipped binary drops from 32MB to 20MB** — `[profile.dist]` now builds with `lto = "fat"` + `codegen-units = 1` (cross-crate inlining/DCE, −4.5MB of `.text` at a release-only build-time cost) and `strip = "symbols"` (the ELF `.symtab`/`.strtab` were 8.2MB of dead weight with `debug = 0`). Accepted tradeoff: `RUST_BACKTRACE=1` in a shipped binary shows addresses without names — tool panics are caught and reported by payload (`flux-chat` tool_exec) and the shutdown contract is crash-only (T-11); dev `[profile.release]` stays unstripped for debugging. Attribution via cargo-bloat: `.text` 16.7MB led by rmcp 2.3MB, ~2.5MB of C/asm natives (sqlite3/aws-lc/zstd), std 1.6MB, the rustls/reqwest/h2/hyper stack ~1.6MB; embedded UI 2.5MB sits in `.rodata`.
+
+### Added
+
+- **The browser UI is EMBEDDED in the server binary** (rust-embed, feature `web-ui-embed`, default-on; decision T-14) — release builds serve `clients/web/dist` straight from the binary (+~2.5MB, the woff2 fonts dominate), debug builds keep reading the repo dist from disk at runtime (pinned to the compile-time path: the dev fallback — a UI rebuild needs no `cargo build`). Serving gains compile-time sha256 strong ETags (conditional requests 304) on top of the existing immutable/no-store split; MIME, HEAD/405 and the traversal guard (`..%2F` unit test) moved from `ServeDir` into the custom handler.
+- **`crates/flux-server/build.rs` drives the embed** (Meilisearch-style): `rerun-if-changed` over web sources/dist/lockfile/proto (a vite rebuild's NEW hashed names are invisible to cargo's `include_bytes!` tracking — the build script rerun forces the macro to re-walk); invokes `scripts/package-web.{sh,ps1}` when the dist is missing/stale (node 24 + pnpm required); writes a placeholder index.html on toolchain-less checkouts so the binary still compiles (rust-embed validates the folder in ALL modes). Escapes: `FLUX_WEB_UI_NO_BUILD=1` skips the UI build; `--no-default-features` builds headless-only.
+- **Per-path disk override with Gitea `custom/` semantics** — `--web-assets-dir` or `~/.flux/web-ui` (only when it exists) shadows the embedded bundle file-by-file; anything absent falls through to the embedded base. The four-level asset-resolution chain collapses to override-dir-or-embedded. A stale override dir still carries `web-ui-version.txt` and warns at startup (the stamp advisory now guards the only surface that CAN go stale — the embedded side cannot mismatch by construction).
+
+### Removed
+
+- **The standalone `flux-web-ui.tar.gz` release artifact (and the `web-ui/` payload in platform archives)** — the binary is self-contained; the script-installer flow is ONE command now, and the "② unpack the UI tarball into `~/.flux/web-ui`" README step is gone. `web-ui/` next to the binary is no longer a resolution level (re-populate `~/.flux/web-ui/` if you deliberately want a disk override). dist config: `include = ["web-ui/"]` and the `[[dist.extra-artifacts]]` block deleted; `.github/build-setup.yml` now supplies protoc + node/pnpm and lets build.rs build the UI inside the cargo build. flux-server is `publish = false` + `[package.metadata.dist] dist = true` (crates.io was never a distribution channel, and the embedded folder lives outside the crate dir).
 
 ### Fixed
 
@@ -116,6 +137,7 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 - Interactive terminal per chat (e4pty PTY over a dedicated `/ws/term` side channel, xterm.js), tabbed file dock with git-status explorer.
 - Release pipeline: dist archives with the web UI bundled (`web-ui/` next to the binary), shell + PowerShell installers, and a standalone `flux-web-ui.tar.gz` for script-installer users.
 
+[0.2.0]: https://github.com/km0e/flux/compare/v0.1.5...v0.2.0
 [0.1.5]: https://github.com/km0e/flux/compare/v0.1.4...v0.1.5
 [0.1.4]: https://github.com/km0e/flux/compare/v0.1.3...v0.1.4
 [0.1.3]: https://github.com/km0e/flux/compare/v0.1.2...v0.1.3

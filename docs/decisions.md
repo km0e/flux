@@ -16,10 +16,6 @@ state 写任意 key / 读未知 key 返回空串是**设计行为**（agent 跨�
 
 `fsbrowse` 的目录状态收集仍 shell 到 `git` 子进程（每列目录两次：`rev-parse --show-toplevel` + `status --porcelain -z`），已用 `-- .` pathspec 限定被列子树、`-unormal` 折叠 untracked 目录、blocking 线程池执行消化成本。未引入 `git2`（C 工具链依赖 + unsafe + worktree/配置兼容面）或 `gix`（纯 Rust 但 status 高层 API 仍在变动、依赖树重）——对「每 15s 对已加载目录重列」的 UI 负载，CLI 兼容性与零新增重依赖胜出。重开评估条件：status 调用成为实测热点（大仓库冷扫描 > 数百 ms），或 gix status API 进入稳定层。
 
-### T-06 web 构建缺失不做启动期校验
-
-web 伺服（默认开）启动不校验 dist 布局（曾试过 `index.html` + ≥1 JS + ≥1 CSS 的 fail-fast，已删）：构建不完整在**请求时**自然暴露——index 读失败 → 500 + warn 日志；缺失资产 → 404（浏览器 console 可见）。理由：服务端拒绝启动会把「agent 可用、UI 资产待补」的正常状态误判为致命错误；失败链路本身已可归因（warn 指名路径 / console 指名资源）。重开评估条件：请求期暴露被证明难以归因（如用户反馈分不清 assets_dir 配错与构建缺失），或引入多入口页面使失败形态复杂化。
-
 ### T-07 前端流式渲染不换渲染器/不引流式库
 
 流式 markdown 管线维持 marked + splitAndFold/ParagraphSplitter + renderStableSlice + FenceCache（调研定案，不应再提议更换）：① marked 无增量续接 API——末尾 `text` token 吸收未闭合行内构造，按 token 边界缓存会丢内联上下文；② micromark 真流式入口仅 Node.js，浏览器退化为全量 re-parse（O(n²) 依旧）；③ 生态内「streaming markdown renderer」（streamdown、Vercel AI SDK 等）实为 remend 自愈不完整块 + 全量 re-parse + DOM diff，且全带 React peer dep。现有管线的块级缓存/稳定前缀方案比这些实现更精细；残余 O(n²) 仅存于无空行墙式文本的病态输入（实测 64KB ≈ 12ms，被「当前段落」钳制）。重开评估条件：出现框架无关、带稳定前缀缓存契约的增量渲染器，或真实输入实测超帧预算。
@@ -47,3 +43,7 @@ Transcript 维持单一累积、无自动预算裁剪、无 compaction/摘要机
 ### T-13 Skill 激活去重由 transcript 派生：不建专表、不建目录文件 watch
 
 chat-owned `skill_read` 的去重索引在两个组装点（spawn / apply_rebuild）从 history 重派生——transcript 只增不减（T-08），已提交的 skill_read 结果永远在模型可见上下文里，transcript 本身就是激活记录的真相源；专用表只会引入第二真相源与 fork keep-set 复制 SQL。Tier-1 目录是 begin 点的快照，不做文件 watch（Claude Code 做 watch；flux 的活刷新口是 `skill_list` 的每调用即扫 + `skill_read` 未知名自纠错，全局技能在边界外只有它能枚举）。为何接受：派生的 store 读仅发生在「溢出过的技能路径」（每路径至多一次，技能文件 ≤256KB、路径屈指可数）；快照过期由节内文案显式声明并指向 `skill_list`。词法规范化键（非 canonical）的代价 = 技能内 symlink 别名至多多一次全文读。重开评估条件：目录过期被证明高频影响任务（再议 SkillService 安装即触发的 gate 重建钩子——机制已存在，只需接线），或压缩（T-08 落地时）需要把派生源切换为压缩视图（索引语义不变，只换输入）。
+
+### T-14 浏览器 UI 嵌入二进制，磁盘只做显式覆盖（不做磁盘优先解析）
+
+`clients/web/dist` 经 rust-embed（feature `web-ui-embed`，默认开）嵌进 flux-server：release 嵌入、debug 运行时读仓库 dist（路径钉在编译期 `CARGO_MANIFEST_DIR`——dev 磁盘回退）。`~/.flux/web-ui` / `--web-assets-dir` 从「资产解析链的磁盘优先层」降为 **Gitea `custom/` 式逐路径覆盖**：同名文件遮蔽嵌入底座，其余回落。为何接受：解析链曾有三层磁盘候选（CLI / 二进制旁 / flux home），「二进制已刷新、磁盘目录未跟上」的静默 UI 滞后靠版本戳警告兜底——嵌入后该类错位在嵌入侧**结构性不可能**（同一构建产出），覆盖目录成为唯一可错位面且仍带戳警告；发布管线随之砍掉独立 `flux-web-ui.tar.gz` 工件与归档内 `web-ui/` 载荷。代价（均已接受）：① 从源码构建默认需要 node/pnpm——无工具链时 build.rs 写占位页保证编译成功（`FLUX_WEB_UI_NO_BUILD=1` 跳过构建、`--no-default-features` 纯无头）；② rust-embed 宏展开要求目录存在（所有模式），占位页即为此兜底；③ 新哈希文件名不触发 cargo 的 `include_bytes!` 追踪——由 build.rs `rerun-if-changed` 补位；④ 二进制 +~2.5MB（woff2 字体不可压，占大头）；⑤ 半覆盖可能拼出混版本站点——用户显式定制的固有属性，Gitea 同款。⑥ 启动期**不做**覆盖目录/占位页校验（原 T-06 的存续部分并入本条）——「agent 可用、UI 待补」不是致命状态，失败在请求期归因：index 读失败 → 500 + warn、缺失资产 → 404（曾试过 fail-fast 已删）。重开评估条件：占位页被证明误导真实用户（转 fail-fast 并在启动日志给修复指引）、覆盖目录错位成为高频支持负担（考虑覆盖目录整体验证或按目录版本门控），或引入多入口页面使请求期失败形态复杂化。

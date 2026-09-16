@@ -4,34 +4,52 @@
 //! that connects back over the same origin, so the static layer stays a
 //! pure leaf — it never proxies anything.
 //!
-//! Header policy split, all crate-native (tower-http):
-//! - Cache-Control is PER-ROUTE policy: hashed assets get `immutable`
-//!   (`SetResponseHeaderLayer` on the asset service — ServeDir deliberately
-//!   does not manage caching), index.html gets `no-store` inline (it must
-//!   revalidate to see new asset hashes after a rebuild).
+//! Serving model — EMBEDDED BASE + DISK OVERRIDE (Gitea `custom/` style):
+//! the build embeds `clients/web/dist` into the binary (feature
+//! `web-ui-embed`; release embeds, debug reads the repo dist from disk —
+//! the dev fallback, pinned to CARGO_MANIFEST_DIR so the process CWD is
+//! irrelevant). On top of that base, ONE optional override directory
+//! (`--web-assets-dir` or `~/.flux/web-ui`) shadows files PER PATH: a file
+//! present on disk wins, everything else falls through to the embedded
+//! bundle. There is no resolution CHAIN anymore and no unpacked bundle to
+//! go stale — the structurally-mismatched state (binary newer than its
+//! assets) cannot exist for the embedded half. A partial override can mix
+//! versions (user index.html + embedded assets of another build) — that is
+//! the accepted price of user customization, flagged at startup when the
+//! override carries a stale version stamp (see main.rs).
+//!
+//! Header policy split:
+//! - Cache-Control is PER-PATH policy (by build convention, not by source):
+//!   hashed `assets/*` get `immutable`, root-level unhashed files
+//!   (index.html, manifest.webmanifest) get `no-store` — they reference the
+//!   hashed names, and a cached index would point at old hashes after a
+//!   rebuild (a white page). Embedded files additionally carry a strong
+//!   ETag (the compile-time sha256) so conditional requests 304.
 //! - Security headers are UNIFORM policy: one CSP header + nosniff via two
 //!   `SetResponseHeaderLayer`s composed by `ServiceBuilder`, applied over
 //!   every route AND the fallback. `img-src 'self'` is load-bearing: the
 //!   page runs on plain http, so same-origin images (the favicon) need it —
 //!   `https:` alone does not match them.
 //! - The body-mechanics (Content-Length vs chunked, Vary, conditional
-//!   requests) stay entirely inside the crates: CompressionLayer owns
-//!   transfer headers and skips 304s/empty bodies; the header layers only
-//!   touch their own headers.
+//!   requests) stay inside the handler: CompressionLayer owns transfer
+//!   headers and skips 304s/empty bodies; the header layers only touch
+//!   their own headers.
 //!
 //! Security posture: the server acts with the starting user's
 //! permissions; the port is bound to 127.0.0.1 by default. Remote exposure
-//! = reverse proxy with TLS, an explicit user decision.
+//! = reverse proxy with TLS, an explicit user decision. The override
+//! layer is the user's own directory; path resolution rejects any
+//! non-normal component (`..`, absolute, prefix) — the traversal guard
+//! ServeDir used to provide, kept for the disk half.
 
 use axum::Router;
-use axum::extract::State;
-use axum::http::{HeaderValue, StatusCode, header};
+use axum::extract::{Path, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::get;
-use std::path::{Path, PathBuf};
-use tower::{Layer as _, ServiceBuilder};
+use std::path::{Component, Path as StdPath, PathBuf};
+use tower::ServiceBuilder;
 use tower_http::compression::CompressionLayer;
-use tower_http::services::ServeDir;
 use tower_http::set_header::SetResponseHeaderLayer;
 
 /// CSP for the served page — strict posture: nothing but the app's own
@@ -42,8 +60,8 @@ use tower_http::set_header::SetResponseHeaderLayer;
 /// dark/light choice before first paint — a hash instead of
 /// 'unsafe-inline' keeps the XSS bar high). If that script ever changes,
 /// recompute: `openssl dgst -sha256 -binary | openssl base64` over the
-/// exact bytes between `<script>` and `</script>` (the ws_e2e-adjacent
-/// unit test below cross-checks it against the built dist when present).
+/// exact bytes between `<script>` and `</script>` (the `csp_pairing` test
+/// below cross-checks it against the built dist when present).
 ///
 /// `font-src 'self'` — the bundled terminal fonts (styles/fonts.css).
 /// Without it the faces fall under default-src 'none' and every load
@@ -60,35 +78,39 @@ pub(crate) const CSP: &str = "default-src 'none'; script-src 'self' 'sha256-yC4B
 /// changes, so cache it for a year and never re-validate.
 const ASSET_CACHE: &str = "public, max-age=31536000, immutable";
 
+/// The embedded UI bundle. Release builds bake `clients/web/dist` into
+/// the binary; debug builds (no `debug-embed`) resolve at RUNTIME against
+/// the compile-time repo path — edit + rebuild the UI, refresh the page,
+/// no `cargo build` in between (the dev disk fallback).
+#[cfg(feature = "web-ui-embed")]
+#[derive(rust_embed::RustEmbed)]
+#[folder = "../../clients/web/dist"]
+struct WebAssets;
+
+/// The static site's configuration: the embedded base is unconditional
+/// (feature `web-ui-embed`), `override_dir` is the optional user
+/// customization layer that shadows it per path.
+#[derive(Clone)]
+pub(crate) struct WebUi {
+    pub(crate) override_dir: Option<PathBuf>,
+}
+
 /// The static-site routes (`/`, `/index.html`, `/manifest.webmanifest`,
 /// `/assets/*`, 404 fallback), ready to merge into the transport router.
-/// No startup validation: an
-/// incomplete build surfaces at request time — index reads 500 + a warn
-/// log, missing assets 404 — a deliberate tradeoff (see decisions.md
-/// T-06): the server must not refuse to boot over UI assets.
+/// No startup validation: an incomplete override or a placeholder embed
+/// surfaces at request time — index 500/404 + a warn log — a deliberate
+/// tradeoff (see decisions.md T-14): the server must not refuse to boot
+/// over UI assets.
 ///
-/// Why per-route instead of one `ServeDir::new(root)`: the cache-policy
-/// boundary is irreducible. Hashed assets cache `immutable` (reloads
-/// transfer nothing), but `index.html` MUST revalidate (`no-store`) — it
-/// references the hashed names, and a cached index would point at old
-/// hashes after a rebuild (a white page). Either way the path branch
-/// exists; here it is explicit. The root dir is the only state;
-/// `index.html` is read per request (async, on the blocking pool) so a
-/// rebuild between page loads is picked up without a restart — the
-/// `no-store` contract keeps its promise.
-pub(crate) fn router(root: &Path) -> Router {
-    let assets_root = root.join("assets");
-
-    // The asset service: compression (outermost) + immutable cache-control
-    // wrapped around ServeDir via the Layer trait directly — MethodRouter's
-    // layered-error inference fights a two-layer route stack.
-    let assets = CompressionLayer::new().layer(
-        SetResponseHeaderLayer::overriding(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static(ASSET_CACHE),
-        )
-        .layer(ServeDir::new(&assets_root).append_index_html_on_directories(false)),
-    );
+/// Why explicit path families instead of one catch-all: the cache-policy
+/// boundary is irreducible (immutable `assets/*` vs `no-store` root files)
+/// and the 404 contract must stay tight — unknown top-level paths never
+/// serve a file just because an override happens to contain one.
+pub(crate) fn router(ui: &WebUi) -> Router {
+    // The asset route: compression (on-the-fly gzip) + the resolver. Hashed
+    // assets are immutable-cached, so compression cost lands on cold loads
+    // only; the layer is applied to THIS route only (root files are tiny).
+    let assets = get(serve_asset).layer(CompressionLayer::new());
 
     let security = ServiceBuilder::new()
         .layer(SetResponseHeaderLayer::overriding(
@@ -104,12 +126,10 @@ pub(crate) fn router(root: &Path) -> Router {
         .route("/", get(serve_index))
         .route("/index.html", get(serve_index))
         .route("/manifest.webmanifest", get(serve_manifest))
-        // nest_service strips the /assets prefix before dispatching, so
-        // ServeDir resolves names exactly as the build emitted them.
-        .nest_service("/assets", assets)
+        .route("/assets/{*path}", assets)
         .fallback(not_found)
         .layer(security)
-        .with_state(root.to_path_buf())
+        .with_state(ui.clone())
 }
 
 /// Uniform 404 for everything that is not `/flux.v1.*`, `/ws/term`, or a
@@ -123,63 +143,212 @@ async fn not_found() -> Response {
         .into_response()
 }
 
-/// The index page. Cache-Control `no-store`: after a rebuild the asset
-/// hashes change, and the page must never serve a stale HTML that points at
-/// them. Read per request (tokio::fs → blocking pool) so a rebuild is
-/// picked up without a server restart; a vanished file (racing rebuild)
-/// degrades to a 500 with a plain note.
-async fn serve_index(State(root): State<PathBuf>) -> Response {
-    serve_dist_file(
-        root,
-        "index.html",
-        "text/html; charset=utf-8",
-        "index.html unavailable\n",
-    )
-    .await
+/// Root files: `no-store` so a stale HTML/manifest never outlives its
+/// build (it references the hashed asset names).
+async fn serve_index(State(ui): State<WebUi>, headers: HeaderMap) -> Response {
+    serve_rel(&ui, "index.html", &headers).await
 }
 
-/// The PWA webmanifest — same contract as the index page: read per request
-/// so a rebuild is picked up without a restart, `no-store` so a stale
-/// manifest never outlives its build.
-async fn serve_manifest(State(root): State<PathBuf>) -> Response {
-    serve_dist_file(
-        root,
-        "manifest.webmanifest",
-        "application/manifest+json",
-        "manifest unavailable\n",
-    )
-    .await
+async fn serve_manifest(State(ui): State<WebUi>, headers: HeaderMap) -> Response {
+    serve_rel(&ui, "manifest.webmanifest", &headers).await
 }
 
-/// Shared per-request small-file service for the unhashed dist-root files
-/// (index.html, manifest.webmanifest): read on the async fs, `no-store`,
-/// and a plain 500 when the file vanished mid-rebuild.
-async fn serve_dist_file(
-    root: PathBuf,
-    name: &str,
-    content_type: &'static str,
-    vanished: &'static str,
+/// The `/assets/*` family — hashed, immutable, gzip on the wire. The
+/// wildcard captures relative to `/assets/`; the dist-root-relative name
+/// re-carries the `assets/` prefix (the old nest_service did the
+/// equivalent splice into ServeDir's root).
+async fn serve_asset(
+    State(ui): State<WebUi>,
+    Path(rel): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
-    match tokio::fs::read_to_string(root.join(name)).await {
-        Ok(body) => (
-            StatusCode::OK,
-            [
-                (header::CONTENT_TYPE, content_type),
-                (header::CACHE_CONTROL, "no-store"),
-            ],
-            body,
-        )
-            .into_response(),
-        Err(e) => {
-            tracing::warn!(error = %e, file = name, "dist file vanished at request time");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-                vanished,
-            )
-                .into_response()
+    // Normalize the wildcard capture (it includes the leading slash)
+    // before the path safety pass — the traversal guard is `sanitize`.
+    let captured = rel.trim_start_matches('/');
+    serve_rel(&ui, &format!("assets/{captured}"), &headers).await
+}
+
+/// The two-layer resolver: override disk → embedded bundle → 404.
+async fn serve_rel(
+    ui: &WebUi,
+    rel: &str,
+    #[cfg_attr(not(feature = "web-ui-embed"), allow(unused_variables))] req_headers: &HeaderMap,
+) -> Response {
+    let Some(rel) = sanitize(rel) else {
+        return not_found().await;
+    };
+
+    // 1. User override: a file on disk shadows the embedded base for this
+    //    path and this path only.
+    if let Some(root) = &ui.override_dir {
+        let path = root.join(&rel);
+        if path.is_file() {
+            return match tokio::fs::read(&path).await {
+                Ok(body) => respond(&rel, body.into(), None),
+                Err(e) => {
+                    tracing::warn!(error = %e, path = %path.display(), "override file unreadable at request time");
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
+                        "override file unavailable\n",
+                    )
+                        .into_response()
+                }
+            };
         }
     }
+
+    // 2. The embedded base.
+    #[cfg(feature = "web-ui-embed")]
+    if let Some(file) = WebAssets::get(&rel) {
+        // Compile-time sha256 → strong ETag → conditional requests 304.
+        let etag = hex_tag(&file.metadata.sha256_hash());
+        if req_headers
+            .get(header::IF_NONE_MATCH)
+            .is_some_and(|v| etag_matches(v, &etag))
+        {
+            return (
+                StatusCode::NOT_MODIFIED,
+                [
+                    (
+                        header::CACHE_CONTROL,
+                        HeaderValue::from_static(cache_control(&rel)),
+                    ),
+                    (
+                        header::ETAG,
+                        HeaderValue::from_str(&etag).expect("etag is ASCII"),
+                    ),
+                ],
+                axum::body::Bytes::new(),
+            )
+                .into_response();
+        }
+        let body = match file.data {
+            std::borrow::Cow::Borrowed(b) => axum::body::Bytes::from_static(b),
+            std::borrow::Cow::Owned(o) => axum::body::Bytes::from(o),
+        };
+        return respond(&rel, body, Some(etag));
+    }
+
+    tracing::trace!(path = %rel, "no UI asset for path");
+    not_found().await
+}
+
+/// Assemble a 200 response: path-derived MIME + cache policy, optional
+/// ETag, body as-is (the compression layer, applied on the assets route,
+/// owns the transfer encoding).
+fn respond(rel: &str, body: axum::body::Bytes, etag: Option<String>) -> Response {
+    let mut res = (StatusCode::OK, axum::body::Body::from(body)).into_response();
+    let headers = res.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static(content_type(rel)),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control(rel)),
+    );
+    if let Some(etag) = etag
+        && let Ok(v) = HeaderValue::from_str(&etag)
+    {
+        headers.insert(header::ETAG, v);
+    }
+    res
+}
+
+/// Cache policy by BUILD CONVENTION, not by source: hashed assets are
+/// immutable wherever they come from; the unhashed root files must
+/// revalidate. Unknown paths default to no-store (never pin something
+/// that might change under the same name).
+fn cache_control(rel: &str) -> &'static str {
+    if rel.starts_with("assets/") {
+        ASSET_CACHE
+    } else {
+        "no-store"
+    }
+}
+
+/// MIME by extension — the handful of types the build emits, nothing
+/// speculative. `text/javascript` is the modern, CSP-compatible spelling
+/// for scripts.
+fn content_type(rel: &str) -> &'static str {
+    match StdPath::new(rel)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+    {
+        "html" => "text/html; charset=utf-8",
+        "js" | "mjs" => "text/javascript; charset=utf-8",
+        "css" => "text/css; charset=utf-8",
+        "svg" => "image/svg+xml",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "webmanifest" => "application/manifest+json",
+        "json" => "application/json",
+        "png" => "image/png",
+        "ico" => "image/x-icon",
+        "txt" => "text/plain; charset=utf-8",
+        _ => "application/octet-stream",
+    }
+}
+
+/// Restrict the override/embedded lookup to plain relative paths: every
+/// component must be Normal. Rejects `..`, `.` (no-op segments), absolute
+/// paths and Windows prefixes; backslash tricks die here on Windows
+/// (where `\` separates) and are literal filenames on unix (harmless).
+/// This is the traversal guard for the disk half — the `..%2F` unit test
+/// below pins it.
+fn sanitize(rel: &str) -> Option<String> {
+    if rel.is_empty() {
+        return None;
+    }
+    // NUL never resolves on any platform's filesystem and must not reach
+    // the embedded map either.
+    if rel.contains('\0') {
+        return None;
+    }
+    let path = StdPath::new(rel);
+    let mut clean = String::with_capacity(rel.len());
+    for comp in path.components() {
+        match comp {
+            Component::Normal(seg) => {
+                clean.push('/');
+                clean.push_str(seg.to_str()?);
+            }
+            _ => return None,
+        }
+    }
+    // At least one component was accepted, so `clean` carries exactly one
+    // leading separator — strip it (the caller joins against a root).
+    clean.remove(0);
+    Some(clean)
+}
+
+/// Hex-encode the compile-time sha256 into a quoted strong ETag.
+#[cfg_attr(not(feature = "web-ui-embed"), allow(dead_code))]
+fn hex_tag(hash: &[u8; 32]) -> String {
+    let mut out = String::with_capacity(2 + hash.len() * 2);
+    out.push('"');
+    for b in hash {
+        out.push_str(&format!("{b:02x}"));
+    }
+    out.push('"');
+    out
+}
+
+/// `If-None-Match` matching: `*` or a comma list of tags, weak prefixes
+/// (`W/`) tolerated by stripping them.
+#[cfg_attr(not(feature = "web-ui-embed"), allow(dead_code))]
+fn etag_matches(if_none_match: &HeaderValue, etag: &str) -> bool {
+    if_none_match
+        .to_str()
+        .map(|raw| {
+            raw.split(',').any(|candidate| {
+                let candidate = candidate.trim();
+                candidate == "*" || candidate.trim_start_matches("W/").trim() == etag
+            })
+        })
+        .unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -189,7 +358,9 @@ mod tests {
     use axum::http::Request;
     use tower::ServiceExt;
 
-    /// A minimal but complete build layout in a temp dir.
+    /// A minimal override site in a temp dir. The embedded base (repo dist
+    /// in debug builds) stays underneath — these tests pin that the
+    /// override shadows it and unknown paths still 404.
     async fn site() -> (Router, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("index.html"), "<html>flux</html>").unwrap();
@@ -205,7 +376,10 @@ mod tests {
         )
         .unwrap();
         std::fs::write(dir.path().join("assets/index-EfGh5678.css"), "/*css*/").unwrap();
-        (router(dir.path()), dir)
+        let ui = WebUi {
+            override_dir: Some(dir.path().to_path_buf()),
+        };
+        (router(&ui), dir)
     }
 
     async fn send(app: Router, req: Request<Body>) -> axum::response::Response {
@@ -263,8 +437,9 @@ mod tests {
         let (app, _dir) = site().await;
         let res = send(app, get_req("/assets/nope.js")).await;
         assert_eq!(res.status(), 404);
-        // A path that never appeared in the build 404s too — ServeDir's
-        // path resolution is the traversal guard.
+        // A path that never appeared in the build 404s too — sanitize()
+        // drops traversal segments before anything touches the disk or
+        // the embedded map.
         let (app, _dir) = site().await;
         let res = send(app, get_req("/assets/..%2Findex.html")).await;
         assert_ne!(res.status(), 200);
@@ -349,6 +524,131 @@ mod tests {
         assert_eq!(
             res.headers().get("x-content-type-options").unwrap(),
             "nosniff"
+        );
+    }
+}
+
+/// Tests for the EMBEDDED half. In debug builds rust-embed is dynamic —
+/// `WebAssets` reads the repo dist at runtime — so these exercise the same
+/// resolver path the release binary uses, against whatever dist exists
+/// (the real build, or build.rs's placeholder on toolchain-less
+/// checkouts). Assertions are therefore driven by `WebAssets::iter()`,
+/// never by hardcoded hashed names.
+#[cfg(all(test, feature = "web-ui-embed"))]
+mod embedded_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn bare_router() -> Router {
+        router(&WebUi { override_dir: None })
+    }
+
+    async fn send(app: Router, req: Request<Body>) -> axum::response::Response {
+        app.oneshot(req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn embedded_index_serves_with_no_store() {
+        let res = send(
+            bare_router(),
+            Request::builder()
+                .uri("/index.html")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(
+            res.headers().get("content-type").unwrap(),
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(res.headers().get("cache-control").unwrap(), "no-store");
+    }
+
+    #[tokio::test]
+    async fn embedded_assets_carry_a_strong_etag_and_304() {
+        // Any hashed asset from the bundle: immutable + ETag + a matching
+        // If-None-Match round-trips to 304 with an empty body.
+        let asset = WebAssets::iter()
+            .find(|p| p.starts_with("assets/") && p.ends_with(".js"))
+            .expect("the bundle carries at least one hashed JS asset");
+        let uri = format!("/{asset}");
+        let app = bare_router();
+        let res = send(
+            app,
+            Request::builder().uri(&uri).body(Body::empty()).unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 200, "{uri} must serve");
+        assert_eq!(
+            res.headers().get("cache-control").unwrap(),
+            "public, max-age=31536000, immutable"
+        );
+        let etag = res
+            .headers()
+            .get("etag")
+            .expect("embedded files carry a compile-time sha256 ETag")
+            .to_str()
+            .unwrap()
+            .to_owned();
+
+        let app = bare_router();
+        let res = send(
+            app,
+            Request::builder()
+                .uri(&uri)
+                .header("if-none-match", &etag)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 304);
+        assert!(
+            axum::body::to_bytes(res.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty(),
+            "304 must not ship a body"
+        );
+    }
+
+    #[tokio::test]
+    async fn embedded_lookup_of_a_never_built_name_404s() {
+        let res = send(
+            bare_router(),
+            Request::builder()
+                .uri("/assets/definitely-not-a-built-name-0xDEADBEEF.js")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(res.status(), 404);
+    }
+}
+
+#[cfg(test)]
+mod sanitize_tests {
+    use super::*;
+
+    #[test]
+    fn traversal_and_absolute_paths_are_rejected() {
+        assert_eq!(sanitize("../index.html"), None);
+        assert_eq!(sanitize("a/../../secret"), None);
+        assert_eq!(sanitize(".."), None);
+        assert_eq!(sanitize("."), None);
+        assert_eq!(sanitize("/etc/passwd"), None);
+        assert_eq!(sanitize(""), None);
+        assert_eq!(sanitize("assets/..\0"), None, "NUL bytes never resolve");
+    }
+
+    #[test]
+    fn plain_relative_paths_survive_unchanged_in_shape() {
+        assert_eq!(sanitize("index.html").as_deref(), Some("index.html"));
+        assert_eq!(
+            sanitize("assets/index-AbCd1234.js").as_deref(),
+            Some("assets/index-AbCd1234.js")
         );
     }
 }

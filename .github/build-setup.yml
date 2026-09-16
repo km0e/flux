@@ -6,8 +6,10 @@
 # kills the run (`dist generate --check` catches it locally). Two prerequisites every platform needs before the
 # cargo build:
 #   1. protoc — flux-proto's build.rs compiles proto/ via prost-build.
-#   2. web-ui/ — the browser UI bundle, built here so dist's
-#      `include = ["web-ui/"]` lands it next to the binary in every archive.
+#   2. node + pnpm — flux-server's build.rs builds the EMBEDDED web UI
+#      (clients/web/dist) via scripts/package-web.sh during the cargo
+#      build; the binary carries the bundle, so no web-ui/ artifact is
+#      staged around it.
 # This fragment REPLACES dist's default build-setup wholesale, so it must
 # carry everything every platform needs.
 #
@@ -59,8 +61,3 @@
   uses: actions/setup-node@v7
   with:
     node-version: 24
-
-- name: Build web UI → web-ui/
-  shell: bash
-  run: |
-    ./scripts/package-web.sh --out "$PWD/web-ui"

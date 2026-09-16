@@ -31,7 +31,3 @@ dist/
 # Screenshot tour output (e2e/shots.mjs)
 clients/web/e2e/.shots/
 
-# Web UI bundle staged at the repo root for dist archives
-# (dist include = ["web-ui/"]; built by .github/build-setup.yml / package-web.sh)
-/web-ui/
-/flux-web-ui.tar.gz*

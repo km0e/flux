@@ -14,6 +14,13 @@ jobs:
     runs-on: ubuntu-latest
     # bound a hung build/test — the default (360) would burn hours
     timeout-minutes: 45
+    env:
+      # this job has no node/pnpm: flux-server's build.rs would otherwise
+      # attempt (and fail) the embedded-UI build on every run. The
+      # placeholder it falls back to is exactly what the web-ui unit tests
+      # expect to tolerate (they drive assertions off WebAssets::iter()).
+      # The web job below builds and tests the REAL UI.
+      FLUX_WEB_UI_NO_BUILD: "1"
     steps:
       - uses: actions/checkout@v6
 

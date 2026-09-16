@@ -418,7 +418,7 @@ Key points:
 | `--db-path PATH` | `~/.flux/flux.db` | SQLite database (chats / providers / the MCP launch list); falls back to `./flux.db` without a home dir |
 | `--preamble TEXT` | built-in generic prompt | System prompt |
 | `--no-web` | (web served by default) | Headless; the UI rides the SAME listener — no separate port |
-| `--web-assets-dir PATH` | `web-ui/` next to the binary (none = no static site) | UI build-output override (CLI value used as-is) |
+| `--web-assets-dir PATH` | `$HOME/.flux/web-ui` (only when it exists; otherwise the pure embedded UI) | disk override dir, shadows the embedded UI per path (CLI value used as-is; Gitea `custom/` semantics) |
 
 Database-resident entities are managed from the UI (Connect RPCs; failures ride the reply inline, successes broadcast): the **provider registry** (Providers dialog; pure endpoint id/url/api_key — NO model, the model is a required pin on CreateChat / SwitchProvider; the api_key never leaves the server) and the **MCP launch list** (MCP dialog; **persist-first + live apply** — a successful connect registers into the global registry and fans engine rebuilds; a row whose spawn fails stays for the next start; env values are stored but never sent back). Timeouts (connect/read, 30s each) are constants: the read timeout bounds a DEAD stream by per-read idle — a live long SSE stream is never killed by a total timeout.
 
@@ -434,29 +434,48 @@ carries everything**: the Connect services (`/flux.v1.*`), the terminal side cha
 
 - **Same-origin connection**: no template injection — the transport's baseUrl IS the page
  origin (gRPC-Web over http/1.1; TLS-proxied deployments get https automatically);
-- **Generic asset serving = tower-http**: `ServeDir` serves BY NAME whatever the build emitted
- (MIME inference, conditional requests, HEAD/405, the traversal guard — all the framework's
- job) + `CompressionLayer` on-the-fly gzip (content-hashed names → `Cache-Control: immutable`,
- compression cost lands on cold loads only). Cache/security headers are all crate-native
- `SetResponseHeaderLayer`s: assets immutable, index.html `no-store` (read per request via
- `tokio::fs` — a rebuild is picked up without a restart), CSP + nosniff over every route and
- the fallback (`img-src 'self'` is load-bearing — the page runs on plain http, without it the
- same-origin favicon is CSP-blocked). No startup validation of the build layout (T-06): an
- incomplete build surfaces at request time — index 500 + a warn log, missing assets 404. The build emits code-split multi-chunk output (entry + hljs prefetch + Files tree
- on demand, see §4.4); dist/index.html's asset references are injected by vite;
+- **Embedded base + disk override (Gitea `custom/` semantics)**: `clients/web/dist` is
+ EMBEDDED into the binary via rust-embed (feature `web-ui-embed`, default-on) — release
+ builds serve the embedded bundle, debug builds read the repo dist from disk at runtime
+ (path pinned to the compile-time `CARGO_MANIFEST_DIR`, process CWD irrelevant — the dev
+ fallback, the Rust analog of Prometheus's `-tags dev`). On top sits ONE optional override
+ directory: `--web-assets-dir` → `$HOME/.flux/web-ui` (only when it exists) → none; files
+ shadow the embedded base PER PATH, everything else falls through. The resolution chain
+ collapsed from 4 levels to 2, and the whole "binary refreshed, unpacked dir left behind"
+ class of silent UI lag is STRUCTURALLY IMPOSSIBLE on the embedded side; a stale override
+ dir carrying an old `web-ui-version.txt` warns at startup. A custom handler takes over
+ ServeDir's duties: the MIME table, HEAD, 405, path sanitization (`..`/absolute/NUL
+ rejected — pinned by the `..%2F` unit test); embedded files carry a compile-time sha256
+ strong ETag, conditional requests 304. Cache/security headers are all crate-native
+ `SetResponseHeaderLayer`s: `assets/*` immutable, index.html/manifest `no-store`, CSP +
+ nosniff over every route and the fallback (`img-src 'self'` is load-bearing — the page
+ runs on plain http, without it the same-origin favicon is CSP-blocked). No startup
+ validation of the build/override layout (T-14): an incomplete build surfaces at request time —
+ index 500/404 + a warn log, missing assets 404. The build emits code-split multi-chunk
+ output (entry + hljs prefetch + Files tree on demand, see §4.4); dist/index.html's asset
+ references are injected by vite;
+- **build.rs driving** (Meilisearch-style): rust-embed's macro expansion REQUIRES the
+ folder to exist in ALL modes; embedded mode expands to per-file `include_bytes!` (cargo
+ tracks content changes, but the NEW hashed filenames a vite rebuild emits do not trigger
+ recompilation). So `crates/flux-server/build.rs` does three things: ① `rerun-if-changed`
+ watches web sources/dist/lockfile/proto (the TS contract is derived from proto — a
+ contract edit must rebuild the UI); a rerun forces recompilation and the macro re-walks
+ the folder; ② when the dist is missing/stale it invokes `scripts/package-web.{sh,ps1}`
+ (when node/pnpm are available); ③ on a toolchain-less checkout it writes a placeholder
+ index.html — the binary still compiles and the page explains the fix
+ (`FLUX_WEB_UI_NO_BUILD=1` skips; headless-only builds: `--no-default-features`);
 - **CSP**: a strict posture (`default-src 'none'`, scripts self-only plus the sha256 of
  index.html's theme pre-paint inline script — a hash, not `unsafe-inline`,
  `img-src 'self' https: data:`, `font-src 'self'` (the bundled fonts),
  `connect-src 'self' ws: wss:`, inline styles allowed,
  framing denied), plus `nosniff`; the hash↔index.html pairing is unit-tested whenever
  the built dist exists;
-- **Assets resolution chain** (`resolve_assets_dir`, unit-tested): `--web-assets-dir` →
- `web-ui/` next to the binary (packaged distribution layout) → none (Connect + terminal only, noted
- in a startup log line). No CWD-relative repo guess — a hardcoded `clients/web/dist`
- silently works or breaks depending on the launch directory. The UI is served BY
- DEFAULT (`--no-web` runs headless); development goes through `run-server`, which
- builds the UI when the dist is missing and always passes an absolute path flag,
- never depending on the process CWD.
+- **Override resolution** (`resolve_override_dir`, unit-tested): `--web-assets-dir` →
+ `$HOME/.flux/web-ui` (only when it exists) → none (the pure embedded UI). No CWD-relative
+ repo guess — a hardcoded `clients/web/dist` silently works or breaks depending on the
+ launch directory. The UI is served BY DEFAULT (`--no-web` runs headless); development
+ goes through `run-server`, which pre-builds the dist when missing and always passes an
+ absolute path flag, never depending on the process CWD.
 
 The workdir picker: chat creation accepts any resolvable directory (the
 server runs with the starting user's permissions; real isolation is the OS/container's
@@ -774,12 +793,14 @@ These mechanisms are deliberate design choices. This section is an index plus pr
 # Full validation (fmt → clippy -D warnings → cargo test → tsc → vitest → vite build)
 ./scripts/test.sh
 
-# Frontend build artifacts (content-hashed JS/CSS → dist/assets/)
+# Frontend build artifacts (content-hashed JS/CSS → dist/assets/; the next
+# cargo build --release re-embeds them — debug builds read the dist at
+# runtime, no re-embed needed)
 cd clients && pnpm install && cd web && pnpm run build
 
-# Run the server (development goes through run-server: it builds the UI when
-# missing and passes the assets path; --no-web runs headless)
+# Run the server (development goes through run-server: it pre-builds the UI
+# when missing and pins the override path; --no-web runs headless)
 ./scripts/run-server.sh
 ```
 
-Scripts (`.sh` + `.ps1` pairs): `test` (full validation: fmt → clippy → cargo test → tsc → vitest → build), `run-server` (CLI flags pass through; web default-on — builds the UI when the dist is missing and passes an absolute assets path; the database defaults to ~/.flux/flux.db), `package-web` (builds and assembles the servable web-ui directory), `fetch-fonts` (refreshes the bundled fonts; manual upgrades only). CI splits a rust job (fmt / test / clippy / audit) and a web job (proto:check / tsc / vitest / build). The pnpm version is pinned via `packageManager` in `clients/package.json` and the scripts self-provision it when missing; frontend contract tools (buf) resolve from `clients/web` devDependencies — no global installs.
+Scripts (`.sh` + `.ps1` pairs): `test` (full validation: fmt → clippy → cargo test → tsc → vitest → build), `run-server` (CLI flags pass through; web default-on — the UI is embedded and build.rs rebuilds it when the dist goes stale; the script pre-builds when missing and pins the override path; the database defaults to ~/.flux/flux.db), `package-web` (builds the embeddable/servable dist; both `run-server` and flux-server's build.rs invoke it), `fetch-fonts` (refreshes the bundled fonts; manual upgrades only). CI splits a rust job (fmt / test / clippy / audit) and a web job (proto:check / tsc / vitest / build). The pnpm version is pinned via `packageManager` in `clients/package.json` and the scripts self-provision it when missing; frontend contract tools (buf) resolve from `clients/web` devDependencies — no global installs.

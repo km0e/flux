@@ -414,7 +414,7 @@ erDiagram
 | `--db-path PATH` | `~/.flux/flux.db` | SQLite 数据库（chats / providers / MCP 启动列表）；无 HOME 时回退 `./flux.db` |
 | `--preamble TEXT` | 内置通用提示 | 系统提示 |
 | `--no-web` | （web 默认伺服） | 无头；UI 与 Connect 面同一监听端口，无独立端口 |
-| `--web-assets-dir PATH` | 二进制旁 `web-ui/`（无则无静态站） | UI 构建产物目录覆盖（CLI 值原样使用） |
+| `--web-assets-dir PATH` | `~/.flux/web-ui`（存在才用；无则纯嵌入 UI） | 磁盘覆盖目录，逐路径遮蔽嵌入 UI（CLI 值原样使用；Gitea `custom/` 语义） |
 
 数据库内的实体经 UI 管理（Connect RPC，失败内联返回，成功广播）：**Provider 注册表**（Providers 对话框；纯端点 id/url/api_key——不带 model，模型是 CreateChat / SwitchProvider 的必填钉定；api_key 永不下发）与 **MCP 启动列表**（MCP 对话框；**persist-first + 即时应用**——连接成功注册进全局注册表并扇出引擎重建，spawn 失败的行保留、下次启动重试；env 值只存不下发）。超时（connect/read 各 30s）为常量：read 超时逐读 idle 兜底，活着的长 SSE 流不被总时长误杀。
 
@@ -425,9 +425,9 @@ workdir 说明：chat 创建接受 server 进程可读的任意目录（server �
 浏览器宿主 = 又一个 viewer/lease 持有者：页面经 Connect 面回连 agent（同一租约模型），工具始终在 server 进程内执行。静态层是**纯叶子**——只伺服文件，不代理任何请求。**单一 axum (hyper) 监听器承载一切**：Connect 服务（`/flux.v1.*`）+ 终端侧信道（`/ws/term`）+ `/` + `/assets/*` 静态站点共用 `--port`，页面同源回连：
 
 - **同源连接**：无模板注入——transport baseUrl 即页面 origin（gRPC-Web over http/1.1；TLS 反代部署即 https）；
-- **泛化资产伺服 = tower-http**：`ServeDir` 按名伺服构建产出的**任意**文件（MIME 推断、条件请求、HEAD/405、遍历守卫全部由框架负责）+ `CompressionLayer` 按需 gzip（内容哈希文件名 → `Cache-Control: immutable`，压缩成本只落在冷加载）。缓存/安全头全部 crate 原生 `SetResponseHeaderLayer`：资产 immutable、index.html `no-store`（每请求 `tokio::fs` 读取——重建无需重启即被拾取）、CSP + nosniff 覆盖所有路由与 fallback（`img-src 'self'` 不可或缺——页面走 http，缺它同源 favicon 会被 CSP 拦截）。不做启动期构建校验（T-06）：构建不完整在**请求时**暴露——index 500 + warn 日志、缺失资产 404。构建端为**代码切分的多 chunk**（入口 + hljs 预取 + Files 树按需，见 4.4），dist/index.html 的资产引用由 vite 注入；
-- **CSP**：严格姿态（`default-src 'none'`、脚本限 self + 主题预涂装内联脚本的 sha256 哈希——不用 `unsafe-inline`、`img-src 'self' https: data:`、`font-src 'self'`（内置字体）、`connect-src 'self'`、inline style 放行、禁 frame），`nosniff`；哈希与 index.html 的配对由单测自检（构建存在时）；
-- **资产解析链**（`resolve_assets_dir`，附单测）：`--web-assets-dir` → 二进制旁 `web-ui/`（打包分发布局）→ 无（纯 Connect + 终端，启动日志注明）。无 CWD 相对的仓库路径猜测——硬编码 `clients/web/dist` 会随启动目录静默生效/失效。UI 默认伺服（`--no-web` 无头）；开发走 `run-server`：dist 缺失时构建并恒传绝对路径旗标，不依赖进程 CWD。
+- **嵌入为底 + 磁盘覆盖（Gitea `custom/` 语义）**：`clients/web/dist` 经 rust-embed（feature `web-ui-embed`，默认开）嵌进二进制——release 嵌入、debug 运行时读仓库 dist（路径钉在编译期 `CARGO_MANIFEST_DIR`，进程 CWD 无关——即 dev 磁盘回退，Prometheus `-tags dev` 的 Rust 版）。其上仅一层**可选**覆盖目录：`--web-assets-dir` → `~/.flux/web-ui`（存在才用）→ 无；同名文件**逐路径**遮蔽嵌入底座，其余照常回落。解析链从 4 层收敛为 2 层，「二进制已刷新、解包目录未跟上」这一整类静默 UI 滞后在嵌入侧**结构性不可能**；旧覆盖目录若带过期 `web-ui-version.txt` 启动时警告。自定义 handler 承接原 `ServeDir` 职责：MIME 表、HEAD、405、路径清洗（拒绝 `..`/绝对/NUL——`..%2F` 单测钉住）；嵌入文件携带编译期 sha256 强 ETag，条件请求 304。缓存/安全头全部 crate 原生 `SetResponseHeaderLayer`：`assets/*` immutable、index.html/manifest `no-store`、CSP + nosniff 覆盖所有路由与 fallback（`img-src 'self'` 不可或缺——页面走 http，缺它同源 favicon 会被 CSP 拦截）。启动期不做构建/覆盖校验（T-14）：不完整在**请求时**暴露——index 500/404 + warn 日志、缺失资产 404。构建端为**代码切分的多 chunk**（入口 + hljs 预取 + Files 树按需，见 4.4），dist/index.html 的资产引用由 vite 注入；
+- **build.rs 驱动**（Meilisearch 同款）：rust-embed 宏展开在**所有模式**下都要求目录存在；嵌入态展开为逐文件 `include_bytes!`（cargo 追踪内容变化，但 vite 重建的**新哈希文件名**不触发重编）。因此 `crates/flux-server/build.rs` 三件事：① `rerun-if-changed` 盯 web 源码/dist/lockfile/proto（TS 契约派生自 proto，契约改动必须重建 UI）——重跑即强制重编、宏重扫目录；② dist 缺失/过期时调 `scripts/package-web.{sh,ps1}` 构建（node/pnpm 就绪时）；③ 无工具链时写入占位 index.html——二进制照常编译、页面自述修复方法（`FLUX_WEB_UI_NO_BUILD=1` 跳过；纯无头构建 `--no-default-features`）；
+- **CSP**：严格姿态（`default-src 'none'`、脚本限 self + 主题预涂装内联脚本的 sha256 哈希——不用 `unsafe-inline`、`img-src 'self' https: data:`、`font-src 'self'`（内置字体）、`connect-src 'self'`、inline style 放行、禁 frame），`nosniff`；哈希与 index.html 的配对由单测自检（构建存在时）。
 
 workdir 选择器：chat 创建接受任意可解析目录（server 以启动用户权限运行；真隔离由 OS/容器负责）。UI 经 `FsList` / `FsRead` 浏览/预览文件系统。
 
@@ -612,11 +612,12 @@ sequenceDiagram
 # 全量验证（fmt → clippy -D warnings → cargo test → tsc → vitest → vite build）
 ./scripts/test.sh
 
-# 前端构建产物（内容哈希 JS/CSS → dist/assets/）
+# 前端构建产物（内容哈希 JS/CSS → dist/assets/；下一次 cargo build --release
+# 会把它重新嵌入二进制——调试构建则运行时直读 dist，无需重嵌）
 cd clients && pnpm install && cd web && pnpm run build
 
-# 运行服务器（开发推荐 run-server：UI 缺失时自动构建并传资产路径；--no-web 无头）
+# 运行服务器（UI 已嵌入二进制；开发推荐 run-server：dist 缺失时先构建并传覆盖路径；--no-web 无头）
 ./scripts/run-server.sh
 ```
 
-脚本（`.sh` + `.ps1` 成对）：`test`（全量验证：fmt → clippy → cargo test → tsc → vitest → build）、`run-server`（CLI flag 透传；web 默认开——dist 缺失时自动构建 UI 并传绝对 assets 路径；数据库默认 `~/.flux/flux.db`）、`package-web`（构建并组装可伺服的 web-ui 目录）、`fetch-fonts`（刷新内置字体，手动升级时才跑）。CI 分 rust job（fmt / test / clippy / audit）与 web job（proto:check / tsc / vitest / build）。pnpm 版本钉在 `clients/package.json` 的 `packageManager`，脚本发现缺失会自装；前端契约工具（buf）走 `clients/web` 的 devDependencies，无需全局安装。
+脚本（`.sh` + `.ps1` 成对）：`test`（全量验证：fmt → clippy → cargo test → tsc → vitest → build）、`run-server`（CLI flag 透传；web 默认开——dist 缺失时自动构建 UI 并传绝对 assets 路径；数据库默认 `~/.flux/flux.db`）、`package-web`（构建可嵌入/可伺服的 dist；`run-server` 与 flux-server 的 build.rs 都调用它）、`fetch-fonts`（刷新内置字体，手动升级时才跑）。CI 分 rust job（fmt / test / clippy / audit）与 web job（proto:check / tsc / vitest / build）。pnpm 版本钉在 `clients/package.json` 的 `packageManager`，脚本发现缺失会自装；前端契约工具（buf）走 `clients/web` 的 devDependencies，无需全局安装。

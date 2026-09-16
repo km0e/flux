@@ -16,7 +16,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.5"
+version = "0.2.0"
 description = "A general-purpose coding agent framework in Rust with a browser chat UI frontend"
 edition = "2024"
 authors = ["Flux Contributors"]
@@ -56,7 +56,19 @@ reqwest = { version = "0.13.4", default-features = false, features = [
 # MCP
 rmcp = { version = "3", features = ["client", "transport-child-process"] }
 
-# The profile that 'dist' will build with
+# The profile that 'dist' will build with — tuned for a SHIPPED, self-contained
+# server binary (cargo bloat attribution, 2026-09): .text 16.7MB dominated by
+# rmcp 2.3MB, C/asm natives ~2.5MB (sqlite3/aws-lc/zstd), std 1.6MB, the
+# rustls/reqwest/h2/hyper client stack ~1.6MB; embedded UI 2.5MB in .rodata.
+# - lto="fat" + codegen-units=1: cross-crate inlining/DCE shaves ~4.5MB of
+#   .text vs thin (build ~4m vs ~2m50s per target — release-only cost).
+# - strip="symbols": .symtab/.strtab are 8.2MB of dead weight with debug=0.
+#   Tradeoff (accepted): RUST_BACKTRACE=1 in a shipped binary shows addresses
+#   only — tool panics are caught and reported by payload (flux-chat
+#   tool_exec), crash-only shutdown needs no symbolized stacks (T-11). Dev
+#   builds keep [profile.release] unstripped for debugging.
 [profile.dist]
 inherits = "release"
-lto = "thin"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"

@@ -32,7 +32,7 @@ It is built as a Cargo workspace:
 - [`flux-server`](crates/flux-server/) — ONE axum transport hosting the Connect surface (`/flux.v1.*`, gRPC-Web) + the terminal side channel (`/ws/term`) + the browser UI static site (single port), filesystem browsing for the workdir picker, server wiring.
 - Web UI (`clients/web/`) — React + TypeScript browser chat UI (the single frontend), served by flux-server's static layer.
 
-Dependencies: `reqwest` (HTTP), `serde` / `serde_json`, `axum` + `tower-http` (single HTTP transport: Connect surface + static site via ServeDir/CompressionLayer), `tonic`/`tonic-web` + `prost` (the generated flux.v1 surface via `flux-proto`), `sqlx` (SQLite persistence), `rmcp` (MCP protocol), `tokio`, `futures`, `uuid`. (`tokio-tungstenite` remains only as the terminal side channel's e2e client.)
+Dependencies: `reqwest` (HTTP), `serde` / `serde_json`, `axum` + `tower-http` (single HTTP transport: Connect surface + the EMBEDDED static site served by a custom handler + CompressionLayer), `tonic`/`tonic-web` + `prost` (the generated flux.v1 surface via `flux-proto`), `sqlx` (SQLite persistence), `rmcp` (MCP protocol), `tokio`, `futures`, `uuid`. (`tokio-tungstenite` remains only as the terminal side channel's e2e client.)
 Frontend (clients/web,): React 19, zustand, Radix UI (dialog/dropdown-menu/tooltip/tabs), Tailwind CSS v4, react-arborist (workdir tree), marked 18 + DOMPurify 3 + highlight.js (the imperative markdown/streaming pipeline), Vite (build).
 
 ## Workspace layout
@@ -119,7 +119,8 @@ flux/
 │ │ ├── models_dev.rs # models.dev catalog fetch + (base_url, model) matching (lazy, TTL cache, best-effort)
 │ │ ├── skills.rs # Skill install/browse/remove (local dir or git URL; global dir only)
 │ │ ├── fsbrowse.rs # Filesystem listing/preview for the UI workdir picker (FsList/FsRead)
-│ │ ├── web.rs # Browser UI static site (ServeDir + CompressionLayer + SetResponseHeaderLayer security headers) on the SAME listener
+│ │ ├── build.rs # Drives the EMBEDDED web UI (rust-embed): rerun-if-changed, dist rebuild via package-web, toolchain-less placeholder
+│ │ ├── web.rs # Browser UI static site (embedded base + per-path disk override, CompressionLayer + SetResponseHeaderLayer security headers) on the SAME listener
 │ │ ├── terminal.rs # Terminal side channel /ws/term (PTY actor, auth handshake, scrollback replay, reaper)
 │ │ ├── transport.rs # Single axum server: /flux.v1.* + /ws/term + static site (configurable host, session reaper)
 │ │ └── grpc/ # The Connect surface serialization shims: mod.rs (routes), chats.rs, events.rs (the event plane: Subscribe anchors identity + keepalive pump), fs.rs, management.rs
@@ -127,9 +128,9 @@ flux/
 │ └── connect_e2e.rs # Connect-protocol E2E (real binary, gRPC-Web framing + the /ws/term WS client)
 ├── clients/ # pnpm workspace root (flux-clients; pnpm-workspace.yaml: web)
 │ └── web/ # @flux/web — THE frontend (React 19 + Radix + Tailwind v4 + zustand on Vite)
-│ ├── index.html # Vite source (served no-store, read per request; the page connects back same-origin — no template injection)
+│ ├── index.html # Vite source (embedded into the binary at build time; served no-store; the page connects back same-origin — no template injection)
 │ ├── vite.config.ts # build (content-hashed code-split chunks) + vitest config
-│ ├── dist/ # build output — what flux-server serves
+│ ├── dist/ # build output — what flux-server EMBEDS (debug builds read it at runtime)
 │ └── src/
 │ ├── main.tsx # entry: log level + mountChat
 │ ├── mount.tsx # mountChat: flushSync render-first init, restore, lease-switch subscription, the title's transition-gated subscription
@@ -185,7 +186,7 @@ pnpm run ui-check # headless-browser e2e smoke (e2e/, needs node 24 + Chrome)
 
 # Release packaging (dist — single config source: dist-workspace.toml; CI runs
 # the same config tag-driven via .github/workflows/release.yml)
-dist build # local release-shaped artifact (host target: archive + web-ui + checksums)
+dist build # local release-shaped artifact (host target: archive + checksums)
 ```
 
 ### Toolchain environment (the supported surface)
@@ -695,18 +696,21 @@ container/VM.
  SAME-ORIGIN to `/ws` (no template injection); the scheme follows the page
  (`wss:` under a TLS proxy). No auth layer: the
  server binds 127.0.0.1 by default; remote exposure = reverse proxy with TLS + its own auth.
-- **Asset serving (web.rs)**: delegated to tower-http — `ServeDir` (generic by-name serving,
- MIME, HEAD/405, traversal guard) + `CompressionLayer` (on-the-fly gzip; content-hashed names
- → `Cache-Control: immutable` via `SetResponseHeaderLayer`, so compression cost lands on cold
- loads only). Security headers are crate-native too: CSP + nosniff via two
- `SetResponseHeaderLayer`s over every route and the fallback. `img-src 'self'` is
- load-bearing — the page runs on plain http, without it the same-origin favicon is blocked;
- `manifest-src 'self'` likewise — `default-src` is 'none', so without it the PWA
- webmanifest fetch is blocked.
- `index.html` and `manifest.webmanifest` read per request (`tokio::fs`) and serve `no-store` —
- a rebuild is picked up
- without a restart. No startup validation of the build layout (T-06): an incomplete build
- surfaces at request time — index 500 + a warn log, missing assets 404. The brand icon ships
+- **Asset serving (web.rs)**: the EMBEDDED bundle (rust-embed, see Build driving below) +
+ ONE optional per-path override dir (Gitea `custom/` semantics; resolution:
+ `--web-assets-dir` > `$HOME/.flux/web-ui` when it exists > none). A custom handler owns
+ MIME/HEAD/405 and path sanitization (`..`/absolute/NUL rejected — the `..%2F` unit test
+ pins it); embedded files carry a compile-time sha256 strong ETag (If-None-Match → 304).
+ `CompressionLayer` stays (on-the-fly gzip on the assets route; content-hashed names →
+ `Cache-Control: immutable`, so compression cost lands on cold loads only). Security
+ headers are crate-native: CSP + nosniff via two `SetResponseHeaderLayer`s over every
+ route and the fallback. `img-src 'self'` is load-bearing — the page runs on plain http,
+ without it the same-origin favicon is blocked; `manifest-src 'self'` likewise —
+ `default-src` is 'none', so without it the PWA webmanifest fetch is blocked. Root files
+ (index.html, manifest.webmanifest) serve `no-store` — they reference the hashed names,
+ and a cached index would point at old hashes after a rebuild. No startup validation of
+ the build layout (T-14): an incomplete override or a placeholder embed surfaces at
+ request time — index 500/404 + a warn log, missing assets 404. The brand icon ships
  as a verbatim build asset (`public/assets/favicon.svg` → `/assets/favicon.svg`, unhashed
  name + immutable cache — fine for a mark whose content never changes).
  The build emits one CSS (`cssCodeSplit: false`) and code-split JS chunks: the first-party entry
@@ -725,20 +729,30 @@ container/VM.
  the conversation left (overlay only on narrow viewports). `.md` files render through the
  shared markdown pipeline (`renderMarkdown` + `.prose` typography + code-copy chrome) with a
  Raw toggle; the truncated badge carries a size hint (server reports the full `size`).
-- **Assets resolution**: `--web-assets-dir` > `web-ui/` next to the binary (packaged) >
- `$HOME/.flux/web-ui` (script-installer layout) > none (headless; no CWD-relative repo
- guess). The web UI is served BY DEFAULT (`--no-web` runs headless); `run-server` builds
- the UI when the dist is missing and pins the repo dist via `--web-assets-dir`.
-- Packaging: `scripts/package-web.sh` assembles the servable root; the dist pipeline
- (`dist-workspace.toml` → `.github/workflows/release.yml`, tag-driven) builds each target
- natively on its runner and stages the root as `web-ui/` next to the binary inside every
- archive (`include = ["web-ui/"]`, produced per-runner by `.github/build-setup.yml`).
- Local release-shaped artifacts: `dist build [--target …]`. The shell/powershell
- installers carry BINARIES ONLY (`include` reaches archives, not binary installers —
- upstream #307/#543): script installs run headless (`GET /` 404s, no error). The UI is
- published standalone via extra-artifacts (`flux-web-ui.tar.gz`, built ONCE in the global
- job by `package-web.sh --tar`) for script-installer users to fetch into `~/.flux/web-ui`;
- README documents the two commands.
+- **Assets resolution (embedded + override)**: the browser UI is EMBEDDED in the binary
+ (rust-embed, feature `web-ui-embed`, default-on): release builds serve the embedded
+ bundle, DEBUG builds read the repo dist from disk at runtime (path pinned to
+ CARGO_MANIFEST_DIR — the dev fallback; a rebuild of the UI needs no `cargo build`).
+ On top sits ONE optional override dir: `--web-assets-dir` > `$HOME/.flux/web-ui` (when it
+ exists) > none — files shadow the embedded bundle PER PATH (Gitea `custom/` semantics);
+ a stale dir carries `web-ui-version.txt` and warns at startup. The web UI is served BY
+ DEFAULT (`--no-web` runs headless); there is no CWD-relative repo guess.
+- **Build driving**: `crates/flux-server/build.rs` owns the embed mechanics rust-embed
+ cannot do itself — it re-runs on web-source changes (new hashed names are invisible to
+ cargo's `include_bytes!` tracking), rebuilds the dist via `scripts/package-web.{sh,ps1}`
+ when missing/stale (node/pnpm required), and writes a placeholder index.html on
+ toolchain-less checkouts so the binary still compiles (skip with `FLUX_WEB_UI_NO_BUILD=1`;
+ headless-only builds: `--no-default-features`). rust-embed validates the folder at macro
+ expansion in ALL modes, so the placeholder is load-bearing, not cosmetic.
+- Packaging: the dist pipeline (`dist-workspace.toml` → `.github/workflows/release.yml`,
+ tag-driven) builds each target natively on its runner — the UI is built INSIDE the cargo
+ build (`.github/build-setup.yml` supplies protoc + node/pnpm). Archives carry the binary
+ only; there is NO separate `flux-web-ui.tar.gz` artifact (removed with the embedded UI).
+ Local release-shaped artifacts: `dist build [--target …]`. `[profile.dist]` ships
+ `lto = "fat"` + `codegen-units = 1` + `strip = "symbols"` → ~20MB binaries (was ~32MB;
+ the RUST_BACKTRACE tradeoff is documented there). flux-server is `publish = false` +
+ `[package.metadata.dist] dist = true` (the dist opt-in is REQUIRED once publish is
+ false, or `dist generate` refuses to run).
 
 ## Working conventions
 

@@ -34,7 +34,7 @@ flux/
 | Tool | Version | Notes |
 |------|---------|-------|
 | Rust | stable channel | Pinned by `rust-toolchain.toml` (stable + rustfmt/clippy); rustup provisions it |
-| Node | **24 LTS** | The ONE supported line (`engines` declares it; pnpm warns on anything else); nvm recommended; the scripts guard their version-sensitive flags |
+| Node | **24 LTS** | the only supported line (`engines` declares it; pnpm warns on others; nvm recommended; version-sensitive script flags are guarded). **`cargo build` needs it by default**: the browser UI is embedded in the binary and built at compile time via build.rs → `package-web.sh` (a toolchain-less build embeds a placeholder; `FLUX_WEB_UI_NO_BUILD=1` skips) |
 | pnpm | 11.x | Version pinned via `packageManager` in `clients/package.json`; the scripts self-provision it when missing |
 | protoc | system binary | `protobuf-compiler` (apt) / `brew install protobuf` — called at compile time by `flux-proto` |
 | Chrome | any recent build | Only for the headless e2e smoke (`pnpm run ui-check`) |
@@ -44,10 +44,12 @@ Frontend contract tools (buf etc.) all resolve from `clients/web` devDependencie
 ## Quick start
 
 ```bash
-cargo build --release
-./scripts/run-server.sh             # builds the UI when missing, then serves UI + API
-# or: cargo run -p flux-server      # Connect API + the packaged web-ui/ next to the binary,
-                                    # if present (--web-assets-dir pins any build)
+cargo build --release               # the browser UI is embedded in the binary
+                                    # (build.rs runs package-web.sh when the dist
+                                    # is missing or stale)
+./scripts/run-server.sh             # serves UI + API; pre-builds the dist when missing
+# or: cargo run -p flux-server      # same embedded UI; --web-assets-dir points at a
+                                    # disk override dir (Gitea custom/ semantics)
 ```
 
 There is no config file — everything is a CLI flag (`--host`, `--port`,
@@ -65,22 +67,19 @@ Open `http://127.0.0.1:8080`, add a provider endpoint in the Providers dialog
 No source checkout needed — use the [Releases](https://github.com/km0e/flux/releases) artifacts:
 
 ```bash
-# ① server binary (headless)
+# server binary — the browser UI is EMBEDDED in it
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/km0e/flux/releases/latest/download/flux-server-installer.sh | sh
-# ② browser UI (installed to ~/.flux/web-ui, picked up by the server)
-mkdir -p ~/.flux && curl -fL \
-  https://github.com/km0e/flux/releases/latest/download/flux-web-ui.tar.gz | tar xz -C ~/.flux
 ```
 
 (Windows PowerShell likewise, via `flux-server-installer.ps1`; installs to
 `~/.cargo/bin` and writes the PATH scripts and uninstall receipt for you.)
 
-**The full form with the browser UI**: download the platform archive and
-unpack — `web-ui/` sits side-by-side with the binary.
-
-UI assets resolve as `--web-assets-dir` > `web-ui/` next to the binary >
-`~/.flux/web-ui` > none (headless).
+**Optional customization (Gitea `custom/` semantics)**: same-named files in
+`~/.flux/web-ui/` (or whatever `--web-assets-dir` points at) override the
+embedded UI PER PATH — tweak one index.html, add one asset, everything else
+keeps falling through to the embedded base. No directory = the pure embedded
+UI. A directory carrying a stale `web-ui-version.txt` gets a startup warning.
 
 ## Documentation
 

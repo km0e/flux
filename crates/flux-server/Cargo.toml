@@ -7,9 +7,28 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 
+# Binary distributed via GitHub-release archives/installers only; never
+# crates.io — the embedded web UI's source folder lives OUTSIDE this crate's
+# directory (`../../clients/web/dist`), which cargo-package cannot ship.
+publish = false
+
+# `publish = false` hides the package from dist's binary scan — opt back in
+# explicitly (this is the ONE distable binary of the workspace).
+[package.metadata.dist]
+dist = true
+
 [[bin]]
 name = "flux-server"
 path = "src/main.rs"
+
+[features]
+default = ["web-ui-embed"]
+# Embed the browser UI (clients/web/dist) INTO the binary. Release builds
+# serve the embedded bundle; debug builds keep rust-embed's dynamic mode —
+# files read from the repo dist at runtime (the dev disk fallback, pinned
+# to CARGO_MANIFEST_DIR so the binary's CWD is irrelevant). Disable for a
+# headless-only build without a node/pnpm toolchain (`--no-default-features`).
+web-ui-embed = ["dep:rust-embed"]
 
 [dependencies]
 bytes = "1"
@@ -51,10 +70,16 @@ clap_complete = "4"
 reqwest = { workspace = true }
 futures-util = "0.3"
 uuid = { workspace = true }
+# Embedded web UI (feature `web-ui-embed`). `compression` = deflate each
+# file at compile time (~half the text assets; woff2 fonts don't compress —
+# the spike measured 3.43MB → 3.05MB). The folder must stay RELATIVE to
+# CARGO_MANIFEST_DIR: rust-embed rejects absolute paths under compression.
+rust-embed = { version = "8.12", features = ["compression"], optional = true }
 # Single HTTP transport: /ws upgrade + the browser UI static site. axum owns
-# HTTP/WS semantics; tower-http owns static-file serving (MIME, conditional
-# requests, HEAD) and on-the-fly gzip (assets are immutable-cached, so
-# compression cost lands on cold loads only).
+# HTTP/WS semantics; tower-http owns on-the-fly gzip (assets are
+# immutable-cached, so compression cost lands on cold loads only) and the
+# uniform security-header layers. Static assets themselves resolve through
+# the embedded bundle + disk override (web.rs) — no ServeDir anymore.
 axum = { version = "0.8", default-features = false, features = [
     "http1",
     "query",
@@ -63,7 +88,6 @@ axum = { version = "0.8", default-features = false, features = [
 ] }
 tower = { version = "0.5", default-features = false }
 tower-http = { version = "0.7", default-features = false, features = [
-    "fs",
     "compression-gzip",
     "set-header",
 ] }

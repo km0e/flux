@@ -34,7 +34,7 @@ flux/
 | 工具 | 版本 | 说明 |
 |------|------|------|
 | Rust | stable 通道 | 仓库钉 `rust-toolchain.toml`（stable + rustfmt/clippy），rustup 自动就位 |
-| Node | **24 LTS** | 唯一支持线（`engines` 声明，pnpm 对其他版本告警）；推荐 nvm 管理；脚本对版本敏感的 flag 自带守卫 |
+| Node | **24 LTS** | 唯一支持线（`engines` 声明，pnpm 对其他版本告警）；推荐 nvm 管理；脚本对版本敏感的 flag 自带守卫。**`cargo build` 默认需要它**：浏览器 UI 嵌入二进制，构建期由 build.rs 调 `package-web.sh`（无工具链时嵌入占位页，`FLUX_WEB_UI_NO_BUILD=1` 跳过） |
 | pnpm | 11.x | 版本钉在 `clients/package.json` 的 `packageManager`；脚本发现缺失会自动安装 |
 | protoc | 系统二进制 | `protobuf-compiler`（apt）/ `brew install protobuf`——`flux-proto` 编译期调用 |
 | Chrome | 较新版本即可 | 仅 headless e2e（`pnpm run ui-check`）需要 |
@@ -44,10 +44,11 @@ buf 等前端契约工具全部走 `clients/web` 的 devDependencies（pnpm 严�
 ## 快速开始
 
 ```bash
-cargo build --release
-./scripts/run-server.sh             # UI 缺失时自动构建，然后同时伺服 UI + API
-# 或：cargo run -p flux-server      # Connect API + 二进制旁的 web-ui/（如存在），
-                                    # --web-assets-dir 可指定任意构建产物目录
+cargo build --release               # 浏览器 UI 已嵌入二进制（dist 缺失/过期时
+                                    # build.rs 自动调 package-web.sh 构建）
+./scripts/run-server.sh             # 同时伺服 UI + API；dist 缺失时先构建
+# 或：cargo run -p flux-server      # 同样自带 UI；--web-assets-dir 可指定
+                                    # 磁盘覆盖目录（Gitea custom/ 语义）
 ```
 
 没有配置文件——一切要么是 CLI flag（`--host`、`--port`、`--db-path`、
@@ -64,21 +65,18 @@ bash|zsh|fish|powershell|elvish` 生成 shell 补全；见 `flux-server --help`�
 无需克隆源码，直接使用 [Releases](https://github.com/km0e/flux/releases) 的产物：
 
 ```bash
-# ① 服务端二进制（headless）
+# 服务端二进制，浏览器 UI 已嵌入其中
 curl --proto '=https' --tlsv1.2 -LsSf \
   https://github.com/km0e/flux/releases/latest/download/flux-server-installer.sh | sh
-# ② 浏览器 UI（解压至 ~/.flux/web-ui，服务器自动识别）
-mkdir -p ~/.flux && curl -fL \
-  https://github.com/km0e/flux/releases/latest/download/flux-web-ui.tar.gz | tar xz -C ~/.flux
 ```
 
 （Windows PowerShell 同理，使用 `flux-server-installer.ps1`；安装至
 `~/.cargo/bin`，PATH 脚本与卸载 receipt 自动写入。）
 
-**带浏览器 UI 的完整形态**：下载平台归档解压即用 —— `web-ui/` 与二进制并排。
-
-UI 资产解析顺序：`--web-assets-dir` > 二进制旁 `web-ui/` > `~/.flux/web-ui` >
-无（headless）。
+**可选定制（Gitea `custom/` 语义）**：`~/.flux/web-ui/`（或 `--web-assets-dir`
+指向的目录）里的同名文件会**逐文件覆盖**嵌入的 UI——改一个 index.html、补一个
+资产，其余仍走嵌入底座。目录不存在时伺服纯嵌入 UI。目录内若带旧版本的
+`web-ui-version.txt` 会在启动日志中警告。
 
 ## 文档
 
