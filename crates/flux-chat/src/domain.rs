@@ -1,11 +1,15 @@
 //! Per-chat state store with built-in `state_get` / `state_set` tools.
 //!
-//! ## The boundary key is read-only state
+//! ## The boundary is a fixed field, not advertised state
 //!
-//! `workdir` is the chat's sandbox boundary — fixed at chat creation,
-//! held by the `StateManager` as a fixed field, and surfaced read-only
-//! through `state_get`. A movable boundary would be no boundary, so the
-//! write path refuses it structurally: `set("workdir", …)` is an error at
+//! `workdir` is the chat's sandbox boundary — fixed at chat creation and
+//! held by the `StateManager` as a fixed field. Its VALUE rides the
+//! system prompt (skills.rs composes the boundary line at every begin);
+//! the state schema deliberately does NOT list the key — advertising it
+//! only taught models to spend a `state_get` round-trip on a fact the
+//! prompt already carries. The read stays correct anyway (robustness
+//! over purity): `get("workdir")` serves the fixed field, and the write
+//! path refuses it structurally — `set("workdir", …)` is an error at
 //! the single write point — there is no preprocessing layer to
 //! bypass anymore. Every other key is open by design: `state_set` accepts
 //! any key (the schema `enum` lists only the known keys as LLM guidance,
@@ -39,16 +43,16 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tracing::warn;
 
-pub const INITIAL_STATE: &[(&str, &str)] = &[
-    (
-        "workdir",
-        "Current working directory — sandbox boundary (read-only, fixed at chat creation); default base for file/search/shell tools",
-    ),
-    (
-        "current_dir",
-        "Transient shell cwd — defaults to workdir; affects bash and glob",
-    ),
-];
+/// The ADVERTISED per-chat state keys (key → description; drives the
+/// state tools' schema enum — guidance, not a whitelist). `workdir` is
+/// deliberately absent: the boundary's VALUE rides the system prompt
+/// (skills.rs `compose_system_prompt`), and listing it here only taught
+/// models to spend a `state_get` round-trip on it. The hidden read
+/// (`StateManager::get("workdir")`) still serves the fixed field.
+pub const INITIAL_STATE: &[(&str, &str)] = &[(
+    "current_dir",
+    "Transient shell cwd — defaults to workdir; affects bash and glob",
+)];
 
 // ── StateManager ────────────────────────────────────────────────────────────
 
@@ -126,7 +130,8 @@ impl StateManager {
     // ── CRUD ──
 
     /// Read a state value. The boundary key serves the fixed field —
-    /// read-only by construction.
+    /// read-only by construction (a hidden key: correct if called, but
+    /// not advertised in the schema — the value rides the system prompt).
     pub fn get(&self, key: &str) -> Option<String> {
         if key == "workdir" {
             return Some(self.workdir.clone());

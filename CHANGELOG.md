@@ -6,6 +6,12 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 > parses this file); the full docs live in [`README.md`](README.md) and
 > [`docs/architecture.md`](docs/architecture.md).
 
+## [Unreleased]
+
+### Fixed
+
+- **The workdir VALUE now actually reaches the model** — `DEFAULT_PREAMBLE`'s comment promised per-chat workdir interpolation at the `begin` call site, but `compose_system_prompt` used the workdir solely to look up the skill catalog and never injected the path, so the model's only programmatic source for the path was `state_get("workdir")` — a round-trip the state schema's own enum advertised. Now `compose_system_prompt` states the boundary line (path + "sandbox boundary, fixed for this conversation") before the catalog at every begin (stable-before-volatile: the boundary never moves, the catalog refreshes at rebuild gates), and the state enum drops the `workdir` key (`INITIAL_STATE` keeps only `current_dir`) — the write refusal and the hidden read (`get("workdir")` serves the fixed field) stay.
+
 ## [0.1.5] - 2026-09-16
 
 ### Added

@@ -673,7 +673,11 @@ tool-execution contract :
  carried at `chat_create`. The boundary is read-only state — `set("workdir", …)` is
  refused at the single write point, and `current_dir` is canonicalized inside the
  boundary by the `state_set` tool. An escapable-by-the-model boundary would be no
- boundary.
+ boundary. The boundary's VALUE rides the system prompt (composed at every begin by
+ `flux_chat::skills::compose_system_prompt`); the state schema does NOT advertise the
+ key — the prompt is the value's always-visible surface, and a schema listing would
+ only teach models to spend a `state_get` round-trip on it (the hidden read
+ `get("workdir")` still serves the fixed field).
 
 Real isolation comes from the OS or a container boundary: flux
 runs with the permissions of the user account that starts it, treats files writable by

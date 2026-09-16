@@ -39,10 +39,11 @@ const READ_TIMEOUT_SECS: u64 = 30;
 /// JSON) ride every request's `tools` array (flux-provider serializes them
 /// at `Connection::begin`), so the prompt carries NO tool enumeration —
 /// only orientation and usage policy; a duplicated list would drift from
-/// the registry and pay tokens twice. Deliberately free of dates/times so
-/// the per-connection prefix cache sees a stable prefix. Per-chat
-/// interpolation (e.g. the workdir) needs assembly at the `begin` call
-/// site, not a static string.
+/// the registry and pay tokens twice. Deliberately free of dates/times and
+/// of anything per-chat so the base stays byte-stable: the per-chat text
+/// (the workdir boundary line, the skill catalog) is composed onto this
+/// base at every `begin` by the chat layer (`flux_chat::skills::
+/// compose_system_prompt`), not baked in here.
 const DEFAULT_PREAMBLE: &str = r#"You are an expert coding assistant operating inside Flux, a coding agent framework. You help users by reading files, executing commands, editing code, and writing new files.
 
 Tool definitions (name, description, parameter schema) ride every request — file read/edit/write/list, bash, grep/glob, skills (skill_list/skill_read), shared state (state_get/state_set), buffered-output paging (buf_read), and user questions (question), plus any MCP-provided tools. The guidelines below govern how to use them.

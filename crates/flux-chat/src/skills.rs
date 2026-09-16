@@ -1,7 +1,13 @@
-//! skills.rs — the chat-owned `skill_read` and the Tier-1 catalog
-//! composition. Two responsibilities that must move together because they
-//! share one definition of "skill content":
+//! skills.rs — the chat-owned `skill_read`, the Tier-1 catalog
+//! composition, and the per-chat workdir line. The first two share one
+//! definition of "skill content"; all three meet at one begin-point
+//! composition:
 //!
+//! - **Workdir line**: [`compose_system_prompt`] states the boundary's
+//!   VALUE in the system prompt — the model's only always-visible source
+//!   for the path (the state schema deliberately does NOT advertise it;
+//!   see domain.rs). Without it the model's first absolute-path need
+//!   costs a `state_get` round-trip.
 //! - **Catalog (Tier-1)**: [`compose_system_prompt`] appends the skill
 //!   catalog to the agent preamble at every connection begin (spawn and
 //!   in-place rebuild). A begin-time snapshot — `skill_list` stays the
@@ -32,21 +38,40 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 // ── Tier-1 catalog composition ──────────────────────────────────────────────
 
-/// Compose the connection's system prompt: the agent preamble plus the
-/// skill catalog (a begin-time snapshot — the instruction text inside the
-/// section points at `skill_list` for the live list). No catalog (no
-/// skills, or no workdir boundary) leaves the preamble unchanged — an
-/// empty catalog block would mislead the model.
+/// The per-chat boundary line: the workdir VALUE's only always-visible
+/// surface in the model's context. The state schema deliberately does not
+/// advertise the key (domain.rs) — without this line the model's first
+/// absolute-path need costs a `state_get` round-trip, and before it
+/// existed there was no source for the path at all.
+fn workdir_section(workdir: &str) -> String {
+    format!(
+        "Working directory: {workdir} — the chat's sandbox boundary, fixed for \
+         this conversation. Relative paths and path arguments resolve against \
+         it; file, search, and shell tools default to it."
+    )
+}
+
+/// Compose the connection's system prompt: the agent preamble, plus the
+/// per-chat workdir line, plus the skill catalog (a begin-time snapshot —
+/// the instruction text inside the section points at `skill_list` for the
+/// live list). No workdir boundary leaves the preamble unchanged — a
+/// boundary-less chat has no path to state and an empty line would
+/// mislead.
 pub(crate) fn compose_system_prompt(base: &str, workdir: &str) -> String {
     if workdir.is_empty() {
         return base.to_string();
     }
-    compose_with_catalog(base, flux_tools::catalog_for_workdir(Path::new(workdir)))
+    // Stable-before-volatile ordering: the boundary never moves for a
+    // chat's lifetime while the catalog refreshes at every rebuild gate,
+    // so the workdir line precedes the catalog and a catalog change
+    // keeps the longest shared prompt prefix.
+    let base = format!("{base}\n\n{}", workdir_section(workdir));
+    compose_with_catalog(&base, flux_tools::catalog_for_workdir(Path::new(workdir)))
 }
 
 /// The pure composition the glue above feeds: catalog appended after the
-/// preamble (prompt-prefix caches keep the preamble byte-stable), absent
-/// catalog → the preamble verbatim.
+/// base (preamble + workdir line — prompt-prefix caches keep the preamble
+/// byte-stable per connection), absent catalog → the base verbatim.
 pub(crate) fn compose_with_catalog(base: &str, catalog: Option<String>) -> String {
     match catalog {
         Some(section) => format!("{base}\n\n{section}"),
@@ -373,6 +398,35 @@ mod tests {
         let composed = compose_system_prompt("You are flux.", dir.path().to_str().unwrap());
         assert!(composed.starts_with("You are flux.\n\n"), "{composed}");
         assert!(composed.contains("- pdf (project): PDF workflows."));
+    }
+
+    #[test]
+    fn compose_states_the_boundary_value_before_the_catalog() {
+        // The workdir VALUE rides the prompt — the model's only
+        // always-visible source for the path (the state enum no longer
+        // advertises the key). Stable-before-volatile: the boundary line
+        // precedes the catalog, which refreshes at rebuild gates.
+        let dir = tempfile::tempdir().unwrap();
+        write_skill(
+            &dir.path().join(".flux/skills"),
+            "pdf",
+            "pdf",
+            "PDF workflows.",
+        );
+        let workdir = dir.path().to_str().unwrap();
+        let composed = compose_system_prompt("You are flux.", workdir);
+        let line = format!("Working directory: {workdir}");
+        let wd = composed
+            .find(&line)
+            .unwrap_or_else(|| panic!("workdir line absent: {composed}"));
+        assert!(composed[wd..].contains("sandbox boundary"), "{composed}");
+        let cat = composed
+            .find("- pdf (project)")
+            .unwrap_or_else(|| panic!("catalog absent: {composed}"));
+        assert!(
+            wd < cat,
+            "workdir line must precede the catalog: {composed}"
+        );
     }
 
     // ── derivation ──
