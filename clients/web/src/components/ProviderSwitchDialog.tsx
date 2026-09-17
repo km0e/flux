@@ -38,7 +38,7 @@ export function ProviderSwitchDialog(props: {
               setModel(next.model);
             }}
           />
-          <p className="text-xs leading-relaxed text-faint">
+          <p className="text-xs leading-relaxed text-muted">
             The switch applies when the current round ends — a running round is never interrupted.
           </p>
           <div className="flex justify-end gap-2">

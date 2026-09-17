@@ -51,6 +51,28 @@ pub(crate) async fn remove_provider(registry: &ProviderRegistry, id: String) -> 
     }
 }
 
+/// Edit a provider's endpoint behind its id (url / api_key; the id is
+/// identity and never moves). The reply payload matches add/remove; the
+/// CALLER owns the post-reply side effects, in the save_model order:
+/// broadcast the fresh registry, then re-resolve the pinned chats'
+/// instances (the switch path's cache sync + carried-pin rebuild — the
+/// fresh endpoint rides each engine's next re-begin).
+pub(crate) async fn update_provider(
+    registry: &ProviderRegistry,
+    id: String,
+    protocol: String,
+    url: Option<String>,
+    api_key: Option<String>,
+) -> ProviderMutation {
+    match registry.update(&id, protocol, url, api_key).await {
+        Ok(_) => ProviderMutation { id, error: None },
+        Err(e) => ProviderMutation {
+            id,
+            error: Some(e.to_string()),
+        },
+    }
+}
+
 // ── Models (LOCAL saved models) ────────────────────────────────────────────
 
 /// The save/remove reply payload.

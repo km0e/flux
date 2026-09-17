@@ -3,8 +3,9 @@
  * headless UI check (clients/web/e2e).
  *
  * Speaks just enough of the wire format for flux-provider's SSE client:
- *   Round 1  reasoning + text + tool_call(bash echo) → the kernel executes
- *            the REAL bash tool and issues a follow-up request.
+ *   Round 1  reasoning + a full prose sample + tool_calls (bash echo
+ *            success + bash `exit 3` failure) → the kernel executes the
+ *            REAL bash tools and issues a follow-up request.
  *   Round 2  closing text → the round wraps with stream_end.
  * Each round ends with a usage chunk + [DONE].
  *
@@ -70,9 +71,21 @@ http
           chunk({
             content:
               'Let me run a quick command.\n\n' +
+              // PROSE REVIEW SURFACE: every Shared-Markdown-Prose voice in one
+              // reply — inline code, a fenced block (badge + copy chrome),
+              // blockquote, hr, a list — then the pathological pair below.
+              'The build runs through `npm run build` — see the **fenced sample**.\n\n' +
               'unbreakable-' +
               'x'.repeat(300) +
               '\n\n' +
+              '```bash\n' +
+              'flux serve --port 8080  # single port: UI + Connect + terminal\n' +
+              'flux serve --help       # every flag, documented\n' +
+              '```\n\n' +
+              '> Quote voice: recessed fill, strong left rule, `code` stays legible.\n\n' +
+              '---\n\n' +
+              '- first item carries `inline` code\n' +
+              '- second item carries a [link](https://flux.dev)\n\n' +
               '| c1 | c2 | c3 | c4 | c5 | c6 | c7 | c8 | c9 | c10 | c11 | c12 |\n' +
               '|---|---|---|---|---|---|---|---|---|---|---|---|\n' +
               '| aaaaaaaaaaaaaaaaaaaaaa | bbbbbbbbbbbbbbbbbbbbbb | cccccccccccccccccccccc | dddddddddddddddddddddd | eeeeeeeeeeeeeeeeeeeeee | ffffffffffffffffffffff | gggggggggggggggggggggg | hhhhhhhhhhhhhhhhhhhhhh | iiiiiiiiiiiiiiiiiiiiii | jjjjjjjjjjjjjjjjjjjjjj | kkkkkkkkkkkkkkkkkkkkkk | llllllllllllllllllllll |',
@@ -85,6 +98,15 @@ http
                 index: 0,
                 id: 'call_demo_1',
                 function: { name: 'bash', arguments: '{"command": "echo hello-flux"}' },
+              },
+              {
+                // A FAILING command: no output, non-zero exit → the kernel
+                // reports "(exit code: 3)" and the card paints the exit
+                // verdict (warn status voice) — the abnormal-completion
+                // ladder gets reviewed in the same shots.
+                index: 1,
+                id: 'call_demo_2',
+                function: { name: 'bash', arguments: '{"command": "exit 3"}' },
               },
             ],
           }),

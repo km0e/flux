@@ -13,8 +13,8 @@
 
 use flux_core::Tool;
 use flux_tools::{
-    BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    SkillListTool, WriteFileTool,
+    BashTool, EditFileTool, EditFilesTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
+    ReadFilesTool, ReplaceLinesTool, SkillListTool, WriteFileTool,
 };
 
 fn expected_schema(name: &str) -> serde_json::Value {
@@ -29,6 +29,27 @@ fn expected_schema(name: &str) -> serde_json::Value {
             "required": ["file_path"],
             "additionalProperties": false,
         }),
+        "read_files" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "files": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": { "type": "string", "description": "Path to the file to read." },
+                            "offset": { "type": "integer", "description": "Line number to start reading from (1-based)." },
+                            "limit": { "type": "integer", "description": "Maximum number of lines to read." },
+                        },
+                        "required": ["file_path"],
+                        "additionalProperties": false,
+                    },
+                    "description": "Files to read, one segment each (1..=16 items).",
+                },
+            },
+            "required": ["files"],
+            "additionalProperties": false,
+        }),
         "edit_file" => serde_json::json!({
             "type": "object",
             "properties": {
@@ -38,6 +59,28 @@ fn expected_schema(name: &str) -> serde_json::Value {
                 "replace_all": { "type": "boolean", "description": "Replace every occurrence of old_string instead of requiring a unique match." },
             },
             "required": ["file_path", "old_string", "new_string"],
+            "additionalProperties": false,
+        }),
+        "edit_files" => serde_json::json!({
+            "type": "object",
+            "properties": {
+                "edits": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "file_path": { "type": "string", "description": "Path to the file to edit." },
+                            "old_string": { "type": "string", "description": "Exact text to replace, copied verbatim from a recent read_file (no line-number prefixes). Must be unique in the file unless replace_all is true." },
+                            "new_string": { "type": "string", "description": "Replacement text. An empty string deletes the matched text." },
+                            "replace_all": { "type": "boolean", "description": "Replace every occurrence of old_string instead of requiring a unique match." },
+                        },
+                        "required": ["file_path", "old_string", "new_string"],
+                        "additionalProperties": false,
+                    },
+                    "description": "Edits to apply, grouped by file automatically (1..=16 items); same-file edits run in listed order and report per edit.",
+                },
+            },
+            "required": ["edits"],
             "additionalProperties": false,
         }),
         "write_file" => serde_json::json!({
@@ -108,7 +151,9 @@ fn expected_schema(name: &str) -> serde_json::Value {
 fn all_tool_schemas_match_the_pinned_contract() {
     let tools: Vec<(&str, Box<dyn Tool>)> = vec![
         ("read_file", Box::new(ReadFileTool::new())),
+        ("read_files", Box::new(ReadFilesTool::new())),
         ("edit_file", Box::new(EditFileTool::new())),
+        ("edit_files", Box::new(EditFilesTool::new())),
         ("write_file", Box::new(WriteFileTool::new())),
         ("replace_lines", Box::new(ReplaceLinesTool::new())),
         ("list_directory", Box::new(ListDirectoryTool::new())),

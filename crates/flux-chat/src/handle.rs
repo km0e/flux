@@ -4,9 +4,9 @@ use crate::ResolvedPin;
 use crate::round::RoundControl;
 use flux_core::{ChatStateKind, LoopInput};
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::task::AbortHandle;
 
 /// Control handle for a spawned conversation task (the session layer's
@@ -26,9 +26,12 @@ pub struct ChatHandle {
     /// flight down.
     aborts: Vec<AbortHandle>,
     done: Arc<AtomicBool>,
-    /// Shared round-state slot — written by the round consumer from the
-    /// fact trace, read for authoritative subscription snapshots.
-    state: Arc<StdMutex<ChatStateKind>>,
+    /// Shared round-state slot — written by the round consumer on real
+    /// transitions (the loop only reports `RoundState` on a change), read
+    /// for authoritative subscription snapshots and subscribable via
+    /// [`ChatHandle::subscribe_state`] (the session layer's running-flag
+    /// broadcasts).
+    state: Arc<watch::Sender<ChatStateKind>>,
 }
 
 impl ChatHandle {
@@ -37,7 +40,7 @@ impl ChatHandle {
         ctrl: RoundControl,
         aborts: Vec<AbortHandle>,
         done: Arc<AtomicBool>,
-        state: Arc<StdMutex<ChatStateKind>>,
+        state: Arc<watch::Sender<ChatStateKind>>,
     ) -> Self {
         Self {
             loop_tx,
@@ -75,7 +78,14 @@ impl ChatHandle {
     /// replies (the session layer's `current_state` folds it into
     /// `chat_state` frames).
     pub fn state(&self) -> ChatStateKind {
-        *self.state.lock().expect("chat state slot lock")
+        *self.state.borrow()
+    }
+
+    /// Subscribe to round-state transitions. The sender only marks the
+    /// value changed on a REAL transition, so a receiver's `changed()`
+    /// fires exactly on the Idle↔Streaming round boundaries.
+    pub fn subscribe_state(&self) -> watch::Receiver<ChatStateKind> {
+        self.state.subscribe()
     }
 
     /// The round state for a snapshot reply, but only while the task is

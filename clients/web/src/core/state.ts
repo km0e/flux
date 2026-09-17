@@ -15,8 +15,11 @@ import {
   readStoredSidebarOpen,
   readStoredSidebarWidth,
   readStoredPreviewWidth,
+  readStoredTheme,
+  storeTheme,
   SIDEBAR_DEFAULT_WIDTH,
   PREVIEW_DEFAULT_WIDTH,
+  type ThemeChoice,
 } from './prefs';
 import type {
   UsageInfo,
@@ -26,7 +29,7 @@ import type {
   McpNoticeEntry,
   SkillSummary,
   SavedModelInfo,
-  RoundArtifact,
+  SettingsTab,
 } from './types';
 
 /** Cumulative token usage for one chat (compact ↑/↓/R/W footer language).
@@ -61,6 +64,10 @@ export interface Chat {
   lastActivityAt?: number;
   /** Another window holds the lease (wire ChatInfo.active) — the sidebar shows "In use". */
   active: boolean;
+  /** A round is in flight on the chat (wire ChatInfo.running — the
+   * server's re-broadcast round-boundary truth). Optional so test fixtures
+   * omit it; the sidebar ORs it with the local `streaming` flag. */
+  running?: boolean;
   /** The chat's working directory (the tool sandbox boundary; shown as a cwd line). */
   workdir: string;
   /** The chat's pinned provider registry id. */
@@ -162,13 +169,8 @@ export interface FluxStore {
   /** Terminal tabs (one session each; bound to a chat). Created via the
    * dock's "+" or the sidebar button — never auto-spawned. */
   terminalTabs: TerminalTabMeta[];
-  /** The active dock tab id: a file tab id, a terminal tab id, or the
-   * round-artifacts tab ('round'). */
+  /** The active dock tab id: a file tab id or a terminal tab id. */
   activeDockTab: string | null;
-  /** The current round's artifacts per chat (F-11) — since the chat's
-   * last user message, rebuilt from the history snapshot on re-open.
-   * Written by services/artifacts.ts; the dock's Round tab reads it. */
-  roundArtifacts: Record<string, RoundArtifact[]>;
   /** Forwarded MCP server notices (F-10b) — newest first, capped at 100.
    * Fire-and-forget session-level status, never conversation truth. */
   mcpNotices: McpNoticeEntry[];
@@ -178,6 +180,29 @@ export interface FluxStore {
    * a round finishing or a question arriving in a NON-active chat while
    * the tab was hidden. Cleared when the page becomes visible again. */
   backgroundEvents: number;
+  /** Transcript search (Ctrl/Cmd+F): the open flag + what the bar renders.
+   * The SERVICE (services/transcript-search.ts) owns the ranges/observer —
+   * the store carries only the projection: match count and the 0-based
+   * current index (0/0 when the query is empty or finds nothing). */
+  searchOpen: boolean;
+  searchMatches: number;
+  searchCurrent: number;
+  /** Command palette (Ctrl/Cmd+K) visibility. */
+  paletteOpen: boolean;
+  /** The theme choice — GLOBAL state, promoted out of useTheme's local
+   * useState (the palette's cycle action and the TopBar button are two
+   * triggers of ONE choice; two owners cannot stay in sync). The choice
+   * persists here; what the choice DOES (data-theme attr + terminal
+   * palette re-read) lives in services/theme.ts. */
+  theme: ThemeChoice;
+  /** The settings dialog's open flag + the palette's "open AT section"
+   * intent (null = the dialog's last-visited memory). Lifted from TopBar
+   * local state so the command palette can drive it. Consumed once: the
+   * close path clears the tab intent. */
+  settingsOpen: boolean;
+  settingsTab: SettingsTab | null;
+  /** The keyboard-shortcuts sheet (palette action / the ? key). */
+  shortcutsOpen: boolean;
 
   // ── Actions ──
 
@@ -189,6 +214,18 @@ export interface FluxStore {
   setStreaming(chatId: string, v: boolean): void;
   clearStreaming(chatId: string): void;
   setReadOnly(chatId: string, v: boolean): void;
+  /** Open/close the transcript search bar; closing clears the match
+   * projection (the service keeps the query for the session). */
+  setSearchOpen(open: boolean): void;
+  /** The command palette's visibility. */
+  setPaletteOpen(open: boolean): void;
+  /** Persist a theme CHOICE (data only — the DOM side effects live in
+   * services/theme.ts, so a store action never reaches into the DOM). */
+  setTheme(t: ThemeChoice): void;
+  /** The settings dialog's visibility. */
+  setSettingsOpen(open: boolean): void;
+  /** The keyboard-shortcuts sheet's visibility. */
+  setShortcutsOpen(open: boolean): void;
   /** The authoritative chat list — switch focus if the active chat vanished. */
   setChats(chats: Chat[]): void;
   /** The provider-swap apply point — update one chat's provider/model. */
@@ -254,10 +291,17 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   openFiles: [],
   terminalTabs: [],
   activeDockTab: null,
-  roundArtifacts: {},
   mcpNotices: [],
   mcpNoticesUnread: 0,
   backgroundEvents: 0,
+  searchOpen: false,
+  searchMatches: 0,
+  searchCurrent: 0,
+  paletteOpen: false,
+  theme: readStoredTheme() ?? 'auto',
+  settingsOpen: false,
+  settingsTab: null,
+  shortcutsOpen: false,
 
   addUsage(chatId, u) {
     const prev = get().usage[chatId] ?? EMPTY_TOTALS;
@@ -472,6 +516,36 @@ export const useFlux = create<FluxStore>()((set, get) => ({
   setDockOpen(open) {
     set({ dockOpen: open });
   },
+
+  /** Open/close the transcript search bar. Closing clears the match
+   * projection; the service keeps the QUERY for the session (Chrome
+   * find-bar semantics — reopening restores it). */
+  setSearchOpen(open) {
+    set(
+      open
+        ? { searchOpen: true }
+        : { searchOpen: false, searchMatches: 0, searchCurrent: 0 },
+    );
+  },
+
+  setPaletteOpen(open) {
+    set({ paletteOpen: open });
+  },
+
+  setTheme(t) {
+    set({ theme: t });
+    storeTheme(t);
+  },
+
+  setSettingsOpen(open) {
+    // Closing also clears the palette's one-shot tab intent — the next
+    // gear click lands on the dialog's own last-visited memory.
+    set(open ? { settingsOpen: true } : { settingsOpen: false, settingsTab: null });
+  },
+
+  setShortcutsOpen(open) {
+    set({ shortcutsOpen: open });
+  },
 }));
 
 /** Reset every field to its initial value (test isolation). */
@@ -500,9 +574,16 @@ export function resetFluxForTest(): void {
     openFiles: [],
     terminalTabs: [],
     activeDockTab: null,
-    roundArtifacts: {},
     mcpNotices: [],
     mcpNoticesUnread: 0,
     backgroundEvents: 0,
+    searchOpen: false,
+    searchMatches: 0,
+    searchCurrent: 0,
+    paletteOpen: false,
+    theme: 'auto',
+    settingsOpen: false,
+    settingsTab: null,
+    shortcutsOpen: false,
   });
 }

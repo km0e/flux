@@ -6,7 +6,7 @@
  * (they keep dialog/menu code out of bundles that never open one).
  *
  * Primitives: Button, IconButton, TextField, SelectField, TextArea, Badge,
- *             Spinner
+ *             Spinner, Skeleton
  * Radix wrappers: Dialog*, DropdownMenu*, Tabs*, Tooltip
  */
 export { Button, IconButton } from './button';
@@ -15,3 +15,4 @@ export { TextField, SelectField, TextArea } from './fields';
 export { Badge } from './badge';
 export type { BadgeTone } from './badge';
 export { Spinner } from './spinner';
+export { Skeleton } from './skeleton';

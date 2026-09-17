@@ -100,11 +100,12 @@
   justify-content: flex-end;
 }
 
-/* Fork affordance (user bubbles): sits LEFT of the bubble, revealed on
-   hover — touch devices keep it visible (a hover reveal is unreachable
-   there). A fork is non-destructive (the source is untouched), so the
-   affordance needs no confirm styling. */
-.msg-fork {
+/* User-bubble affordances (fork + copy): sit LEFT of the bubble, revealed
+   on hover — touch devices keep them visible (a hover reveal is
+   unreachable there). A fork is non-destructive (the source is untouched),
+   so the affordances need no confirm styling. */
+.msg-fork,
+.msg-copy {
   align-self: center;
   display: inline-flex;
   align-items: center;
@@ -126,18 +127,27 @@
 }
 
 .message.user:hover .msg-fork,
-.msg-fork:focus-visible {
+.message.user:hover .msg-copy,
+.msg-fork:focus-visible,
+.msg-copy:focus-visible {
   opacity: 1;
 }
 
-.msg-fork:hover {
+.msg-fork:hover,
+.msg-copy:hover {
   color: var(--fx-accent);
   background: var(--fx-accent-soft);
 }
 
+/* Copy success: the check rides the accent until the icon reverts. */
+.msg-copy.ok {
+  color: var(--fx-accent);
+}
+
 /* Touch: always visible + the 36px tap floor (padding does the work). */
 @media (hover: none) {
-  .msg-fork {
+  .msg-fork,
+  .msg-copy {
     opacity: 1;
     width: 36px;
     height: 36px;
@@ -225,7 +235,10 @@
   text-decoration-color: color-mix(in srgb, var(--fx-info) 45%, transparent);
 }
 
-/* Error — the system line in the danger tone (same centered voice). */
+/* Error — the system line in the danger tone (same centered voice). The
+   retry/copy actions sit under the text as quiet token controls; they
+   exist only on pane-context errors (services/stream.ts), not on the
+   bare no-chat bubble (services/dispatch.ts). */
 .message.error {
   color: var(--fx-danger);
   font-family: var(--fx-font-mono);
@@ -236,6 +249,40 @@
 
 .message .error-icon {
   margin-right: 4px;
+}
+
+.error-actions {
+  display: flex;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.error-action {
+  cursor: pointer;
+  font-family: var(--fx-font-ui);
+  font-size: var(--fx-text-2xs);
+  line-height: 1.4;
+  color: var(--fx-muted);
+  background: var(--fx-inset);
+  border: 1px solid var(--fx-border);
+  border-radius: var(--fx-radius-sm);
+  padding: 2px 10px;
+  transition:
+    color var(--fx-duration-fast) var(--fx-ease-out),
+    border-color var(--fx-duration-fast) var(--fx-ease-out),
+    background-color var(--fx-duration-fast) var(--fx-ease-out);
+}
+
+.error-action:hover {
+  color: var(--fx-fg);
+  border-color: var(--fx-border-strong);
+  background: var(--fx-hover);
+}
+
+.error-action:focus-visible {
+  outline: 2px solid var(--fx-accent);
+  outline-offset: 1px;
 }
 
 /* Question-wait context hint (the dialog layer owns the real card). */
@@ -298,6 +345,23 @@
 
 .message.typing span:nth-child(3) {
   animation-delay: 0.4s;
+}
+
+/* ── Transcript search (CSS Custom Highlight API) ──────────────────────
+   services/transcript-search.ts paints matches WITHOUT touching the
+   streaming DOM — these highlight pseudo-elements style the paint from
+   the outside. The registry keys must stay in sync with the service's
+   NAME_ALL / NAME_CURRENT. Current match: solid accent (unmistakable on
+   both themes); the rest: the dim accent wash. */
+
+::highlight(flux-search) {
+  background-color: var(--fx-accent-dim);
+}
+
+::highlight(flux-search-current) {
+  background-color: var(--fx-accent);
+  color: var(--fx-accent-fg);
+  border-radius: 2px;
 }
 
 /* ── Reasoning / Thinking ────────────────────────────────────────────── */
@@ -388,6 +452,31 @@
 
 .tool.done {
   opacity: 0.82;
+}
+
+/* ── Abnormal completions ──
+   The wire carries tool results as plain strings; dom.ts classifies the
+   kernel's markers (Error: prefix / INTERRUPTED_MARK / "(exit code: N)"
+   suffix) into a verdict painted here. A settled card fades; a FAILED one
+   must not — error keeps full opacity and takes the danger rail (the
+   same rail that carries the running current). Interrupted is the user's
+   own action and a non-zero exit is the command's fact: warn voice, no
+   rail — noticed, not alarmed. */
+.tool.tool-error {
+  opacity: 1;
+}
+
+.tool.tool-error::before {
+  background: var(--fx-danger);
+}
+
+.tool .tool-status.error {
+  color: var(--fx-danger);
+}
+
+.tool .tool-status.interrupted,
+.tool .tool-status.exit {
+  color: var(--fx-warn);
 }
 
 .tool.running::before {
@@ -603,7 +692,11 @@
 
 .prose code {
   font-family: var(--fx-font-mono);
-  background: var(--fx-inset);
+  /* A fg-washed chip, not `--fx-inset`: inset sits nearly at bg's luminance
+     in the dark theme, so the pill lost its fill there. A wash over the
+     CURRENT surface lifts in dark / drops in light — the chip reads on
+     whatever it lands on (bg, elev, thinking blocks) with no new token. */
+  background: color-mix(in srgb, var(--fx-fg) 6%, transparent);
   border: 1px solid var(--fx-border);
   padding: 1px 5px;
   border-radius: var(--fx-radius-xs);
@@ -673,13 +766,22 @@
 
 .prose a {
   color: var(--fx-info);
+  /* The underline is REQUIRED, not decoration: Tailwind's preflight strips
+     link underlines, and color alone cannot distinguish the link from its
+     surrounding text (info vs fg is under 3:1 in the dark theme — axe's
+     link-in-text-block rule, correctly). Markdown convention agrees. */
+  text-decoration-line: underline;
+  text-decoration-color: color-mix(in srgb, var(--fx-info) 55%, transparent);
   text-underline-offset: 3px;
 }
 
 .prose blockquote {
   margin: 6px 0;
-  padding: 2px 0 2px 12px;
+  /* Fill + rule: the strong left line marks the quote, the recessed wash
+     gives it an extent (a bare rule read as indentation, not a quote). */
+  padding: 4px 12px;
   border-left: 3px solid var(--fx-border-strong);
+  background: color-mix(in srgb, var(--fx-inset) 45%, transparent);
   color: var(--fx-muted);
 }
 
@@ -706,10 +808,17 @@
   font-weight: 600;
 }
 
+/* Zebra scan lines under the grid: cells keep their rules (vertical
+   separators earn their keep once a wide table scrolls horizontally), the
+   even-row wash adds the horizontal tracking the grid alone lacks. */
+.prose tbody tr:nth-child(even) {
+  background: color-mix(in srgb, var(--fx-inset) 55%, transparent);
+}
+
 .prose hr {
   border: none;
-  border-top: 1px solid var(--fx-border);
-  margin: 12px 0;
+  border-top: 1px solid var(--fx-border-strong);
+  margin: 14px 0;
 }
 
 /* ── File preview: rendered markdown ──────────────────────────────────
@@ -769,7 +878,9 @@
   left: 10px;
   font-size: var(--fx-text-2xs);
   line-height: 1.4;
-  color: var(--fx-faint);
+  /* muted, not faint: it sits ON the inset fill, where light-theme faint
+     misses AA (4.09) — and a language label is information, not garnish. */
+  color: var(--fx-muted);
   text-transform: lowercase;
   letter-spacing: 0.04em;
   user-select: none;
@@ -813,6 +924,9 @@
 
 .code-copy:hover,
 .code-copy:focus-visible {
+  /* Same hover language as .copy-btn: the text comes fully forward and the
+     fill lifts to the elevation surface (from the 80% resting mix). */
+  background: var(--fx-elev);
   border-color: var(--fx-border-strong);
   color: var(--fx-fg);
 }
@@ -999,21 +1113,5 @@
 
   .fx-empty-state {
     min-height: 46vh;
-  }
-}
-
-/* ── Round-artifacts jump highlight (F-11) ──────────────────────────────
-   One-shot pulse on the tool card the Round tab jumped to. Rides the
-   card's own radius; removed on the next jump so it can re-fire. */
-.tool.artifact-flash {
-  animation: artifact-flash 1.4s ease-out 1;
-}
-
-@keyframes artifact-flash {
-  0% {
-    box-shadow: 0 0 0 2px var(--fx-accent);
-  }
-  100% {
-    box-shadow: 0 0 0 2px transparent;
   }
 }

@@ -15,21 +15,24 @@
 //! on every round — perfect for proving router fanout across streams.
 
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use flux_proto::flux::v1::subscribe_response::Kind as ResponseKind;
 use flux_proto::flux::v1::{
     AddProviderRequest, AddServerRequest, AddServerResponse, CancelRoundRequest, ClaimChatRequest,
     ClaimChatResponse, CloseChatRequest, CreateChatRequest, CreateChatResponse, DeleteChatRequest,
-    ErrorCode, FsListRequest, FsListResponse, FsReadRequest, FsReadResponse, ListChatsRequest,
-    ListChatsResponse, ListProvidersRequest, ListProvidersResponse, ListServersRequest,
-    ListServersResponse, ListSkillsRequest, ListSkillsResponse, McpServersBroadcast,
-    OpenChatRequest, ProviderSummary, ProvidersBroadcast, RemoveProviderRequest,
-    RemoveProviderResponse, RemoveServerRequest, RemoveServerResponse, RenameChatRequest,
-    RenameChatResponse, SendMessageRequest, SubscribeRequest, SubscribeResponse,
+    ErrorCode, FsListRequest, FsListResponse, FsReadRequest, FsReadResponse, GetModelsRequest,
+    GetModelsResponse, ListChatsRequest, ListChatsResponse, ListProvidersRequest,
+    ListProvidersResponse, ListServersRequest, ListServersResponse, ListSkillsRequest,
+    ListSkillsResponse, McpServersBroadcast, OpenChatRequest, ProviderSummary, ProvidersBroadcast,
+    RemoveProviderRequest, RemoveProviderResponse, RemoveServerRequest, RemoveServerResponse,
+    RenameChatRequest, RenameChatResponse, SendMessageRequest, SubscribeRequest, SubscribeResponse,
+    UpdateProviderRequest, UpdateProviderResponse,
 };
 use flux_proto::prost::Message;
 use futures_util::{SinkExt as _, StreamExt as _};
+use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
@@ -1322,6 +1325,217 @@ async fn provider_add_remove_manages_the_registry() {
             .contains("unknown provider id"),
         "unknown remove must reject: {ack:?}"
     );
+}
+
+/// A loopback HTTP upstream answering `GET /models` with a canned catalog
+/// and recording each request's Authorization header — the api_key's ONLY
+/// observable (the key never leaves the server by any other route).
+async fn spawn_models_upstream() -> (std::net::SocketAddr, Arc<std::sync::Mutex<Vec<String>>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let seen: Arc<std::sync::Mutex<Vec<String>>> = Arc::default();
+    let seen2 = Arc::clone(&seen);
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut sock, _)) = listener.accept().await else {
+                break;
+            };
+            let seen = Arc::clone(&seen2);
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 4096];
+                let n = sock.read(&mut buf).await.unwrap_or(0);
+                let auth = String::from_utf8_lossy(&buf[..n])
+                    .lines()
+                    .find_map(|l| {
+                        // Header names hit the wire lowercased (hyper).
+                        let (name, value) = l.split_once(':')?;
+                        name.eq_ignore_ascii_case("authorization")
+                            .then(|| value.trim().to_string())
+                    })
+                    .unwrap_or_default();
+                seen.lock().unwrap().push(auth);
+                let body = br#"{"data":[{"id":"m1","object":"model"}]}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    String::from_utf8_lossy(body)
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+            });
+        }
+    });
+    (addr, seen)
+}
+
+#[tokio::test]
+async fn provider_update_edits_the_endpoint_behind_the_id() {
+    // The edit path: update → ack + broadcast (the NEW url; the api_key
+    // never rides anything); the api_key tri-state resolves server-side —
+    // absent KEEPS the stored key (observable only through the probe's
+    // Authorization header), present REPLACES it; unknown ids reject.
+    let (upstream, seen_auth) = spawn_models_upstream().await;
+    let base = format!("http://{upstream}/v1");
+    let server = Server::start().await;
+    let mut s = Stream::open(&server.base, None).await;
+
+    let ack: flux_proto::flux::v1::AddProviderResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/AddProvider",
+        AddProviderRequest {
+            id: "main".into(),
+            protocol: "openai".into(),
+            url: Some(base.clone()),
+            api_key: Some("sk-first".into()),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("add");
+    assert!(ack.error.is_none(), "add failed: {ack:?}");
+
+    // Probe #1: the stored key reaches the upstream.
+    let probe: GetModelsResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/GetModels",
+        GetModelsRequest {
+            provider: "main".into(),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("probe");
+    assert!(probe.error.is_none(), "probe #1 failed: {probe:?}");
+    assert_eq!(
+        seen_auth.lock().unwrap().last().map(String::as_str),
+        Some("Bearer sk-first")
+    );
+
+    // Update with api_key ABSENT → the stored key KEEPS working.
+    let ack: UpdateProviderResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/UpdateProvider",
+        UpdateProviderRequest {
+            id: "main".into(),
+            protocol: "openai".into(),
+            url: Some(base.clone()),
+            api_key: None,
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("update");
+    assert!(ack.error.is_none(), "update failed: {ack:?}");
+    // The broadcast carries the NEW url (and only id + url — never a key).
+    let el = s.expect_kind("providers").await;
+    match el.kind {
+        Some(ResponseKind::Providers(ProvidersBroadcast { providers })) => {
+            assert_eq!(providers.len(), 1);
+            assert_eq!(providers[0].id, "main");
+            assert_eq!(providers[0].url, base);
+        }
+        other => panic!("expected providers broadcast, got {other:?}"),
+    }
+    let probe: GetModelsResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/GetModels",
+        GetModelsRequest {
+            provider: "main".into(),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("probe");
+    assert!(probe.error.is_none(), "probe #2 failed: {probe:?}");
+    assert_eq!(
+        seen_auth.lock().unwrap().last().map(String::as_str),
+        Some("Bearer sk-first"),
+        "an absent api_key must keep the stored one"
+    );
+
+    // Update with api_key PRESENT → the probe proves the replacement.
+    let ack: UpdateProviderResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/UpdateProvider",
+        UpdateProviderRequest {
+            id: "main".into(),
+            protocol: "openai".into(),
+            url: Some(base.clone()),
+            api_key: Some("sk-second".into()),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("update");
+    assert!(ack.error.is_none(), "update #2 failed: {ack:?}");
+    let _ = s.expect_kind("providers").await;
+    let probe: GetModelsResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/GetModels",
+        GetModelsRequest {
+            provider: "main".into(),
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("probe");
+    assert!(probe.error.is_none(), "probe #3 failed: {probe:?}");
+    assert_eq!(
+        seen_auth.lock().unwrap().last().map(String::as_str),
+        Some("Bearer sk-second"),
+        "a present api_key must replace the stored one"
+    );
+
+    // Unknown id → inline error; the registry is untouched.
+    let ack: UpdateProviderResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/UpdateProvider",
+        UpdateProviderRequest {
+            id: "ghost".into(),
+            protocol: "openai".into(),
+            url: None,
+            api_key: None,
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("inline");
+    assert!(
+        ack.error
+            .as_deref()
+            .unwrap()
+            .contains("unknown provider id"),
+        "unknown update must reject: {ack:?}"
+    );
+
+    // Unknown protocol → inline error (validation identical to add).
+    let ack: UpdateProviderResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/UpdateProvider",
+        UpdateProviderRequest {
+            id: "main".into(),
+            protocol: "anthropic".into(),
+            url: None,
+            api_key: None,
+        },
+        Some(s.token()),
+    )
+    .await
+    .expect("inline");
+    assert!(
+        ack.error.as_deref().unwrap().contains("protocol"),
+        "unknown protocol must reject: {ack:?}"
+    );
+    // The failed updates left the registry exactly as the last good one.
+    let v: ListProvidersResponse = unary(
+        &server.base,
+        "/flux.v1.ProviderService/ListProviders",
+        ListProvidersRequest {},
+        Some(s.token()),
+    )
+    .await
+    .expect("list");
+    assert_eq!(v.providers.len(), 1);
+    assert_eq!(v.providers[0].url, base);
 }
 
 #[tokio::test]

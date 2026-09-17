@@ -223,6 +223,12 @@ struct OpenAiSession {
 /// from the pump start / the last chunk) marks the stream dead (a hung
 /// gateway) — the connection stops pushing and surfaces a `Failed` event
 /// (fail-fast). A live long stream is NOT killed by a total timeout.
+///
+/// NOTE: the production client (flux-server's main) also carries a
+/// transport-level `read_timeout` of 30s, which fires FIRST and surfaces
+/// as an `SSE read error` — this layer is the backstop for clients built
+/// without a read timeout (tests, embedding hosts) and for
+/// non-reqwest transports.
 pub const STREAM_STALL_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[async_trait]
@@ -768,6 +774,15 @@ struct ToolCallAccum {
     arguments: String,
 }
 
+/// Upper bound on the tool-call accumulator index a stream may address.
+/// `index` comes straight off the wire and sizes the accumulator `Vec` in
+/// one step — a hostile or broken upstream naming an absurd index turns a
+/// few-byte JSON fragment into billions of allocated entries. Legitimate
+/// parallel tool-call streams never approach this bound (the request runs
+/// n=1; even multi-call responses are single digits), so anything at or
+/// past the cap is dropped (warn-once) instead of accumulated.
+const MAX_TOOL_CALL_INDEX: usize = 128;
+
 struct SseParser {
     pending: Vec<ToolCallAccum>,
     /// Which indices already emitted a [`StreamChunk::ToolCallPreview`]
@@ -780,6 +795,10 @@ struct SseParser {
     /// The last finish_reason seen on a terminal chunk; surfaced on
     /// [`StreamChunk::End`].
     finish_reason: Option<String>,
+    /// Warn-once latch for out-of-range tool-call indices (see
+    /// [`MAX_TOOL_CALL_INDEX`]) — a flood of dropped fragments must not
+    /// flood the log either.
+    index_overflow_warned: bool,
 }
 
 impl SseParser {
@@ -790,6 +809,7 @@ impl SseParser {
             content: String::new(),
             reasoning: String::new(),
             finish_reason: None,
+            index_overflow_warned: false,
         }
     }
 
@@ -825,6 +845,17 @@ impl SseParser {
                     name,
                     arguments,
                 } => {
+                    if index >= MAX_TOOL_CALL_INDEX {
+                        if !self.index_overflow_warned {
+                            self.index_overflow_warned = true;
+                            tracing::warn!(
+                                index,
+                                cap = MAX_TOOL_CALL_INDEX,
+                                "tool-call index beyond the accumulator cap; fragment dropped"
+                            );
+                        }
+                        continue;
+                    }
                     while self.pending.len() <= index {
                         self.pending.push(ToolCallAccum {
                             id: None,
@@ -1063,6 +1094,42 @@ mod sse_parser_tests {
         };
         let ids: Vec<&str> = tcs.iter().map(|tc| tc.id.as_str()).collect();
         assert_eq!(ids, vec!["id0", "id1"]);
+    }
+
+    #[test]
+    fn absurd_index_is_dropped_not_accumulated() {
+        // A hostile/broken upstream can name an absurd tool-call index; the
+        // accumulator Vec must not size itself to it (a few-byte JSON
+        // fragment would otherwise allocate billions of entries). Fragments
+        // at/ past the cap are dropped; the real calls keep flowing and the
+        // stream stays healthy.
+        let mut p = SseParser::new();
+        let absurd = 100_000_000usize;
+        // No panic / no hang / no allocation at absurd scale:
+        p.feed(vec![tf(absurd, Some("ghost"), Some("x"), r#"{}"#)]);
+        // The legit call on index 0 still accumulates and flushes.
+        p.feed(vec![tf(0, Some("real"), Some("bash"), r#"{"c":1}"#)]);
+        p.feed(vec![tf(absurd + 1, None, None, "more")]);
+        let flushed = p.flush();
+        let StreamChunk::ToolCalls(tcs) = &flushed[0] else {
+            panic!("expected ToolCalls");
+        };
+        assert_eq!(tcs.len(), 1, "only the legit call is accumulated");
+        assert_eq!(tcs[0].id, "real");
+        assert_eq!(tcs[0].name, "bash");
+        // The cap itself stays addressable (boundary: cap-1 works).
+        let mut p = SseParser::new();
+        p.feed(vec![tf(
+            MAX_TOOL_CALL_INDEX - 1,
+            Some("edge"),
+            Some("t"),
+            r#"{}"#,
+        )]);
+        let flushed = p.flush();
+        let StreamChunk::ToolCalls(tcs) = &flushed[0] else {
+            panic!("expected ToolCalls");
+        };
+        assert_eq!(tcs[0].id, "edge");
     }
 
     #[test]

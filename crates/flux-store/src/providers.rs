@@ -67,6 +67,39 @@ impl Store {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    /// One provider row by id — the registry's edit path reads the CURRENT
+    /// row here (the api_key tri-state merges against it; the key never
+    /// lives in memory outside the ctor closure).
+    pub async fn get_provider(&self, id: &str) -> Result<Option<ProviderRow>> {
+        let row: Option<(String, String, Option<String>, Option<String>)> =
+            sqlx::query_as("SELECT id, type, url, api_key FROM providers WHERE id = ?1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await?;
+        Ok(row.map(|(id, protocol, url, api_key)| ProviderRow {
+            id,
+            protocol,
+            url,
+            api_key,
+        }))
+    }
+
+    /// Overwrite one provider row (url / api_key / type; the id is the
+    /// WHERE key, never a written column). Returns whether the row
+    /// existed — the race guard for a concurrent delete between the
+    /// registry's read and this write.
+    pub async fn update_provider(&self, row: &ProviderRow) -> Result<bool> {
+        let result =
+            sqlx::query("UPDATE providers SET type = ?2, url = ?3, api_key = ?4 WHERE id = ?1")
+                .bind(&row.id)
+                .bind(&row.protocol)
+                .bind(&row.url)
+                .bind(&row.api_key)
+                .execute(&self.pool)
+                .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 #[cfg(test)]
@@ -130,5 +163,58 @@ mod tests {
         assert!(store.delete_provider("main").await.unwrap());
         assert!(!store.delete_provider("main").await.unwrap());
         assert!(store.list_providers().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn update_replaces_fields_id_stays_the_key() {
+        let store = test_store().await;
+        store.insert_provider(&row("main")).await.unwrap();
+        // Full-row overwrite: type / url / api_key all land; the id is the
+        // WHERE key — a renamed row would be a different row.
+        assert!(
+            store
+                .update_provider(&ProviderRow {
+                    id: "main".to_string(),
+                    protocol: "openai".to_string(),
+                    url: Some("https://new.example.com/v1".to_string()),
+                    api_key: Some("sk-new".to_string()),
+                })
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            store.get_provider("main").await.unwrap().unwrap(),
+            ProviderRow {
+                id: "main".to_string(),
+                protocol: "openai".to_string(),
+                url: Some("https://new.example.com/v1".to_string()),
+                api_key: Some("sk-new".to_string()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn update_unknown_id_reports_false() {
+        let store = test_store().await;
+        assert!(!store.update_provider(&row("ghost")).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn get_provider_round_trips_optionality() {
+        let store = test_store().await;
+        assert!(store.get_provider("main").await.unwrap().is_none());
+        store
+            .insert_provider(&ProviderRow {
+                id: "main".to_string(),
+                protocol: "openai".to_string(),
+                url: None,
+                api_key: None,
+            })
+            .await
+            .unwrap();
+        let got = store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(got.id, "main");
+        assert_eq!(got.url, None);
+        assert_eq!(got.api_key, None);
     }
 }

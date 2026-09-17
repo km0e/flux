@@ -24,6 +24,35 @@ export const PREVIEW_MIN_WIDTH = 280;
 export const PREVIEW_MAX_WIDTH = 1080;
 export const PREVIEW_DEFAULT_WIDTH = 480;
 
+/** The conversation column's floor — the width both draggable panes must
+ * always leave behind on THIS viewport. One constant so the drag clamps,
+ * the aria band, and the CSS width guard on `#right-dock` (app.css) can
+ * never drift apart: sidebar 360 + dock 520 once squeezed an 800px tablet
+ * viewport's conversation to −80px, because each pane clamped against the
+ * viewport ALONE. */
+export const CONVERSATION_MIN_WIDTH = 280;
+
+/** Sidebar clamp, dock-aware: an OPEN dock's width plus the conversation
+ * floor bounds how wide the sidebar may go here (dock closed → pass 0 and
+ * the familiar 160–360 band applies). The pane's own minimum floors LAST —
+ * a narrow viewport narrows the band, it never breaks the floor. */
+export function clampSidebarWidth(x: number, viewportWidth: number, dockWidth: number): number {
+  const viewportMax = viewportWidth - dockWidth - CONVERSATION_MIN_WIDTH;
+  return Math.max(
+    SIDEBAR_MIN_WIDTH,
+    Math.min(SIDEBAR_MAX_WIDTH, viewportMax, x),
+  );
+}
+
+/** Dock clamp, sidebar-aware — the mirror of clampSidebarWidth. */
+export function clampPreviewWidth(x: number, viewportWidth: number, sidebarWidth: number): number {
+  const viewportMax = viewportWidth - sidebarWidth - CONVERSATION_MIN_WIDTH;
+  return Math.max(
+    PREVIEW_MIN_WIDTH,
+    Math.min(PREVIEW_MAX_WIDTH, viewportMax, x),
+  );
+}
+
 /** The persisted collapse choice, if the user ever toggled explicitly. */
 export function readStoredSidebarOpen(): boolean | null {
   try {

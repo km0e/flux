@@ -1,6 +1,7 @@
 import { defineConfig } from 'vitest/config';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
+import { visualizer } from 'rollup-plugin-visualizer';
 
 /** Vendor chunk groups — see the manualChunks comment in `build` below. */
 const VENDOR_GROUPS: Array<[string, string[]]> = [
@@ -54,8 +55,20 @@ const VENDOR_GROUPS: Array<[string, string[]]> = [
 //    chunk-cycle risk.
 //
 // One CSS file stays (cssCodeSplit: false).
+// Bundle analysis is BUILD-TIME only and opt-in (FLUX_BUNDLE_ANALYZE=1,
+// the CI web job sets it): the treemap lands in dist/stats.html as a CI
+// artifact — never shipped, never loaded by the app. The env read goes
+// through a structural cast because tsconfig targets DOM-only types (no
+// @types/node) and vite.config rides the app typecheck.
+const BUNDLE_ANALYZE = (globalThis as { process?: { env?: Record<string, string | undefined> } })
+  .process?.env?.FLUX_BUNDLE_ANALYZE;
+
 export default defineConfig({
-  plugins: [react(), tailwindcss()],
+  plugins: [
+    react(),
+    tailwindcss(),
+    BUNDLE_ANALYZE ? visualizer({ filename: 'dist/stats.html', gzipSize: true }) : undefined,
+  ],
   // Dev workflow: `npm run dev` serves the UI on Vite's own port and
   // proxies the same-origin /ws upgrade to the flux-server listener.
   server: {
@@ -112,6 +125,22 @@ export default defineConfig({
       include: ['src/**'],
       exclude: ['src/gen/**', 'src/test/**', 'src/assets/**', 'src/**/__tests__/**'],
       reporter: ['text-summary'],
+      // Regression floors, set just under the measured baseline (the point
+      // is to catch a coverage DROP, not to force new tests): the floors
+      // only ratchet when a deliberate improvement lands.
+      thresholds: {
+        // Global (everything measured).
+        lines: 80,
+        functions: 75,
+        branches: 65,
+        // lib/ is the highest-coverage code (pure functions, mirrored
+        // suites) — the tightest floor.
+        'src/lib/**': { lines: 92, functions: 85, branches: 80 },
+        // core/ carries the wire translation (grpc.ts / grpc-send.ts are
+        // exercised mostly through the e2e harness, not jsdom) — a looser
+        // floor than lib, still a real guard.
+        'src/core/**': { lines: 72, functions: 72, branches: 52 },
+      },
     },
   },
 });

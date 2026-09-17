@@ -13,7 +13,7 @@
  *           addProvider, removeProvider, handleProviderModelsReply
  * Depends: core/grpc.ts, core/state.ts, logger.ts
  */
-import { grpcAddProvider, grpcFetchProviders, grpcProbeProvider, grpcRemoveProvider } from '../core/grpc';
+import { grpcAddProvider, grpcFetchProviders, grpcProbeProvider, grpcRemoveProvider, grpcUpdateProvider } from '../core/grpc';
 import { bridge } from '../core/bridge';
 import { useFlux } from '../core/state';
 import { log } from '../logger';
@@ -76,6 +76,20 @@ export function addProvider(input: {
  * undefined on success. */
 export function removeProvider(id: string): Promise<string | undefined> {
   return grpcRemoveProvider(id);
+}
+
+/** Edit a provider's endpoint behind its id (url / api_key — the id never
+ * changes: it is what chat pins and saved models reference). api_key
+ * omitted = keep the stored key. Resolves with the inline error, or
+ * undefined on success (the fresh list arrives via the `providers`
+ * broadcast; pinned chats hot-apply the fresh endpoint at their next
+ * round boundary — no interruption). */
+export function updateProvider(input: {
+  id: string;
+  url?: string;
+  api_key?: string;
+}): Promise<string | undefined> {
+  return grpcUpdateProvider(input);
 }
 
 /** Hot-swap the conversation's provider (lease holder only). The swap

@@ -19,7 +19,8 @@ use flux_proto::flux::v1::{
     ListSkillsResponse, ModelCatalogEntry, ModelSummary, ProviderSummary, RemoveModelRequest,
     RemoveModelResponse, RemoveProviderRequest, RemoveProviderResponse, RemoveServerRequest,
     RemoveServerResponse, RemoveSkillRequest, RemoveSkillResponse, SaveModelRequest,
-    SaveModelResponse, SkillSummary, SyncModelsRequest, SyncModelsResponse,
+    SaveModelResponse, SkillSummary, SyncModelsRequest, SyncModelsResponse, UpdateProviderRequest,
+    UpdateProviderResponse,
 };
 use flux_session::ServerState;
 use std::collections::HashMap;
@@ -114,6 +115,38 @@ impl ProviderService for ProviderManagement {
             management::broadcast_providers(&self.state, &self.registry).await;
         }
         Ok(tonic::Response::new(RemoveProviderResponse {
+            id: m.id,
+            error: m.error,
+        }))
+    }
+
+    async fn update_provider(
+        &self,
+        request: Request<UpdateProviderRequest>,
+    ) -> Result<tonic::Response<UpdateProviderResponse>, tonic::Status> {
+        let req = request.into_inner();
+        let m = management::update_provider(
+            &self.registry,
+            req.id.clone(),
+            req.protocol,
+            req.url,
+            req.api_key,
+        )
+        .await;
+        if m.error.is_none() {
+            // The save_model order: broadcast the fresh registry first
+            // (the dialogs update WITHOUT a refetch), then re-resolve the
+            // pinned chats — the fresh endpoint reaches live engines as a
+            // carried-pin rebuild at the next machine gate.
+            management::broadcast_providers(&self.state, &self.registry).await;
+            let registry = Arc::clone(&self.registry);
+            self.state
+                .refresh_chats_pinned_to(&m.id, move |id, model| {
+                    registry.instance(id, model).ok().map(|(p, _, _)| p)
+                })
+                .await;
+        }
+        Ok(tonic::Response::new(UpdateProviderResponse {
             id: m.id,
             error: m.error,
         }))

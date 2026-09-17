@@ -134,6 +134,10 @@ where
         )
         .route(
             "/flux.v1.ProviderService/RemoveProvider",
+            post_service(providers.clone()),
+        )
+        .route(
+            "/flux.v1.ProviderService/UpdateProvider",
             post_service(providers),
         )
         .route(

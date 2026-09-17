@@ -541,10 +541,12 @@ fn hold_at_idle_fires_the_gate_immediately() {
 }
 
 #[test]
-fn gate_fires_with_pending_voids_intact() {
-    // Post-cancel pending residue (deferred void delivery) SURVIVES the
-    // gate: the next round's request must still resolve every committed
-    // tool_call.
+fn gate_fire_discards_pending_residue_the_rebuilt_prefix_carries_it() {
+    // Post-cancel pending residue (deferred void delivery) is DISCARDED at
+    // the gate: the rebuilt connection is begun over the full persisted
+    // history, which already carries it — keeping it would re-send the
+    // tool result twice on the next round's request. (Regression: the old
+    // behavior kept the residue and duplicated it after a rebuild.)
     let mut m = m();
     enter_processing(&mut m, vec![call("c1", "t")]);
     m.step(Input::Cancel);
@@ -555,15 +557,62 @@ fn gate_fires_with_pending_voids_intact() {
     assert_eq!(m.state(), &State::Idle);
     let step = m.step(Input::Hold);
     assert_eq!(step.facts, vec![Fact::GateReleased]);
-    // Pending survived: the next request still carries the tool result.
+    // Pending was discarded: the next request carries ONLY the user
+    // message (the tool result rides the rebuilt connection's prefix,
+    // which was begun over the transcript that already persisted it).
     let step = m.step(Input::UserMessage("next".into()));
     let Fact::ModelInputRequested(pending) = &step.facts[1] else {
         panic!("model input requested");
     };
+    assert_eq!(pending, &vec![Message::user("next")]);
+}
+
+#[test]
+fn queued_turn_pre_gate_still_delivers_pending_residue() {
+    // The DISCARD happens only at the gate FIRE: a queued turn started
+    // before it runs on the PRE-rebuild connection, whose prefix does not
+    // carry the residue yet — the deferred voids/results must still ride
+    // that round's request, or the provider prefix keeps a dangling
+    // tool_call.
+    let mut m = m();
+    enter_processing(
+        &mut m,
+        vec![call("inflight", "slow"), call("queued", "later")],
+    );
+    m.step(Input::Hold); // armed
+    m.step(Input::Cancel); // queued tool voided into pending
+    m.step(Input::UserMessage("interject".into())); // queued pre-gate
+    // The in-flight result resolves the round; the armed gate defers to
+    // the queued turn, which takes the residue into ITS request.
+    let step = m.step(Input::ToolFinished {
+        call: call("inflight", "slow"),
+        result: "partial".into(),
+    });
+    let Fact::ModelInputRequested(pending) = &step.facts
+        .iter()
+        .find(|f| matches!(f, Fact::ModelInputRequested(_)))
+        .unwrap()
+    else {
+        panic!("model input requested");
+    };
     assert_eq!(
         pending,
-        &vec![Message::tool("c1", "partial"), Message::user("next")]
+        &vec![
+            Message::tool("queued", "cancelled by user"),
+            Message::tool("inflight", "partial"),
+            Message::user("interject"),
+        ]
     );
+    // The queued round wraps → the gate fires → the residue (already
+    // delivered) is gone from the machine.
+    let step = m.step(chunk(StreamChunk::End { finish_reason: None }));
+    assert_eq!(*step.facts.last().unwrap(), Fact::GateReleased);
+    assert_eq!(m.state(), &State::Idle);
+    let step = m.step(Input::UserMessage("next".into()));
+    let Fact::ModelInputRequested(pending) = &step.facts[1] else {
+        panic!("model input requested");
+    };
+    assert_eq!(pending, &vec![Message::user("next")]);
 }
 
 #[test]

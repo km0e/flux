@@ -10,11 +10,13 @@
 //! line-based paging would inherit exactly the line-length problem the
 //! buffer exists to solve.
 //!
-//! Lifetime: entries are NEVER overwritten (a call id maps to exactly
-//! one output) and never wiped by new activity — a chat's transcript only
-//! grows, so an entry lives exactly as long as its chat (FK cascade), and
-//! a fork copies the entries its copied transcript carries. The store is
-//! the only truth: entries survive engine rebuilds AND process restarts.
+//! Lifetime: a call id maps to exactly one output — the overflow path
+//! writes once per call (the store upserts, so a re-write would REPLACE,
+//! never duplicate) — and entries are never wiped by new activity. A
+//! chat's transcript only grows, so an entry lives exactly as long as
+//! its chat (FK cascade), and a fork copies the entries its copied
+//! transcript carries. The store is the only truth: entries survive
+//! engine rebuilds AND process restarts.
 
 use async_trait::async_trait;
 use flux_core::BUF_READ_TOOL;

@@ -24,9 +24,9 @@ use flux_core::{OutputPort, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::Mutex as StdMutex;
 use std::sync::atomic::AtomicBool;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 /// Per-chat resources the registry assembly binds tools to.
 pub(crate) struct ChatKit<'a> {
@@ -153,11 +153,13 @@ pub async fn spawn(
     // Peer 2: the round consumer (the fact-trace fold; owns the done flag
     // and the supervised tool flights).
     let done = Arc::new(AtomicBool::new(false));
-    let state_slot = Arc::new(StdMutex::new(flux_core::ChatStateKind::Idle));
+    // The round-state slot: one watch sender shared between the consumer
+    // (writer) and the handle (snapshot readers + transition subscribers).
+    let state_tx = Arc::new(watch::channel(flux_core::ChatStateKind::Idle).0);
     let deps = RoundDeps {
         chat: chat.clone(),
         wire: Arc::clone(&wire),
-        state_slot: state_slot.clone(),
+        state_tx: Arc::clone(&state_tx),
         connection,
         // In-place rebuild materials: the consumer re-assembles from
         // these at every fired gate (the global registry's Arc sees MCP
@@ -183,6 +185,6 @@ pub async fn spawn(
         RoundControl::new(ctrl_tx),
         aborts,
         done,
-        state_slot,
+        state_tx,
     )
 }

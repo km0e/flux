@@ -21,10 +21,11 @@ import { clearChatPane } from '../services/panes';
 import { deleteDraft } from '../services/drafts';
 import { dialogs } from '../services/dialogs';
 import { startNewChatFlow } from '../services/new-chat';
+import { selectChat } from '../services/commands';
 // The Files tree (react-arborist + react-window) is a secondary surface —
 // loaded on first Files-tab activation instead of the initial bundle.
 const Explorer = lazy(() => import('./Explorer'));
-import { Button, Badge, TextField, IconButton } from './ui';
+import { Button, Badge, TextField, IconButton, Spinner } from './ui';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from './ui/tabs';
 import {
   DropdownMenu,
@@ -121,31 +122,42 @@ function ChatRow(props: {
   const commit = () => props.onCommitRename(c.id, draft.trim()); // '' = cancel
 
   const active = c.id === activeId;
+  // Running = the server's round-boundary truth (any window) OR this
+  // window's own round-level flag — the local flag is instant (set at
+  // send), the broadcast truth lags it by at most a frame.
+  const localStreaming = useFlux((s) => s.streaming[c.id] ?? false);
+  const running = (c.running ?? false) || localStreaming;
   return (
-    <div
-      role="button"
-      tabIndex={0}
-      aria-current={active ? 'true' : undefined}
-      aria-label={`Open chat ${c.name || 'New Chat'}`}
-      className={cn(
-        // The 2px left rail is the selection marker: every row carries it
-        // (transparent when inactive) so the active state never shifts layout.
-        'group/row flex cursor-pointer items-center gap-1 border-l-2 px-3 py-2',
-        'transition-colors duration-fast focus:outline-none',
-        active
-          ? 'border-l-accent bg-active'
-          : cn('border-l-transparent', 'hover:bg-hover'),
-      )}
-      onClick={() => props.onSelect(c.id)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' || e.key === ' ') {
-          e.preventDefault();
-          props.onSelect(c.id);
-        } else {
-          props.onRowKeyDown(e, c.id);
-        }
-      }}
-    >
+    // The wrapper owns the hover group + the menu's positioning context —
+    // the menu is a SIBLING of the role=button row, not a child: a button
+    // inside a button is a nested-interactive violation (axe serious), and
+    // the overlay costs nothing (the menu never needed the row's flex).
+    <div className="group/row relative">
+      <div
+        role="button"
+        tabIndex={0}
+        aria-current={active ? 'true' : undefined}
+        aria-label={`Open chat ${c.name || 'New Chat'}${running ? ', running' : ''}`}
+        className={cn(
+          // The 2px left rail is the selection marker: every row carries it
+          // (transparent when inactive) so the active state never shifts layout.
+          // pr-8 reserves the corner where the (sibling) actions menu overlays.
+          'flex cursor-pointer items-center gap-1 border-l-2 pl-3 pr-8 py-2',
+          'transition-colors duration-fast focus:outline-none',
+          active
+            ? 'border-l-accent bg-active'
+            : cn('border-l-transparent', 'hover:bg-hover'),
+        )}
+        onClick={() => props.onSelect(c.id)}
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            props.onSelect(c.id);
+          } else {
+            props.onRowKeyDown(e, c.id);
+          }
+        }}
+      >
       <div className="min-w-0 flex-1">
         {props.renaming ? (
           /* Edit mode: swallow click/keys so the row's select and menu
@@ -180,6 +192,11 @@ function ChatRow(props: {
         ) : (
           <>
             <div className="flex items-center gap-1.5">
+              {/* The sidebar's running marker: a round is in flight on this
+                  chat — visible for chats running in OTHER windows too (the
+                  server's chats broadcast carries the flag), not just for
+                  streams this window observes. */}
+              {running && <Spinner className="size-2.5 shrink-0 text-accent" />}
               <span className="truncate text-sm">{c.name || 'New Chat'}</span>
               {/* wire active = lease held by ANY window (incl. this one) —
                   only flag it when the holder is NOT the selected chat, and
@@ -205,12 +222,15 @@ function ChatRow(props: {
           </>
         )}
       </div>
+      </div>
       {!props.renaming && (
-        <ChatRowMenu
-          label={`Chat actions for ${c.name || 'chat'}`}
-          onRename={() => props.onStartEditing(c.id)}
-          onDelete={() => props.onDelete(c.id)}
-        />
+        <div className="absolute top-1/2 right-1.5 -translate-y-1/2">
+          <ChatRowMenu
+            label={`Chat actions for ${c.name || 'chat'}`}
+            onRename={() => props.onStartEditing(c.id)}
+            onDelete={() => props.onDelete(c.id)}
+          />
+        </div>
       )}
     </div>
   );
@@ -260,13 +280,9 @@ export function Sidebar(): React.ReactElement {
 
   const onSelect = (id: string) => {
     log.info('sidebar: select ' + id);
-    useFlux.setState({ activeChatId: id });
-    // Mobile regime (the ONE breakpoint — app.css matches ≤767.5px) runs
-    // the sidebar as an overlay drawer: a selection implies "I'm done
-    // navigating" — close it so the conversation shows.
-    if (window.innerWidth <= 767.5) {
-      useFlux.setState({ sidebarOpen: false });
-    }
+    // The shared switch path (services/commands.ts) — the command
+    // palette's chat entries ride the exact same flow.
+    selectChat(id);
     // No standalone chat_open — an activeChatId change triggers
     // switchLease in mount → chat_claim, the single message carrying
     // history snapshot + subscription + lease. When occupied,

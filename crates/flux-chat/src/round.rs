@@ -39,8 +39,9 @@ use flux_core::{
     ToolDefinition, ToolRegistry, WireEvent,
 };
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 
 /// Commands ops sends to the round consumer.
 pub(crate) enum RoundCmd {
@@ -81,7 +82,11 @@ pub(crate) struct RoundDeps {
     pub(crate) chat: Arc<Chat>,
     /// The wire sink (production: the router; tests: a collector).
     pub(crate) wire: Arc<dyn OutputPort>,
-    pub(crate) state_slot: Arc<StdMutex<ChatStateKind>>,
+    /// The round-state slot. Written ONLY on a real transition
+    /// (`send_if_modified` — the loop already dedupes its own reports);
+    /// readers subscribe for the Idle↔Streaming boundaries or `borrow()`
+    /// the current truth.
+    pub(crate) state_tx: Arc<watch::Sender<ChatStateKind>>,
     /// The connection the loop's `ModelInputRequested` opens. Replaced in
     /// place at every fired gate — the in-place rebuild's whole point.
     pub(crate) connection: Box<dyn Connection>,
@@ -254,7 +259,14 @@ pub(crate) async fn run_round(
                         gate_awaited = false;
                     }
                     LoopFact::RoundState(kind) => {
-                        *deps.state_slot.lock().unwrap() = kind;
+                        deps.state_tx.send_if_modified(|cur| {
+                            if *cur == kind {
+                                false
+                            } else {
+                                *cur = kind;
+                                true
+                            }
+                        });
                     }
                 }
             }

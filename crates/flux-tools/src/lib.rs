@@ -23,7 +23,10 @@ mod subprocess;
 #[cfg(test)]
 pub(crate) mod test_util;
 
-pub use fs::{EditFileTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool, WriteFileTool};
+pub use fs::{
+    EditFileTool, EditFilesTool, ListDirectoryTool, ReadFileTool, ReadFilesTool, ReplaceLinesTool,
+    WriteFileTool,
+};
 pub use search::{GlobTool, GrepTool};
 pub use shell::BashTool;
 pub use skills::{
@@ -56,12 +59,19 @@ pub(crate) fn format_command_output(
         result.push_str("--- stderr ---\n");
         result.push_str(stderr);
     }
+    let code = status.as_ref().and_then(|s| s.code());
     if result.is_empty() {
-        result = if let Some(s) = status {
-            format!("(exit code: {})", s.code().unwrap_or(-1))
+        result = if status.is_some() {
+            format!("(exit code: {})", code.unwrap_or(-1))
         } else {
             "(no output)".to_string()
         };
+    } else if let Some(c) = code.filter(|c| *c != 0) {
+        // Non-zero WITH output: carry the code as a trailing marker so the
+        // failure is visible without cross-referencing stderr's presence
+        // (the model reads it; the web client's tool-card verdict sniffs
+        // the exact same suffix).
+        result.push_str(&format!("\n(exit code: {c})"));
     }
     result.trim_end().to_string()
 }
@@ -143,6 +153,7 @@ pub(crate) fn walk_dir(
 mod tests {
     use super::*;
     use std::fs;
+    use std::os::unix::process::ExitStatusExt;
     use tempfile::tempdir;
 
     #[test]
@@ -201,5 +212,16 @@ mod tests {
     fn format_command_output_shows_exit_code_when_empty() {
         let out = format_command_output("", "", Some(std::process::ExitStatus::default()));
         assert!(out.contains("exit code") || out == "(no output)");
+    }
+
+    #[test]
+    fn format_command_output_appends_nonzero_exit_code_marker() {
+        // A real ExitStatus for code 3 (Unix wait status = 3 << 8).
+        let failed = std::process::ExitStatus::from_raw(3 << 8);
+        let out = format_command_output("partial output", "", Some(failed));
+        assert_eq!(out, "partial output\n(exit code: 3)");
+        // Zero exit stays unmarked.
+        let ok = std::process::ExitStatus::from_raw(0);
+        assert_eq!(format_command_output("fine", "", Some(ok)), "fine");
     }
 }

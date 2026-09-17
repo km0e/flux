@@ -104,7 +104,18 @@ jobs:
 
       - name: Build the web UI
         working-directory: clients/web
+        env:
+          # Build-time-only bundle treemap (vite.config.ts) → dist/stats.html,
+          # uploaded below; CI is the one place the artifact is produced.
+          FLUX_BUNDLE_ANALYZE: "1"
         run: pnpm run build:fast
+
+      - name: Upload bundle analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: bundle-stats
+          path: clients/web/dist/stats.html
+          if-no-files-found: error
 
   # Headless e2e smoke over the REAL stack: cargo-built flux-server + the
   # built UI + a scripted SSE provider, driven by e2e/ui-check.mjs (raw CDP,

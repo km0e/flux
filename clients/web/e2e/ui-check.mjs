@@ -33,7 +33,7 @@
  * (auto-detected; override with FLUX_CHROME=/path/to/chrome).
  */
 import { spawn, execSync } from 'node:child_process';
-import { mkdtempSync, writeFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
+import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import path from 'node:path';
@@ -482,6 +482,43 @@ async function main() {
     `outline-style: ${f.outlineStyle}, border ${restBorder} → ${f.focusedBorder}`,
   );
 
+  // ── Accessibility scans (axe-core, a devDependency — its SOURCE is
+  // injected into the page here, so the harness's runtime stays zero-dep).
+  // The color-contrast rule is disabled deliberately: the faint text token
+  // sits just under AA on bg/inset BY DESIGN (the tiered text-voice
+  // hierarchy, documented in tokens.css) — that tradeoff is T-faint's, not
+  // axe's to re-litigate; 'region' is disabled because the app shell is
+  // not landmark-partitioned. Everything else must be clean of
+  // critical/serious violations.
+  const axeSource = readFileSync(path.join(WEB_DIR, 'node_modules', 'axe-core', 'axe.min.js'), 'utf8');
+  await evalJs(axeSource);
+  const axeScan = async (label) => {
+    const violations = JSON.parse(
+      await evalJs(`(async () => {
+        const res = await window.axe.run(document, {
+          resultTypes: ['violations'],
+          rules: { 'color-contrast': { enabled: false }, 'region': { enabled: false } },
+        });
+        return JSON.stringify(
+          res.violations
+            .filter((v) => v.impact === 'critical' || v.impact === 'serious')
+            .map((v) => ({
+              id: v.id,
+              impact: v.impact,
+              nodes: v.nodes.slice(0, 3).map((n) => ({
+                target: n.target.join(' '),
+                html: (n.html || '').slice(0, 140),
+              })),
+            })),
+        );
+      })()`),
+    );
+    check(`axe[${label}]: no critical/serious violations`, violations.length === 0, JSON.stringify(violations));
+  };
+
+  // The fresh chat's empty state is on screen — the first scan.
+  await axeScan('empty-state');
+
   // 4. Send a message; the fake provider answers with a bash tool call.
   await evalJs(`(() => {
     const ta = document.getElementById('input');
@@ -498,6 +535,82 @@ async function main() {
     'tool result text',
   );
   check('tool round completes (SSE → kernel → WS → DOM)', true);
+
+  // The second scripted call (`exit 3`, no output) must land as an exit
+  // verdict — the kernel's "(exit code: 3)" suffix classified into the
+  // warn status voice (dom.ts). The success card stays plain 'completed'.
+  await waitFor(
+    `[...document.querySelectorAll('.tool.tool-exit .tool-status')].some(s => s.textContent.includes('exit 3'))`,
+    'exit verdict on the failing card',
+  );
+  const verdicts = await evalJs(
+    `[...document.querySelectorAll('.tool.done')].map(t => t.querySelector('.tool-status')?.textContent.trim() ?? '').join(' | ')`,
+  );
+  check(
+    'failing command paints the exit verdict; success stays completed',
+    /exit 3/.test(verdicts) && /completed/.test(verdicts),
+    verdicts,
+  );
+  // The full conversation surface (prose sample + both verdict cards) has
+  // rendered — scan it.
+  await axeScan('conversation');
+
+  // 4.4 Transcript search (Ctrl/Cmd+F) — REAL-CHROME ONLY: the CSS Custom
+  // Highlight API has no jsdom twin, so the intercept, the outside-paint,
+  // and the navigation are asserted here against the live pane. The
+  // expected count is derived from the pane's own text — no hardcoded
+  // fixture knowledge.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!!document.getElementById('transcript-search')`, 'search bar opens (Ctrl+F intercept)');
+  await evalJs(`(() => {
+    const input = document.querySelector('#transcript-search input');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'hello-flux');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`(CSS.highlights.get('flux-search')?.size ?? 0) > 0`, 'highlights registered');
+  const searchState = JSON.parse(
+    await evalJs(`(() => {
+      const pane = [...document.querySelectorAll('.chat-pane')].find((p) => p.style.display !== 'none');
+      const all = CSS.highlights.get('flux-search');
+      const cur = CSS.highlights.get('flux-search-current');
+      return JSON.stringify({
+        count: all.size,
+        expected: (pane.textContent.match(/hello-flux/g) || []).length,
+        current: cur ? cur.size : -1,
+        counter: document.querySelector('#transcript-search [aria-live]').textContent.trim(),
+      });
+    })()`,
+  ));
+  check(
+    'search paints every rendered occurrence',
+    searchState.count === searchState.expected && searchState.expected >= 2,
+    `${searchState.count} highlights vs ${searchState.expected} in text`,
+  );
+  check('exactly one current match', searchState.current === 1);
+  await evalJs(
+    `document.querySelector('#transcript-search input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`,
+  );
+  const counterAfter = await evalJs(
+    `document.querySelector('#transcript-search [aria-live]').textContent.trim()`,
+  );
+  check('Enter advances the current match', counterAfter !== searchState.counter, `${searchState.counter} → ${counterAfter}`);
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!document.getElementById('transcript-search')`, 'search closes on Escape');
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!!document.getElementById('transcript-search')`, 'search reopens');
+  const remembered = await evalJs(`document.querySelector('#transcript-search input').value`);
+  check('reopening restores the query (find-bar memory)', remembered === 'hello-flux', remembered);
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(200);
 
   // 4.5 Fork, LIVE path: the user message persisted announcement
   // (`message_persisted`) must attach the fork affordance to the sender's
@@ -865,6 +978,7 @@ async function main() {
       `document.getElementById('input') ? getComputedStyle(document.getElementById('input')).fontSize : null`,
     );
     check('mobile: composer input is 16px (iOS auto-zoom guard)', inputFont === '16px', `font=${inputFont}`);
+    await axeScan('mobile');
 
     // The desktop flow may have left the Files tab active — the chat rows
     // live in the Chats tab. Radix TabsTrigger needs a trusted pointer
@@ -1023,6 +1137,130 @@ async function main() {
     await send('Emulation.setTouchEmulationEnabled', { enabled: false });
     await sleep(400);
   }
+
+  // 9. Command palette (Ctrl/Cmd+K) — desktop, two chats in the store.
+  // The intercept, the live registry, and the run-close sequence are
+  // asserted here; filtering/keyboard math is unit-covered.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(
+    `!!document.querySelector('[aria-label="Command palette"] input')`,
+    'palette opens (Ctrl+K intercept)',
+  );
+  const paletteListed = await evalJs(
+    `document.querySelector('[aria-label="Commands"]').textContent`,
+  );
+  check(
+    'palette lists actions and both chats',
+    paletteListed.includes('New chat') && paletteListed.includes('New Chat') && paletteListed.includes('(fork)'),
+    'all three entries present',
+  );
+  await evalJs(`(() => {
+    const input = document.querySelector('input[aria-label="Type a command"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'New Chat');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(150);
+  await evalJs(
+    `document.querySelector('input[aria-label="Type a command"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!document.querySelector('[aria-label="Command palette"]')`, 'palette closes after run');
+  // The forked chat was active when the palette opened — the run switched
+  // to the ORIGINAL conversation (mount → chat_claim carries its history).
+  await waitFor(
+    `(document.getElementById('chat-header')?.textContent ?? '').includes('New Chat')`,
+    'palette run switched the conversation',
+  );
+  check('palette runs the highlighted command (Enter)', true);
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!!document.querySelector('[aria-label="Command palette"] input')`, 'palette reopens');
+  const paletteQuery = await evalJs(`document.querySelector('input[aria-label="Type a command"]').value`);
+  check('palette input starts empty on reopen (transient query)', paletteQuery === '', paletteQuery);
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!document.querySelector('[aria-label="Command palette"]')`, 'palette closes on Escape');
+
+  // 10. Keyboard shortcuts sheet — '?' opens it on the bare app surface;
+  // the registry-driven rows and the composer rows render together.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(
+    `[...document.querySelectorAll('[role="dialog"]')].some((d) => d.textContent.includes('Keyboard shortcuts'))`,
+    'shortcuts sheet opens (?)',
+  );
+  const sheetText = await evalJs(
+    `[...document.querySelectorAll('[role="dialog"]')].map((d) => d.textContent).join('')`,
+  );
+  check(
+    'shortcuts sheet lists chords from the registry + composer rows',
+    sheetText.includes('Command palette') &&
+      sheetText.includes('Ctrl+B') &&
+      sheetText.includes('Ctrl+F') &&
+      sheetText.includes('Shift+Enter'),
+    'palette/B/F/composer rows present',
+  );
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(
+    `![...document.querySelectorAll('[role="dialog"]')].some((d) => d.textContent.includes('Keyboard shortcuts'))`,
+    'shortcuts sheet closes on Escape',
+  );
+  // The palette action drives the same sheet — one registry, both doors.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!!document.querySelector('input[aria-label="Type a command"]')`, 'palette reopens');
+  await evalJs(`(() => {
+    const input = document.querySelector('input[aria-label="Type a command"]');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'shortcuts');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(150);
+  await evalJs(
+    `document.querySelector('input[aria-label="Type a command"]').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(
+    `[...document.querySelectorAll('[role="dialog"]')].some((d) => d.textContent.includes('Keyboard shortcuts'))`,
+    'sheet opens via the palette action',
+  );
+  check('the palette action opens the same sheet', true);
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(200);
+
+  // 11. @-mention file completion — the tour workdir holds exactly
+  // notes.md, so the popup, the insert, and the close are all asserted.
+  await evalJs(`(() => {
+    const input = document.getElementById('input');
+    input.focus();
+    input.value = '@';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await waitFor(`!!document.getElementById('mention-popup')`, 'mention popup opens (@)');
+  // The first option (dirs first) is what Enter inserts — read it instead
+  // of hardcoding a fixture name the tour workdir may not hold.
+  const firstMention = await evalJs(
+    `document.querySelector('#mention-popup [role="option"]').textContent`,
+  );
+  await evalJs(
+    `document.getElementById('input').dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }))`,
+  );
+  await waitFor(`!document.getElementById('mention-popup')`, 'mention closes after insert');
+  const composerValue = await evalJs(`document.getElementById('input').value`);
+  check(
+    'Enter inserts the workdir-relative path',
+    composerValue === firstMention + ' ',
+    composerValue,
+  );
 
   // Done.
   const failed = results.filter((r) => !r.ok);

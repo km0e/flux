@@ -6,13 +6,14 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 import { useFlux, resetFluxForTest } from '../../core/state';
-import { addProvider, removeProvider, probeProvider, fetchProviders } from '../../services/providers';
+import { addProvider, removeProvider, probeProvider, fetchProviders, updateProvider } from '../../services/providers';
 import * as grpc from '../../core/grpc';
 
 vi.mock('../../core/grpc', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../core/grpc')>()),
   grpcAddProvider: vi.fn(async () => undefined),
   grpcRemoveProvider: vi.fn(async () => undefined),
+  grpcUpdateProvider: vi.fn(async () => undefined),
   grpcProbeProvider: vi.fn(async () => ({ models: [], error: undefined })),
   grpcFetchProviders: vi.fn(async () => undefined),
 }));
@@ -38,6 +39,18 @@ describe('providers service', () => {
     vi.mocked(grpc.grpcRemoveProvider).mockResolvedValueOnce('unknown provider id: gone');
     await expect(removeProvider('gone')).resolves.toBe('unknown provider id: gone');
     expect(vi.mocked(grpc.grpcRemoveProvider)).toHaveBeenCalledWith('gone');
+  });
+
+  it('updateProvider delegates; an empty api_key stays present (server-side clear)', async () => {
+    // A blank key maps to undefined (the wire tri-state's "keep").
+    await expect(updateProvider({ id: 'p', url: 'https://n/v1' })).resolves.toBeUndefined();
+    expect(vi.mocked(grpc.grpcUpdateProvider)).toHaveBeenCalledWith({
+      id: 'p',
+      url: 'https://n/v1',
+    });
+    // The inline error passes through untouched.
+    vi.mocked(grpc.grpcUpdateProvider).mockResolvedValueOnce('unknown provider id: ghost');
+    await expect(updateProvider({ id: 'ghost' })).resolves.toBe('unknown provider id: ghost');
   });
 
   it('fetchProviders delegates (the fresh list lands via the stream broadcast)', () => {

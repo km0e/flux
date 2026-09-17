@@ -16,7 +16,6 @@ import { getPane, getPaneIfExists, hideEmptyState } from './panes';
 import { stashForkDraft } from './forkDraft';
 import { takePaneStale } from './stream-handler';
 import { disposeController } from './stream';
-import { rebuildRoundFromHistory } from './artifacts';
 import { bridge } from '../core/bridge';
 import {
   buildForkButton,
@@ -293,11 +292,6 @@ export async function renderHistoryMessages(
     return;
   }
 
-  // The round artifact list rebuilds from the same snapshot (F-11): the
-  // last user message starts the current round. Same skip rule as the
-  // DOM above — a live round's list is already authoritative.
-  rebuildRoundFromHistory(chatId, messages);
-
   const pane = getPane(chatId);
 
   // Clear existing message DOM (keep empty state element)
@@ -313,9 +307,7 @@ export async function renderHistoryMessages(
 
   // Tail-first pagination: the FIRST render lays down only the LAST page
   // (the view opens at the bottom anyway — forceFollow below); older
-  // pages prepend on demand via the "load earlier" affordance. The
-  // artifacts rebuild above already consumed the FULL snapshot, so the
-  // round list is unaffected by what the DOM shows.
+  // pages prepend on demand via the "load earlier" affordance.
   const from = historyPageStart(messages, Math.max(0, messages.length - HISTORY_PAGE));
   const page = messages.slice(from);
   historyCursors.set(pane, { messages, from, fingerprint: historyFingerprint(messages) });

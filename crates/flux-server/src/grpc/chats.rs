@@ -67,6 +67,7 @@ fn chat_info(info: &flux_session::manager::ChatInfoOwned) -> ChatInfo {
         created_at: info.created_at.clone(),
         last_activity_at: info.last_activity_at.clone(),
         active: info.active,
+        running: info.running,
         workdir: info.workdir.clone(),
         provider: info.provider.clone(),
         model: info.model.clone(),

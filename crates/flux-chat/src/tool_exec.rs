@@ -40,7 +40,6 @@ pub use flux_core::INTERRUPTED_MARK;
 pub(crate) struct Flight {
     call: ToolCall,
     token: CancellationToken,
-    interrupted: bool,
 }
 
 /// Outcome of one tool flight, yielded by the JoinSet — exactly one per
@@ -92,11 +91,7 @@ impl Flights {
                 ..Default::default()
             },
         ));
-        self.active = Some(Flight {
-            call,
-            token,
-            interrupted: false,
-        });
+        self.active = Some(Flight { call, token });
     }
 
     /// The flight completion arm — joins the JoinSet (never empty when
@@ -111,8 +106,7 @@ impl Flights {
     /// in time contributes its partial result through the normal
     /// completion path; the grace clock force-terminates the rest.
     pub(crate) fn interrupt_all(&mut self) {
-        if let Some(flight) = &mut self.active {
-            flight.interrupted = true;
+        if let Some(flight) = &self.active {
             flight.token.cancel();
         }
     }

@@ -46,6 +46,14 @@ struct McpEntry {
     /// Re-lists the live session's tools (the tools/list_changed path);
     /// None for test fakes.
     relist: Option<flux_mcp::RelistFn>,
+    /// Which supervisor generation owns this entry. Each connect (restore,
+    /// add, respawn) mints a fresh generation and pairs it with BOTH the
+    /// entry and its supervisor task; every entry-mutating path re-checks
+    /// the pair under the lock. This closes the remove→re-add race: an old
+    /// supervisor waking from its backoff sleep (or a stale notice from a
+    /// dead session) can no longer adopt, clobber, or respawn over an
+    /// entry a NEWER supervisor now owns.
+    generation: u64,
 }
 
 /// Supervisor-visible liveness (rendered into the wire summary).
@@ -204,6 +212,9 @@ pub struct McpManager {
     /// chatty server can never flood the UI. Keyed by id; cleared on
     /// remove.
     notice_gates: std::sync::Mutex<HashMap<String, NoticeGate>>,
+    /// Monotonic source for [`McpEntry::generation`] — one fresh value per
+    /// connect (restore / add / respawn).
+    generation: std::sync::atomic::AtomicU64,
 }
 
 /// Token-bucket for one server's logging notifications: a small burst
@@ -268,9 +279,17 @@ impl McpManager {
                 backoff_base: BACKOFF_BASE,
                 backoff_max: BACKOFF_MAX,
                 notice_gates: std::sync::Mutex::new(HashMap::new()),
+                generation: std::sync::atomic::AtomicU64::new(0),
             },
             events_rx,
         )
+    }
+
+    /// Mint a fresh supervisor/entry generation.
+    fn next_generation(&self) -> u64 {
+        self.generation
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+            + 1
     }
 
     /// Startup restore: connect every launch-list row concurrently (one
@@ -287,10 +306,11 @@ impl McpManager {
         let connects = rows.into_iter().map(|row| async move {
             tracing::info!(id = %row.id, target = %connect_target(&row), "connecting to MCP");
             let cfg = config_for(&row);
-            let result = (self.connect)(cfg, self.wire_notices(&row.id)).await;
-            (row, result)
+            let generation = self.next_generation();
+            let result = (self.connect)(cfg, self.wire_notices(&row.id, generation)).await;
+            (row, generation, result)
         });
-        for (row, result) in futures_util::future::join_all(connects).await {
+        for (row, generation, result) in futures_util::future::join_all(connects).await {
             match result {
                 Ok(connected) => {
                     let id = row.id.clone();
@@ -305,9 +325,10 @@ impl McpManager {
                             state: McpLiveState::Running,
                             cancel: connected.cancel,
                             relist: connected.relist,
+                            generation,
                         },
                     );
-                    self.spawn_supervisor(id, connected.handle);
+                    self.spawn_supervisor(id, connected.handle, generation);
                 }
                 Err(e) => {
                     tracing::warn!(id = %row.id, error = %e, "MCP server failed to start; skipping");
@@ -327,7 +348,8 @@ impl McpManager {
         if self.entries.read().unwrap().contains_key(id) {
             anyhow::bail!("MCP server '{id}' is already running");
         }
-        let connected = (self.connect)(config_for(row), self.wire_notices(id)).await?;
+        let generation = self.next_generation();
+        let connected = (self.connect)(config_for(row), self.wire_notices(id, generation)).await?;
         let outcomes = register_tools(&self.registry, id, &connected.tools);
         self.entries.write().unwrap().insert(
             id.to_string(),
@@ -337,9 +359,10 @@ impl McpManager {
                 state: McpLiveState::Running,
                 cancel: connected.cancel,
                 relist: connected.relist,
+                generation,
             },
         );
-        self.spawn_supervisor(id.to_string(), connected.handle);
+        self.spawn_supervisor(id.to_string(), connected.handle, generation);
         Ok(outcomes)
     }
 
@@ -383,18 +406,20 @@ impl McpManager {
             .collect()
     }
 
-    fn spawn_supervisor(self: &Arc<Self>, id: String, handle: Box<dyn McpSessionHandle>) {
+    fn spawn_supervisor(self: &Arc<Self>, id: String, handle: Box<dyn McpSessionHandle>, generation: u64) {
         let mgr = Arc::clone(self);
-        tokio::spawn(mgr.supervise(id, handle));
+        tokio::spawn(mgr.supervise(id, handle, generation));
     }
 
     /// Wire the notice forwarder for one connection: the handler's sink
     /// is a fresh channel whose receiver maps notices onto the manager's
-    /// event loop, tagged with the server id. Lives while the connection
-    /// does — the handler drops the sender when the session dies.
+    /// event loop, tagged with the server id AND the connection's
+    /// generation. Lives while the connection does — the handler drops
+    /// the sender when the session dies.
     fn wire_notices(
         self: &Arc<Self>,
         id: &str,
+        generation: u64,
     ) -> tokio::sync::mpsc::UnboundedSender<flux_mcp::ServerNotice> {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
         let mgr = Arc::clone(self);
@@ -403,7 +428,7 @@ impl McpManager {
             while let Some(notice) = rx.recv().await {
                 match notice {
                     flux_mcp::ServerNotice::ToolsListChanged => {
-                        mgr.handle_tools_list_changed(&id).await;
+                        mgr.handle_tools_list_changed(&id, generation).await;
                     }
                     flux_mcp::ServerNotice::Log { level, message } => {
                         mgr.handle_log(&id, level, message);
@@ -419,14 +444,25 @@ impl McpManager {
     /// unregistered only AFTER a successful re-list (a failed re-list
     /// keeps the old, possibly-stale set — still callable). The chats
     /// ALWAYS rebuild: the registry now binds fresh wrappers and a name
-    /// may have vanished entirely.
-    async fn handle_tools_list_changed(self: &Arc<Self>, id: &str) {
-        let relist = self
-            .entries
-            .read()
-            .unwrap()
-            .get(id)
-            .and_then(|e| e.relist.clone());
+    /// may have vanished entirely. A notice from a SUPERSEDED session (its
+    /// generation no longer owns the entry — the id was removed and
+    /// re-added meanwhile) is ignored: the current session's tools must
+    /// not be touched from a dead peer's signal.
+    async fn handle_tools_list_changed(self: &Arc<Self>, id: &str, generation: u64) {
+        let relist = {
+            let entries = self.entries.read().unwrap();
+            match entries.get(id) {
+                Some(entry) if entry.generation == generation => entry.relist.clone(),
+                Some(_) => {
+                    tracing::debug!(id = %id, "tools/list_changed from a superseded session; ignored");
+                    return;
+                }
+                None => {
+                    tracing::debug!(id = %id, "tools/list_changed for a missing entry; ignored");
+                    return;
+                }
+            }
+        };
         let Some(relist) = relist else {
             tracing::debug!(id = %id, "tools/list_changed for a fake entry; ignored");
             return;
@@ -444,6 +480,9 @@ impl McpManager {
             let Some(entry) = entries.get_mut(id) else {
                 return; // removed mid-re-list
             };
+            if entry.generation != generation {
+                return; // re-added mid-re-list — a newer supervisor owns the id
+            }
             for name in std::mem::take(&mut entry.tool_names) {
                 self.registry.unregister(&name);
             }
@@ -493,7 +532,19 @@ impl McpManager {
     /// peer); a CANCELLED session is a deliberate teardown (apply_remove
     /// already dropped the entry) and ends the task. Owns the handle so a
     /// successful respawn swaps in the NEW session and keeps supervising.
-    async fn supervise(self: Arc<Self>, id: String, mut handle: Box<dyn McpSessionHandle>) {
+    ///
+    /// `generation` pairs this task with the entry it owns. Every
+    /// entry-mutating step re-checks the pair under the lock: an entry
+    /// that was REMOVED and RE-ADDED while this supervisor slept (a fresh
+    /// generation, a new supervisor) is never touched — a superseded
+    /// respawn's duplicate session is dropped instead of adopted, and the
+    /// dropped handle kills the duplicate child.
+    async fn supervise(
+        self: Arc<Self>,
+        id: String,
+        mut handle: Box<dyn McpSessionHandle>,
+        generation: u64,
+    ) {
         loop {
             let reason = handle.quit().await;
             {
@@ -502,6 +553,12 @@ impl McpManager {
                     // apply_remove raced ahead of the signal — nothing left.
                     return;
                 };
+                if entry.generation != generation {
+                    // The id was removed and re-added while this session
+                    // was dying: a newer supervisor owns the entry now.
+                    // Touch nothing (its tool_names belong to THAT session).
+                    return;
+                }
                 for name in std::mem::take(&mut entry.tool_names) {
                     self.registry.unregister(&name);
                 }
@@ -521,28 +578,50 @@ impl McpManager {
                     .saturating_mul(2u32.saturating_pow(exponent))
                     .min(self.backoff_max);
                 tokio::time::sleep(delay).await;
-                // The row may have been removed while we backed off.
-                let Some(row) = self.entries.read().unwrap().get(&id).map(|e| e.row.clone()) else {
-                    tracing::info!(id = %id, "MCP entry removed during backoff; supervisor exiting");
+                // The row may have been removed — or the id RE-ADDED with a
+                // fresh generation (a new supervisor owns it now) — while we
+                // backed off. Either way this supervisor exits.
+                let Some(row) = self
+                    .entries
+                    .read()
+                    .unwrap()
+                    .get(&id)
+                    .filter(|e| e.generation == generation)
+                    .map(|e| e.row.clone())
+                else {
+                    tracing::info!(
+                        id = %id,
+                        "MCP entry removed or replaced during backoff; supervisor exiting"
+                    );
                     return;
                 };
-                match (self.connect)(config_for(&row), self.wire_notices(&id)).await {
+                match (self.connect)(config_for(&row), self.wire_notices(&id, generation)).await {
                     Ok(connected) => {
+                        // Adopt-or-drop under the write lock, BEFORE any
+                        // registration: a superseded connect must not leak
+                        // its tools into the registry (the dropped handle
+                        // kills the duplicate child).
+                        let mut entries = self.entries.write().unwrap();
+                        let Some(entry) = entries
+                            .get_mut(&id)
+                            .filter(|e| e.generation == generation)
+                        else {
+                            tracing::info!(
+                                id = %id,
+                                "MCP entry removed or replaced mid-respawn; dropping the duplicate session"
+                            );
+                            return;
+                        };
                         let names = registered_names(&register_tools(
                             &self.registry,
                             &id,
                             &connected.tools,
                         ));
-                        {
-                            let mut entries = self.entries.write().unwrap();
-                            let Some(entry) = entries.get_mut(&id) else {
-                                return; // removed mid-connect; the dropped handle kills the child
-                            };
-                            entry.tool_names = names;
-                            entry.state = McpLiveState::Running;
-                            entry.cancel = connected.cancel;
-                            entry.relist = connected.relist;
-                        }
+                        entry.tool_names = names;
+                        entry.state = McpLiveState::Running;
+                        entry.cancel = connected.cancel;
+                        entry.relist = connected.relist;
+                        drop(entries);
                         tracing::info!(id = %id, attempt, "MCP respawned");
                         // ALWAYS a rebuild: the old tool wrappers bind to
                         // the dead peer, regardless of the name set being
@@ -1273,7 +1352,13 @@ mod tests {
             .unwrap();
         assert!(registry.get("old_tool").is_some());
 
-        manager.handle_tools_list_changed("echo").await;
+        // A STALE generation (a session that no longer owns the entry) must
+        // not touch the registry.
+        manager.handle_tools_list_changed("echo", 9_999).await;
+        assert!(registry.get("old_tool").is_some(), "stale notice ignored");
+
+        let generation = manager.entries.read().unwrap()["echo"].generation;
+        manager.handle_tools_list_changed("echo", generation).await;
 
         // The old wrapper is unregistered, the fresh set registered, and
         // the chats rebuild (the registry re-bound).

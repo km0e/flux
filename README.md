@@ -6,9 +6,9 @@
 
 ## 功能特性
 
-- **内置工具**：`read_file`、`edit_file`、`write_file`、`replace_lines`、`list_directory`、`glob`、`grep`、`bash`，以及每 chat 的 `question`（向用户提问）、`state_get`/`state_set`、`buf_read`（溢出输出分页读取）。输出限幅防止上下文溢出：所有工具结果统一经过 8000 字符内联预算——超限输出整体存入每 chat 的溢出缓冲，模型用 `buf_read` 分页读取；grep 按匹配窗口塑形（上限 500 条），glob 上限 500 条。
+- **内置工具**：`read_file`、`read_files`（一次多处阅读）、`edit_file`、`edit_files`（一次多处修改，按文件原子）、`write_file`、`replace_lines`、`list_directory`、`glob`、`grep`、`bash`，以及每 chat 的 `question`（向用户提问）、`state_get`/`state_set`、`buf_read`（溢出输出分页读取）。输出限幅防止上下文溢出：所有工具结果统一经过 8000 字符内联预算——超限输出整体存入每 chat 的溢出缓冲，模型用 `buf_read` 分页读取；grep 按匹配窗口塑形（上限 500 条），glob 上限 500 条。
 - **Agent Skills**：惰性加载的能力包（`SKILL.md` 目录，遵循 [Agent Skills 标准](https://agentskills.io)）——模型经 `skill_list` 发现、按需经 `skill_read` 加载完整指令（不向 prompt 注入任何内容；项目技能在 `<workdir>/.flux/skills/`，全局在 `~/.flux/skills/`，同名时项目覆盖全局）。Web UI 的 Skills 对话框管理它们：从本地目录或 git URL 安装（可选 subpath 支持多技能仓库）、删除全局条目——立即生效，无需重启。
-- **LLM Provider**：OpenAI / OpenAI 兼容端点——纯端点（id · url · api key），由 Web UI 的 Providers 对话框管理、存入服务端数据库（没有配置文件）。**本地模型注册表**按模型保存请求参数（自动从 [models.dev](https://models.dev) 元数据富化）；切换对话的 provider 在轮边界热切换——引擎在全量历史上原地 re-begin，不会中断。
+- **LLM Provider**：OpenAI / OpenAI 兼容端点——纯端点（id · url · api key），由 Web UI 的 Providers 对话框管理（增、删、改——编辑在 id 背后换 url / api key，钉住的对话在轮边界热应用，不中断）、存入服务端数据库（没有配置文件）。**本地模型注册表**按模型保存请求参数（自动从 [models.dev](https://models.dev) 元数据富化）；切换对话的 provider 在轮边界热切换——引擎在全量历史上原地 re-begin，不会中断。
 - **流式输出**：经 gRPC-Web 实时推送文本 + 推理（reasoning）增量——接收与渲染解耦一帧（delta 追加到 raw 缓冲，rAF 合帧渲染，每帧至多一次增量渲染）。已提交段落只渲染一次、append-only 追加，代码块稳定打字、高亮恰好一次；粘滞滚动状态机让跟随平滑，不把正在阅读的用户拽回去。
 - **MCP 客户端**：接入外部 MCP 服务器并暴露其工具——两种传输：`stdio`（本地子进程）与 `http`（远程 Streamable HTTP 端点，`url` + `headers`，header 值存服务端数据库、永不出服务端）。由 Web UI 的 MCP 对话框管理（存入服务端数据库；**persist-first + 即时应用**——管理器启动子进程/建立会话、注册工具，匹配的对话在轮边界重建引擎），并带自愈监督：异常退出的会话按封顶退避自动重启。server 的工具集变化（`tools/list_changed`）自动重载，日志通知经服务端限流转发到顶栏通知铃。
 - **无审批**：工具直接执行——没有确认环节。对话的 workdir 边界作为调用上下文（`ToolCtx`）到达工具，路径在边界内解析，工具错误以结果文本返回、模型自行读取并纠正。真正的隔离来自 OS/容器边界。内置 `question` 工具让模型在轮次中向用户提问（agent 产出问题文本 + 选项，经对话内的内联卡作答）。
@@ -16,7 +16,8 @@
 - **从任意消息 fork**：非破坏性分支——新对话复制源 transcript 至所选用户轮**之前**，该轮内容预填进 fork 的输入框；源对话原样不动。
 - **对话历史**：跨重启的持久化对话与完整消息历史；30s 会话宽限期让租约在页面刷新后存活。
 - **内置终端**：交互式 shell（e4pty PTY，xterm.js UI），走专用 `/ws/term` 侧信道——每 chat 可开多个，经 dock「+」或空态动作按需创建；跨 tab/对话切换保活，页面刷新后在会话宽限期内重连同一 PTY（256 KiB scrollback 回放）。
-- **Tab 化右坞**：打开的文件以 tab 累积（多文件、编辑器式）；文件正文横向滚动；`.md` 经共享 markdown 管道渲染并带 Raw 切换；终端 tab 恒钉其后；「本轮」tab 汇总当前轮改动的文件与工具调用——文件一键预览、调用一键跳回消息流。
+- **Tab 化右坞**：打开的文件以 tab 累积（多文件、编辑器式）；文件正文横向滚动；`.md` 经共享 markdown 管道渲染并带 Raw 切换；终端 tab 恒钉其后。
+- **键盘优先的界面**：命令面板（`Ctrl/Cmd+K`——对话切换与应用动作的单一注册表）、会话内检索（`Ctrl/Cmd+F`，经 CSS Custom Highlight API 上色，流式 DOM 零触碰）、快捷键速查表（裸界面 `?`）、composer `@` 路径引用与 Explorer 拖放插入；工具卡按内核标记呈现结局声部（错误/中断/退出码）。
 - **Web UI**：React 聊天界面，由 flux-server **默认伺服**，与 Connect API 同端口（单一监听器）——`./scripts/run-server.sh`（UI 缺失时自动构建）；`--no-web` 无头运行。仅限本机之外暴露必须经 TLS 反向代理——服务端没有认证层。
 
 ## 项目布局
@@ -98,7 +99,7 @@ prebuild/pretest 钩子）。
 |--------|------|---------|
 | EventService | `Subscribe` | 会话级事件流：身份锚（流开 = attach/采纳，首帧 `ready` 携 token + leases），全部对话事件 + keepalive；流断 = detach |
 | ChatService | CreateChat · ListChats · OpenChat · ClaimChat · CloseChat · DeleteChat · RenameChat · SendMessage · CancelRound · ForkChat · SwitchProvider · AnswerQuestion | 对话控制（租约门控；调用者的会话 token 走 `x-flux-session` metadata） |
-| ProviderService / ModelService | ListProviders · GetModels · AddProvider · RemoveProvider / ListModels · SaveModel · RemoveModel · SyncModels | Provider 注册表 + 本地模型注册表（api_key 永不出服务端） |
+| ProviderService / ModelService | ListProviders · GetModels · AddProvider · UpdateProvider · RemoveProvider / ListModels · SaveModel · RemoveModel · SyncModels | Provider 注册表 + 本地模型注册表（api_key 永不出服务端） |
 | McpService | ListServers · AddServer · RemoveServer | MCP 启动列表（persist-first + 即时应用） |
 | SkillService | ListSkills · AddSkill · RemoveSkill | 全局技能管理 |
 | FileSystemService | FsList · FsRead | workdir 选择器 + 文件 Explorer |

@@ -107,6 +107,27 @@ describe('Sidebar', () => {
     expect(screen.queryByText('In use')).toBeNull();
   });
 
+  it('a chat with a running round shows the running marker', () => {
+    // Server truth: the chats broadcast carries ChatInfo.running for ANY
+    // window's round — the row's accessible name grows ", running".
+    useFlux.setState({ chats: [chat('c1'), chat('c2', { running: true })], activeChatId: 'c1' });
+    render(<Sidebar />);
+    expect(screen.getByLabelText('Open chat c2, running')).toBeTruthy();
+    expect(screen.getByLabelText('Open chat c1')).toBeTruthy();
+  });
+
+  it('the local streaming flag shows the running marker without a broadcast', () => {
+    // Round-level truth is instant in THIS window (set at send) — the
+    // broadcast may lag a frame; the marker must show either way.
+    useFlux.setState({
+      chats: [chat('c1')],
+      activeChatId: 'c1',
+      streaming: { c1: true },
+    });
+    render(<Sidebar />);
+    expect(screen.getByLabelText('Open chat c1, running')).toBeTruthy();
+  });
+
   it('relative-time stamps stay fresh on the minute tick (an idle chat never freezes at "now")', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     useFlux.setState({ chats: [chat('c1')], activeChatId: 'c1' }); // createdAt = now → "now"

@@ -216,6 +216,65 @@ impl ProviderRegistry {
         Ok(())
     }
 
+    /// Edit a provider's endpoint behind its id: url / api_key (the id is
+    /// IDENTITY — chat pins and saved models reference it — and never
+    /// moves; renaming is remove + re-add). `api_key` is TRI-STATE: `None`
+    /// keeps the stored key (it never leaves the server, so the client has
+    /// nothing to resend), `Some` replaces it (an empty string clears).
+    /// The merge reads the CURRENT row from the store, the protocol
+    /// validates through `slot`, persistence lands FIRST and the memory
+    /// slot swaps second — the exact discipline of `add`. Callers own the
+    /// post-ack side effects (broadcast + the pinned chats' refresh).
+    pub(crate) async fn update(
+        &self,
+        id: &str,
+        protocol: String,
+        url: Option<String>,
+        api_key: Option<String>,
+    ) -> anyhow::Result<flux_proto::flux::v1::ProviderSummary> {
+        let id = id.trim();
+        anyhow::ensure!(!id.is_empty(), "provider id must not be empty");
+        // Normalize optional fields exactly like `add` ("" = unset; no
+        // surrounding whitespace on a url).
+        let url = url.and_then(|u| {
+            let t = u.trim().to_string();
+            if t.is_empty() { None } else { Some(t) }
+        });
+        // The tri-state merge reads the stored row: the key never left the
+        // server, so "keep" resolves against the ROW, not the request.
+        let mut row = self
+            .store
+            .get_provider(id)
+            .await
+            .context("failed to load provider")?
+            .with_context(|| format!("unknown provider id: {id}"))?;
+        row.protocol = protocol;
+        row.url = url;
+        if let Some(k) = api_key {
+            row.api_key = if k.is_empty() { None } else { Some(k) };
+        }
+        let slot = self.slot(&row)?; // protocol validation lives here
+        // Persist FIRST (a failed write leaves memory untouched); a row
+        // deleted between the read and this write maps to the same
+        // unknown-id error the pre-check produces.
+        if !self
+            .store
+            .update_provider(&row)
+            .await
+            .context("failed to persist provider")?
+        {
+            anyhow::bail!("unknown provider id: {id}");
+        }
+        self.providers
+            .write()
+            .unwrap()
+            .insert(row.id.clone(), slot.clone());
+        Ok(flux_proto::flux::v1::ProviderSummary {
+            id: row.id,
+            url: slot.url,
+        })
+    }
+
     /// Resolve one request's pin into a ready-to-use instance: unknown ids
     /// reject, and an empty model rejects (no default exists to fill in —
     /// the wire types require the field, so an empty string is the only
@@ -587,6 +646,101 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(reg.summaries().len(), 1);
+    }
+
+    // ── Update (the endpoint edit) ────────────────────────────────────
+
+    #[tokio::test]
+    async fn update_replaces_the_url_in_memory_and_store() {
+        let reg = registry_with(&["main"]).await;
+        let sum = reg
+            .update(
+                "main",
+                "openai".into(),
+                Some("http://new.invalid/v1".into()),
+                None,
+            )
+            .await
+            .unwrap();
+        // The summary carries the NEW effective url (memory slot swapped).
+        assert_eq!(sum.id, "main");
+        assert_eq!(sum.url, "http://new.invalid/v1");
+        assert_eq!(reg.summaries()[0].url, "http://new.invalid/v1");
+        // The store row (the truth source) matches.
+        let row = reg.store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(row.url.as_deref(), Some("http://new.invalid/v1"));
+    }
+
+    #[tokio::test]
+    async fn update_api_key_tri_state_resolves_against_the_row() {
+        let reg = registry_with(&["main"]).await; // added with sk-test
+        // Absent = KEEP the stored key.
+        reg.update("main", "openai".into(), None, None)
+            .await
+            .unwrap();
+        let row = reg.store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(row.api_key.as_deref(), Some("sk-test"));
+        // Present = REPLACE.
+        reg.update("main", "openai".into(), None, Some("sk-new".into()))
+            .await
+            .unwrap();
+        let row = reg.store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(row.api_key.as_deref(), Some("sk-new"));
+        // Empty string = CLEAR.
+        reg.update("main", "openai".into(), None, Some(String::new()))
+            .await
+            .unwrap();
+        let row = reg.store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(row.api_key, None);
+    }
+
+    #[tokio::test]
+    async fn update_normalizes_like_add_and_validates_protocol() {
+        let reg = registry_with(&["main"]).await;
+        // A blank url = the default base url (the same fallback as add).
+        let sum = reg
+            .update("main", "openai".into(), Some("   ".into()), None)
+            .await
+            .unwrap();
+        assert_eq!(sum.url, flux_provider::openai::default_base_url());
+        // An unknown protocol rejects and touches NOTHING.
+        let err = reg
+            .update(
+                "main",
+                "anthropic".into(),
+                Some("http://x.invalid/v1".into()),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown protocol type"));
+        assert_eq!(
+            reg.summaries()[0].url,
+            flux_provider::openai::default_base_url()
+        );
+        let row = reg.store.get_provider("main").await.unwrap().unwrap();
+        assert_eq!(row.protocol, "openai");
+    }
+
+    #[tokio::test]
+    async fn update_unknown_id_rejects() {
+        let reg = registry_with(&["main"]).await;
+        let err = reg
+            .update(
+                "ghost",
+                "openai".into(),
+                Some("http://x.invalid/v1".into()),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("unknown provider id"));
+        // An empty id names the same class of failure, explicitly.
+        let err = reg
+            .update("  ", "openai".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("must not be empty"));
     }
 
     #[tokio::test]

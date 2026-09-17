@@ -2,6 +2,8 @@ use super::*;
 use crate::test_util::{
     DummyProvider, create_chat, find_chats, find_kind, register, sess, test_state, wait_for,
 };
+use flux_core::test_util::{ScriptItem, ScriptedProvider};
+use flux_core::StreamChunk;
 use flux_proto::flux::v1::subscribe_response::Kind;
 use flux_store::Store;
 
@@ -717,6 +719,70 @@ async fn lease_transition_broadcasts_active_flag() {
         last.chats.first().is_some_and(|x| x.active),
         "claim must broadcast the chat as active again"
     );
+}
+
+#[tokio::test]
+async fn round_boundaries_broadcast_running_flag() {
+    // The sidebar's running marker rides the chats broadcast: a round's
+    // start/end transitions (the engine's round-state watch) must
+    // re-broadcast the list, or other windows' running dots stay stale.
+    // The observer b holds no lease — the flag is GLOBAL truth, not
+    // viewer-scoped stream state.
+    let store = Arc::new(Store::open_in_memory().await.unwrap());
+    let state = test_state(store).await;
+    let b = register(&state, "b").await;
+    let scripted: Arc<dyn flux_core::Provider> = Arc::new(ScriptedProvider::once(vec![vec![
+        ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
+        ScriptItem::Chunk(Ok(StreamChunk::End {
+            finish_reason: None,
+        })),
+    ]]));
+    let info = state
+        .create_chat(
+            &sess(&state, "a").await,
+            "c",
+            std::env::temp_dir().to_str().unwrap(),
+            flux_chat::ResolvedPin {
+                provider: scripted,
+                id: "test".into(),
+                model: String::new(),
+            },
+        )
+        .await
+        .unwrap();
+    let cid = info.chat_id;
+
+    // Idle before any round: the create broadcast shows running=false.
+    assert!(
+        find_chats(&b.lock().unwrap())
+            .unwrap()
+            .chats
+            .iter()
+            .all(|x| x.chat_id != cid || !x.running)
+    );
+
+    state
+        .send_message(&sess(&state, "a").await, &cid, "hi".into())
+        .await
+        .unwrap();
+
+    // Round start (Idle→Streaming) → a broadcast with running=true.
+    wait_for(|| {
+        b.lock()
+            .unwrap()
+            .iter()
+            .any(|el| matches!(&el.kind, Some(Kind::Chats(c)) if c.chats.iter().any(|x| x.chat_id == cid && x.running)))
+    })
+    .await;
+
+    // Round end (Streaming→Idle) → the LAST broadcast shows running=false
+    // (a running=true frame already landed, so a later false one means the
+    // end transition actually broadcast).
+    wait_for(|| {
+        find_chats(&b.lock().unwrap())
+            .is_some_and(|c| c.chats.first().is_some_and(|x| x.chat_id == cid && !x.running))
+    })
+    .await;
 }
 
 #[tokio::test]

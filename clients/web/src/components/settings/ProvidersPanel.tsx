@@ -14,11 +14,15 @@
  *
  * Desktop: master-detail — a selection rail (a persistent "+ New provider"
  * row above the entries) and a detail pane that either previews the
- * selected entry or carries the creation form. Mobile keeps the stacked
- * layout (hint, rows with inline actions, form). The form draft lives at
- * panel level, so switching the selection never loses a half-typed entry;
- * after a successful add the new entry is auto-selected once its broadcast
- * lands.
+ * selected entry (with the Edit affordance), carries the edit form, or
+ * carries the creation form. Mobile keeps the stacked layout (hint, rows
+ * with inline actions — edit swallows the row into its form — and the
+ * creation form). Both drafts live at panel level, so switching the
+ * selection never loses a half-typed entry; after a successful add the
+ * new entry is auto-selected once its broadcast lands. The edit form's
+ * api_key field starts empty and means "keep" — the stored key never
+ * comes down the wire; saving hot-applies server-side (pinned chats
+ * re-begin on the fresh endpoint at their next round boundary).
  *
  * Presentation shares the shared building blocks (settings/shared) with McpPanel /
  * SkillsPanel — one typography scale, one spacing rhythm, one
@@ -29,24 +33,25 @@
  *          components/ui/*, components/settings/shared.tsx
  */
 import { useEffect, useState } from 'react';
-import { ChevronDown, ChevronRight, CircleX, Download, RefreshCw } from 'lucide-react';
+import { ChevronDown, ChevronRight, CircleX, Download, RefreshCw, SquarePen } from 'lucide-react';
 import { useFlux } from '../../core/state';
-import { addProvider, fetchProviders, probeProvider, removeProvider } from '../../services/providers';
+import { addProvider, fetchProviders, probeProvider, removeProvider, updateProvider } from '../../services/providers';
 import { saveModel } from '../../services/models';
 import { useIsMobile } from '../../hooks/useIsMobile';
 import { fmtTokens } from '../../lib/format';
 import type { ProviderModelInfo, ProviderSummary } from '../../core/types';
-import { Badge, Button, IconButton, Spinner, TextField } from '../ui';
+import { Badge, Button, IconButton, Skeleton, Spinner, TextField } from '../ui';
 import { SavedModelsSection } from './ModelSection';
+import { ProviderEditForm, ProviderForm } from './provider-forms';
 import {
   DetailPane,
   DialogHint,
   EmptyState,
-  FormField,
   MasterDetail,
   NewRailButton,
   Rail,
   RailButton,
+  RailEmpty,
   RemoveControl,
   RowShell,
   RowSub,
@@ -57,63 +62,6 @@ import {
 
 /** The rail selection key of one provider row (stable reference). */
 const keyOf = (p: ProviderSummary): string => p.id;
-
-/** The creation form — shared verbatim by the desktop detail pane and the
- * mobile stacked layout (one set of field states, one submit). */
-function ProviderForm(props: {
-  id: string;
-  url: string;
-  apiKey: string;
-  adding: boolean;
-  canAdd: boolean;
-  addError: string | null;
-  setId: (v: string) => void;
-  setUrl: (v: string) => void;
-  setApiKey: (v: string) => void;
-  onSubmit: () => void;
-}): React.ReactElement {
-  return (
-    <form
-      className="flex flex-col gap-3 rounded-lg border border-border bg-panel p-4"
-      onSubmit={(e) => {
-        e.preventDefault();
-        if (props.canAdd) props.onSubmit();
-      }}
-    >
-      <SectionLabel>Add provider</SectionLabel>
-      <div className="flex gap-2 max-md:flex-col">
-        <FormField label="Id" hint="e.g. main" className="flex-1">
-          <TextField value={props.id} onChange={(e) => props.setId(e.target.value)} placeholder="main" />
-        </FormField>
-        <FormField label="Base url" hint="blank = OpenAI default" className="flex-[1.8]">
-          <TextField
-            value={props.url}
-            onChange={(e) => props.setUrl(e.target.value)}
-            placeholder="https://api.openai.com/v1"
-            className="font-mono text-sm"
-          />
-        </FormField>
-      </div>
-      <FormField label="API key" hint="stored in the server database, never shown back">
-        <TextField
-          type="password"
-          value={props.apiKey}
-          onChange={(e) => props.setApiKey(e.target.value)}
-          placeholder="sk-…"
-          autoComplete="off"
-          className="font-mono text-sm"
-        />
-      </FormField>
-      {props.addError && <span className="text-2xs break-all text-danger">{props.addError}</span>}
-      <div className="flex justify-end">
-        <Button variant="primary" type="submit" disabled={!props.canAdd}>
-          {props.adding ? <Spinner /> : null}
-          Add provider
-        </Button>
-      </div>
-    </form>
-  );
-}
 
 /** The probed catalog block — a filterable mono list (context length where
  * the upstream reports one) with per-row IMPORT affordances: an unsaved
@@ -229,7 +177,8 @@ async function importAllCatalog(pid: string): Promise<void> {
 }
 
 /** Mobile row: compact, with the inline actions the stacked layout needs
- * (no detail pane exists there). */
+ * (no detail pane exists there). `editing` swaps the row into its edit
+ * form (rendered by the panel — one draft, one save in flight). */
 function ProviderRow(props: {
   id: string;
   url: string;
@@ -237,7 +186,10 @@ function ProviderRow(props: {
   catalog: ProviderModelInfo[] | undefined;
   probeError: string | undefined;
   onRefresh: () => void;
+  onEdit: () => void;
   onRemove: () => Promise<string | undefined>;
+  /** The edit form node while this row is the one being edited. */
+  editForm: React.ReactNode;
   /** Import surface (owned by the panel so the toast counts stay honest):
    * saved model ids, the in-flight import ("pid/model" | "pid/*"), and
    * the two entry points. */
@@ -282,11 +234,16 @@ function ProviderRow(props: {
           <RefreshCw size={11} className={props.probing ? 'animate-spin' : undefined} />
           Refresh
         </Button>
+        <Button variant="ghost" size="sm" onClick={props.onEdit} title="Edit this provider's url / api key">
+          <SquarePen size={11} />
+          Edit
+        </Button>
         <span className="flex-1" />
         <RemoveControl label={`Remove ${props.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={props.url}>{props.url}</RowSub>
       {props.probeError && <span className="text-2xs break-all text-warn">{props.probeError}</span>}
+      {props.editForm}
       {expanded && (
         <div className="flex flex-col gap-2">
           <div className="flex items-center gap-2">
@@ -325,6 +282,7 @@ function ProviderPreview(props: {
   id: string;
   probing: boolean;
   onRefresh: () => void;
+  onEdit: () => void;
   onRemove: () => Promise<string | undefined>;
   savedIds: Set<string>;
   importing: string | null;
@@ -357,6 +315,10 @@ function ProviderPreview(props: {
           </Badge>
         )}
         <span className="flex-1" />
+        <Button variant="ghost" size="sm" onClick={props.onEdit} title="Edit this provider's url / api key">
+          <SquarePen size={11} />
+          Edit
+        </Button>
         <Button variant="ghost" size="sm" disabled={props.probing} onClick={props.onRefresh} title="Probe the upstream model catalog">
           <RefreshCw size={11} className={props.probing ? 'animate-spin' : undefined} />
           Refresh
@@ -364,9 +326,23 @@ function ProviderPreview(props: {
         <RemoveControl label={`Remove ${p.id}`} onRemove={props.onRemove} />
       </div>
       <RowSub title={p.url}>{p.url}</RowSub>
-      <span className="text-2xs text-faint">API key stored in the server database — never shown back.</span>
+      <span className="text-2xs text-muted">API key stored in the server database — never shown back.</span>
       {probeError && <span className="text-2xs break-all text-warn">{probeError}</span>}
       <SavedModelsSection provider={p.id} />
+      {/* First probe of an uncached catalog: the section is seconds away
+          (a real upstream round-trip), so the incoming list gets its
+          shape — the same block the catalog will occupy. */}
+      {props.probing && !catalog && (
+        <div className="flex flex-col gap-1.5">
+          <span className="text-2xs text-faint">Upstream catalog</span>
+          <div className="flex flex-col gap-2 overflow-hidden rounded-sm border border-border bg-bg p-2">
+            <Skeleton className="h-3 w-3/5" />
+            <Skeleton className="h-3 w-4/5" />
+            <Skeleton className="h-3 w-1/2" />
+            <Skeleton className="h-3 w-2/5" />
+          </div>
+        </div>
+      )}
       {catalog && catalog.length > 0 && (
         <div className="flex flex-col gap-1.5">
           <div className="flex items-center gap-2">
@@ -426,6 +402,16 @@ export function ProvidersPanel(): React.ReactElement {
   const [apiKey, setApiKey] = useState('');
   const [adding, setAdding] = useState(false);
   const [addError, setAddError] = useState<string | null>(null);
+
+  // The EDIT draft lives at panel level for the same reason (one edit at
+  // a time — `editingId` names it). Entering edit mode prefills the
+  // EFFECTIVE url from the summary; the api_key draft starts empty and
+  // means "keep" — the stored key never comes down the wire.
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editUrl, setEditUrl] = useState('');
+  const [editApiKey, setEditApiKey] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
 
   // The provider registry may be cold (the pickers fetch lazily) — pull
   // on section show. The saved-model list is session-level (preloaded at
@@ -504,14 +490,76 @@ export function ProvidersPanel(): React.ReactElement {
   const savedIdsFor = (pid: string): Set<string> =>
     new Set(useFlux.getState().savedModels.filter((m) => m.provider === pid).map((m) => m.model));
 
+  /** Enter edit mode for one provider: the draft prefills from the
+   * summary (the effective url), the key starts empty (= keep). */
+  const startEdit = (pid: string) => {
+    const p = useFlux.getState().providers.find((x) => x.id === pid);
+    if (!p) return;
+    setEditingId(pid);
+    setEditUrl(p.url);
+    setEditApiKey('');
+    setSaveError(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingId(null);
+    setSaveError(null);
+  };
+
+  const runSave = () => {
+    if (!editingId || saving) return;
+    setSaving(true);
+    setSaveError(null);
+    const pid = editingId;
+    // A blank key stays undefined — the server reads it as "keep the
+    // stored key" (the key never came down to be resent).
+    void updateProvider({ id: pid, url: editUrl, api_key: editApiKey || undefined }).then(
+      (error) => {
+        setSaving(false);
+        if (error) {
+          setSaveError(error);
+          return;
+        }
+        // The broadcast refreshes the rail's url; the pinned chats
+        // hot-apply the fresh endpoint server-side.
+        useFlux.getState().pushToast('info', `Provider "${pid}" updated`);
+        cancelEdit();
+      },
+    );
+  };
+
+  /** A provider removed (here or by another client) must not leave an
+   * edit form behind for a ghost. */
+  useEffect(() => {
+    if (editingId && !providers.some((p) => p.id === editingId)) cancelEdit();
+  }, [providers, editingId]);
+
   /** Shared by the preview pane and the mobile rows. */
   const remove = (pid: string): Promise<string | undefined> => {
     noteRemoved(pid);
+    if (editingId === pid) cancelEdit();
     return removeProvider(pid).then((error) => {
       if (!error) useFlux.getState().pushToast('info', `Provider "${pid}" removed`);
       return error;
     });
   };
+
+  /** The edit form node for one provider (undefined unless it is the one
+   * being edited) — the same component the detail pane renders. */
+  const editFormFor = (pid: string): React.ReactNode =>
+    editingId === pid ? (
+      <ProviderEditForm
+        id={pid}
+        url={editUrl}
+        apiKey={editApiKey}
+        saving={saving}
+        saveError={saveError}
+        setUrl={setEditUrl}
+        setApiKey={setEditApiKey}
+        onSave={runSave}
+        onCancel={cancelEdit}
+      />
+    ) : undefined;
 
   const selectedProvider = selected === 'new' ? undefined : providers.find((p) => keyOf(p) === selected);
 
@@ -535,7 +583,9 @@ export function ProvidersPanel(): React.ReactElement {
                   catalog={catalogMap[p.id]}
                   probeError={probeErrors[p.id]}
                   onRefresh={() => refresh(p.id)}
+                  onEdit={() => startEdit(p.id)}
                   onRemove={() => remove(p.id)}
+                  editForm={editFormFor(p.id)}
                   savedIds={savedIdsFor(p.id)}
                   importing={importing}
                   onImport={(modelId) => importOne(p.id, modelId)}
@@ -579,25 +629,30 @@ export function ProvidersPanel(): React.ReactElement {
             />
           ))}
           {providers.length === 0 && (
-            <li className="px-2 py-1 text-2xs leading-relaxed text-faint">No providers yet.</li>
+            <RailEmpty>No providers yet.</RailEmpty>
           )}
         </Rail>
       }
       detail={
         <DetailPane>
           {selectedProvider ? (
-            <ProviderPreview
-              key={selectedProvider.id}
-              id={selectedProvider.id}
-              probing={probingIds.includes(selectedProvider.id)}
-              onRefresh={() => refresh(selectedProvider.id)}
-              onRemove={() => remove(selectedProvider.id)}
-              savedIds={savedIdsFor(selectedProvider.id)}
-              importing={importing}
-              onImport={(modelId) => importOne(selectedProvider.id, modelId)}
-              importingAll={importing === `${selectedProvider.id}/*`}
-              onImportedAll={() => importAll(selectedProvider.id)}
-            />
+            editingId === selectedProvider.id ? (
+              editFormFor(selectedProvider.id)
+            ) : (
+              <ProviderPreview
+                key={selectedProvider.id}
+                id={selectedProvider.id}
+                probing={probingIds.includes(selectedProvider.id)}
+                onRefresh={() => refresh(selectedProvider.id)}
+                onEdit={() => startEdit(selectedProvider.id)}
+                onRemove={() => remove(selectedProvider.id)}
+                savedIds={savedIdsFor(selectedProvider.id)}
+                importing={importing}
+                onImport={(modelId) => importOne(selectedProvider.id, modelId)}
+                importingAll={importing === `${selectedProvider.id}/*`}
+                onImportedAll={() => importAll(selectedProvider.id)}
+              />
+            )
           ) : (
             <>
               <DialogHint>{HINT}</DialogHint>

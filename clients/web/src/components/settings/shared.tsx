@@ -80,6 +80,13 @@ export function EmptyState({ children }: { children: React.ReactNode }): React.R
   );
 }
 
+/** The rail's empty-list face — the same quiet line in every master-detail
+ * panel (providers / MCP servers / skills); one component so the voice
+ * cannot drift. */
+export function RailEmpty({ children }: { children: React.ReactNode }): React.ReactElement {
+  return <li className="px-2 py-1 text-2xs leading-relaxed text-faint">{children}</li>;
+}
+
 /** One labeled form field: a visible 13px label above the control, the
  * hint on its own line between them — an inline hint (label + hint in
  * one span) wraps into a ragged mess when the field is narrow (the

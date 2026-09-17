@@ -14,6 +14,7 @@ import { useFlux } from '../core/state';
 import { cn } from '../lib/cn';
 import { alwaysScrollToBottom, isNearBottom } from '../lib/dom';
 import { getPane } from '../services/panes';
+import { TranscriptSearchBar } from './TranscriptSearchBar';
 
 export function MessageList(): React.ReactElement {
   // Always-visible affordance: show the jump-to-bottom button whenever we
@@ -44,6 +45,10 @@ export function MessageList(): React.ReactElement {
   return (
     <div id="messages-wrap" className="relative flex min-h-0 flex-1 flex-col overflow-hidden">
       {/* Per-chat panes managed imperatively in panes.ts / stream.ts */}
+      {/* Transcript search (Ctrl/Cmd+F) — floats over the active pane; the
+          service paints matches via the Custom Highlight API without ever
+          touching the streaming DOM. */}
+      <TranscriptSearchBar />
       <button
         id="scroll-bottom-btn"
         aria-label="Scroll to latest message"

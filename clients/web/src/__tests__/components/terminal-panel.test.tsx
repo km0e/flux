@@ -39,5 +39,9 @@ describe('TerminalPanel', () => {
   it('without a session the status line falls back to the connecting branch', () => {
     render(<TerminalPanel tabId="missing" />);
     expect(document.body.textContent).toContain('connecting…');
+    // The first frame is not a blank void: connecting paints the quiet
+    // skeleton placeholder inside the terminal host.
+    const host = document.querySelector('[data-testid="terminal-host"]');
+    expect(host?.querySelectorAll('.animate-pulse').length).toBeGreaterThanOrEqual(3);
   });
 });

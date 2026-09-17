@@ -9,14 +9,14 @@
  * layout is stable and narrow viewports stay calm.
  *
  * Provides: TopBar
- * Depends: core/state.ts, core/bridge.ts, hooks/useTheme.ts,
+ * Depends: core/state.ts, core/bridge.ts, services/theme.ts,
  *          components/ui/*, component./settings/SettingsDialog
  */
-import { lazy, Suspense, useState } from 'react';
+import { lazy, Suspense } from 'react';
 import { useFlux } from '../core/state';
 import { bridge } from '../core/bridge';
 import type { ThemeChoice } from '../core/prefs';
-import { useTheme } from '../hooks/useTheme';
+import { cycleTheme, THEME_LABEL } from '../services/theme';
 import { Button, IconButton, Spinner } from './ui';
 import { Tooltip } from './ui/tooltip';
 import {
@@ -50,12 +50,6 @@ const THEME_ICON: Record<ThemeChoice, React.ReactNode> = {
   light: <Sun size={14} />,
 };
 
-const THEME_LABEL: Record<ThemeChoice, string> = {
-  auto: 'Auto (follow system)',
-  dark: 'Dark',
-  light: 'Light',
-};
-
 // The settings chain (dialog + the Providers/MCP/Skills panels, ~30 KB of
 // app code) rides its own chunk and loads on first gear click — the entry
 // stays first-party-only (see vite.config.ts's chunking comment). The
@@ -74,8 +68,13 @@ function McpNoticeBell(): React.ReactElement {
   const unread = useFlux((s) => s.mcpNoticesUnread);
   return (
     <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <span className="relative inline-flex">
+      {/* The unread badge sits OUTSIDE the trigger: asChild must land the
+          trigger semantics (type/aria-haspopup/aria-expanded) on the real
+          button, not on a positioning wrapper span — a span carrying
+          button attributes is an axe-critical aria-allowed-attr violation
+          AND hides the expanded state from AT. */}
+      <span className="relative inline-flex">
+        <DropdownMenuTrigger asChild>
           <IconButton
             id="notice-bell"
             label={`Notifications${unread > 0 ? ` (${unread} unread)` : ''}`}
@@ -84,16 +83,16 @@ function McpNoticeBell(): React.ReactElement {
           >
             <Bell size={14} />
           </IconButton>
-          {unread > 0 && (
-            <span
-              aria-hidden="true"
-              className="pointer-events-none absolute -top-1 -right-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-2xs leading-none font-bold text-accent-fg"
-            >
-              {unread > 9 ? '9+' : unread}
-            </span>
-          )}
-        </span>
-      </DropdownMenuTrigger>
+        </DropdownMenuTrigger>
+        {unread > 0 && (
+          <span
+            aria-hidden="true"
+            className="pointer-events-none absolute -top-1 -right-1 grid h-4 min-w-4 place-items-center rounded-full bg-accent px-1 text-2xs leading-none font-bold text-accent-fg"
+          >
+            {unread > 9 ? '9+' : unread}
+          </span>
+        )}
+      </span>
       <DropdownMenuContent align="end" className="w-80 max-md:w-[calc(100vw-2rem)]">
         <DropdownMenuItem disabled className="text-2xs text-faint">
           MCP server notices
@@ -139,11 +138,12 @@ export function TopBar(): React.ReactElement {
   const conn = useFlux((s) => s.connectionStatus);
   const streaming = useFlux((s) => (cid ? (s.streaming[cid] ?? false) : false));
   const sidebarOpen = useFlux((s) => s.sidebarOpen);
-  const [theme, cycleTheme] = useTheme();
+  const theme = useFlux((s) => s.theme);
   // Settings: the gear opens the one tabbed dialog DIRECTLY (no menu —
   // the sections are tabs inside it). Reopening lands on the last-visited
   // section (the dialog keeps that memory itself across unmounts).
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  const settingsOpen = useFlux((s) => s.settingsOpen);
+  const settingsTab = useFlux((s) => s.settingsTab);
   const down = conn === 'disconnected' || conn === 'failed';
   const wsTarget = location.host;
 
@@ -231,15 +231,15 @@ export function TopBar(): React.ReactElement {
         id="settings-button"
         label="Settings"
         className="size-7"
-        onClick={() => setSettingsOpen(true)}
+        onClick={() => useFlux.getState().setSettingsOpen(true)}
       >
         <Settings size={14} />
       </IconButton>
 
-      <Tooltip content={`Theme: ${THEME_LABEL[theme]} (click to cycle)`} side="bottom">
+      <Tooltip content={`Theme: ${THEME_LABEL[theme]}${theme === 'auto' ? ' (follow system)' : ''} (click to cycle)`} side="bottom">
         <IconButton
           id="theme-toggle"
-          label={`Theme: ${THEME_LABEL[theme]}`}
+          label={`Theme: ${THEME_LABEL[theme]}${theme === 'auto' ? ' (follow system)' : ''}`}
           onClick={cycleTheme}
           className="size-7"
         >
@@ -255,7 +255,10 @@ export function TopBar(): React.ReactElement {
             </IconButton>
           }
         >
-          <SettingsDialog onClose={() => setSettingsOpen(false)} />
+          <SettingsDialog
+            initialTab={settingsTab ?? undefined}
+            onClose={() => useFlux.getState().setSettingsOpen(false)}
+          />
         </Suspense>
       )}
     </div>

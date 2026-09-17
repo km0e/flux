@@ -21,9 +21,9 @@
  *          components/FileIcon.tsx
  */
 import { useEffect, useState } from 'react';
-import { ListChecks, Plus, SquareTerminal, X } from 'lucide-react';
+import { Plus, SquareTerminal, X } from 'lucide-react';
 import { useFlux } from '../core/state';
-import { storePreviewWidth, PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH } from '../core/prefs';
+import { storePreviewWidth, PREVIEW_MAX_WIDTH, PREVIEW_MIN_WIDTH, clampPreviewWidth } from '../core/prefs';
 import { createTerminal, killTerminal, terminalSession } from '../services/terminal';
 import { useEdgeResize, edgeResizeKeys, type EdgeResizeSpec } from '../hooks/useEdgeResize';
 import { useCoveredByDrawer } from '../hooks/useCoveredByDrawer';
@@ -32,13 +32,7 @@ import { cn } from '../lib/cn';
 import { copyText } from '../lib/clipboard';
 import { FileIcon } from './FileIcon';
 import { FileTabView } from './FileTabView';
-import { RoundPanel } from './RoundPanel';
 import { TerminalPanel } from './TerminalPanel';
-
-/** The round-artifacts tab's reserved strip id (a file tab's id is an
- * absolute path, so no collision). Present only while the active chat's
- * round has artifacts. */
-const ROUND_TAB_ID = 'round';
 
 export function RightDock(): React.ReactElement | null {
   const open = useFlux((s) => s.dockOpen);
@@ -48,11 +42,6 @@ export function RightDock(): React.ReactElement | null {
   const activeTab = useFlux((s) => s.activeDockTab);
   const activeChatId = useFlux((s) => s.activeChatId);
   const coveredByDrawer = useCoveredByDrawer();
-  // The Round tab exists only while the active chat's round has artifacts
-  // — the strip stays clean otherwise (empty rounds need no surface).
-  const roundCount = useFlux((s) =>
-    s.activeChatId ? (s.roundArtifacts[s.activeChatId]?.length ?? 0) : 0,
-  );
   if (!open) return null;
 
   const activeFile = openFiles.find((t) => t.id === activeTab);
@@ -63,17 +52,17 @@ export function RightDock(): React.ReactElement | null {
   // drag, one store commit + persist on release, body class kills text
   // selection). The width tracks the pointer's distance from the
   // viewport's right edge (the dock is flush right in both regimes) and
-  // always leaves ≥280px for the conversation. The keyboard contract rides
-  // the same spec (±24px per press, ArrowLeft widens — the handle moves
-  // left).
+  // always leaves ≥280px for the conversation BEHIND BOTH panes — the
+  // sidebar's own width bounds this dock (clampPreviewWidth), so a tablet
+  // viewport can no longer drag the conversation to nothing. The keyboard
+  // contract rides the same spec (±24px per press, ArrowLeft widens — the
+  // handle moves left).
   const dockSpec: EdgeResizeSpec = {
     cssVar: '--fx-preview-w',
     dragClass: 'resizing-preview',
     widthAt: (e) => window.innerWidth - e.clientX,
-    clamp: (x) => {
-      const max = Math.max(PREVIEW_MIN_WIDTH, Math.min(PREVIEW_MAX_WIDTH, window.innerWidth - 280));
-      return Math.min(max, Math.max(PREVIEW_MIN_WIDTH, x));
-    },
+    clamp: (x) =>
+      clampPreviewWidth(x, window.innerWidth, useFlux.getState().sidebarWidth),
     commit: (next) => {
       useFlux.setState({ previewWidth: next });
       storePreviewWidth(next);
@@ -146,23 +135,6 @@ export function RightDock(): React.ReactElement | null {
           aria-label="Dock tabs"
           onKeyDown={onTablistKeyDown}
         >
-          {roundCount > 0 && (
-            <DockTab
-              domId={ROUND_TAB_ID}
-              label={`Round · ${roundCount}`}
-              title="This round's artifacts — files changed and tools invoked since your last message"
-              active={activeTab === ROUND_TAB_ID}
-              icon={<ListChecks size={13} aria-hidden="true" className="text-accent" />}
-              onSelect={() => useFlux.setState({ activeDockTab: ROUND_TAB_ID, dockOpen: true })}
-              onClose={() =>
-                useFlux.setState((s) => ({
-                  activeDockTab: s.activeDockTab === ROUND_TAB_ID ? null : s.activeDockTab,
-                }))
-              }
-              closeLabel="Hide round artifacts"
-              closable={false}
-            />
-          )}
           {openFiles.map((t) => (
             <DockTab
               key={t.id}
@@ -247,18 +219,16 @@ export function RightDock(): React.ReactElement | null {
         </IconButton>
       </div>
 
-      {/* Content: the round artifacts, the active file tab, or the
-          terminal session. ONE tabpanel whose content swaps — labelled by
-          the active tab (the ARIA tabs contract with the strip above). */}
+      {/* Content: the active file tab or the terminal session. ONE
+          tabpanel whose content swaps — labelled by the active tab (the
+          ARIA tabs contract with the strip above). */}
       <div
         id="dock-content"
         role="tabpanel"
-        aria-labelledby={activeTab ? `dock-tab-${activeTab === ROUND_TAB_ID ? 'round' : activeTab}` : undefined}
+        aria-labelledby={activeTab ? `dock-tab-${activeTab}` : undefined}
         className="flex min-h-0 flex-1 flex-col"
       >
-        {activeTab && roundCount > 0 && activeTab === ROUND_TAB_ID ? (
-          <RoundPanel />
-        ) : activeTab && terminalTabs.some((t) => t.id === activeTab) ? (
+        {activeTab && terminalTabs.some((t) => t.id === activeTab) ? (
           <TerminalPanel tabId={activeTab} />
         ) : activeTab && openFiles.some((t) => t.id === activeTab) ? (
           <FileTabView tabId={activeTab} />
@@ -337,11 +307,10 @@ function CopyStripButton(props: { text: string }): React.ReactElement {
   );
 }
 
-/** One strip tab: select on click, optional close button (the Round tab
- * is a view, not a resource — it deactivates instead of closing; it
- * disappears with the round itself). Roving tabindex: only the ACTIVE tab
- * sits in the Tab order — Left/Right (handled by the tablist) move focus
- * between tabs, the close button stays individually reachable. */
+/** One strip tab: select on click, optional close button. Roving
+ * tabindex: only the ACTIVE tab sits in the Tab order — Left/Right
+ * (handled by the tablist) move focus between tabs, the close button
+ * stays individually reachable. */
 function DockTab(props: {
   /** The tab's DOM id — the tabpanel's aria-labelledby points at it. */
   domId: string;

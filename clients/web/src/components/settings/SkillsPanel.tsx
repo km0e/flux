@@ -48,6 +48,7 @@ import {
   NoticeBar,
   Rail,
   RailButton,
+  RailEmpty,
   RemoveControl,
   RowShell,
   RowSub,
@@ -104,7 +105,7 @@ function SkillForm(props: {
       </FormField>
       {props.addError && <span className="text-2xs break-all text-danger">{props.addError}</span>}
       <div className="flex items-center justify-between gap-3 max-md:flex-col-reverse max-md:items-stretch">
-        <span className="text-xs leading-relaxed text-faint">
+        <span className="text-xs leading-relaxed text-muted">
           {props.isUrl
             ? 'Git source — shallow-cloned (https/SSH remotes), then copied without .git'
             : 'Local source — copied (never moved); the directory must contain a SKILL.md'}
@@ -172,7 +173,7 @@ function SkillPreview(props: {
       </div>
       <RowSub title={props.skill.description}>{props.skill.description}</RowSub>
       {!props.skill.removable && (
-        <span className="text-2xs text-faint">
+        <span className="text-2xs text-muted">
           Read-only — a project skill living in this chat's workdir (.flux/skills).
         </span>
       )}
@@ -226,9 +227,11 @@ export function SkillsPanel(): React.ReactElement {
     });
   };
 
-  /** Shared by the preview pane and the mobile rows. */
-  const remove = (name: string): Promise<string | undefined> => {
-    noteRemoved(name);
+  /** Shared by the preview pane and the mobile rows. `key` is the rail
+   *  selection key (`source:name`) — noteRemoved matches against keyOf,
+   *  so the bare name never matches and the neighbor fallback dies. */
+  const remove = (key: string, name: string): Promise<string | undefined> => {
+    noteRemoved(key);
     return removeSkill(name).then((error) => {
       if (!error) useFlux.getState().pushToast('info', `Skill "${name}" removed`);
       return error;
@@ -253,7 +256,7 @@ export function SkillsPanel(): React.ReactElement {
           ) : (
             <ul aria-label="Installed skills" className="m-0 flex list-none flex-col gap-2 p-0">
               {skills.map((s) => (
-                <SkillRow key={keyOf(s)} skill={s} onRemove={() => remove(s.name)} />
+                <SkillRow key={keyOf(s)} skill={s} onRemove={() => remove(keyOf(s), s.name)} />
               ))}
             </ul>
           )}
@@ -302,14 +305,14 @@ export function SkillsPanel(): React.ReactElement {
             />
           ))}
           {skills.length === 0 && (
-            <li className="px-2 py-1 text-2xs leading-relaxed text-faint">No skills installed.</li>
+            <RailEmpty>No skills installed.</RailEmpty>
           )}
         </Rail>
       }
       detail={
         <DetailPane>
           {selectedSkill ? (
-            <SkillPreview key={keyOf(selectedSkill)} skill={selectedSkill} onRemove={() => remove(selectedSkill.name)} />
+            <SkillPreview key={keyOf(selectedSkill)} skill={selectedSkill} onRemove={() => remove(keyOf(selectedSkill), selectedSkill.name)} />
           ) : (
             <>
               <DialogHint>{HINT}</DialogHint>

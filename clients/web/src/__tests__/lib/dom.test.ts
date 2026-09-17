@@ -13,6 +13,7 @@ import {
   toolSummary,
   followExpansion,
   followExpansionFrom,
+  classifyToolResult,
 } from '../../lib/dom';
 
 describe('createCopyButton', () => {
@@ -39,6 +40,33 @@ describe('createMessageBubble', () => {
     const { el, body } = createMessageBubble({ role: 'user', text: 'hello' });
     expect(el.className).toContain('user');
     expect(body.textContent).toBe('hello');
+  });
+
+  it('user bubbles carry the copy affordance; clicking copies the text', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    Object.defineProperty(navigator, 'clipboard', {
+      value: { writeText },
+      configurable: true,
+    });
+    const { el } = createMessageBubble({ role: 'user', text: 'hello\nworld' });
+    const btn = el.querySelector<HTMLButtonElement>('.msg-copy');
+    expect(btn).not.toBeNull();
+    expect(btn?.getAttribute('aria-label')).toBe('Copy message');
+    btn!.click();
+    expect(writeText).toHaveBeenCalledWith('hello\nworld');
+    await vi.waitFor(() => expect(btn?.classList.contains('ok')).toBe(true));
+  });
+
+  it('user bubbles order affordances copy · fork · bubble', () => {
+    const { el } = createMessageBubble({ role: 'user', text: 'hi', forkPoint: 7 });
+    const kids = [...el.children].map((c) => c.className.split(' ')[0]);
+    expect(kids).toEqual(['msg-copy', 'msg-fork', 'message-body']);
+  });
+
+  it('assistant bubbles keep the header Copy — never the icon affordance', () => {
+    const { el } = createMessageBubble({ role: 'assistant', raw: 'x' });
+    expect(el.querySelector('.msg-copy')).toBeNull();
+    expect(el.querySelector('.copy-btn')).not.toBeNull();
   });
 
   it('creates an assistant bubble with live class', () => {
@@ -175,6 +203,75 @@ describe('markToolCardComplete', () => {
   });
 });
 
+describe('classifyToolResult — the kernel marker verdicts', () => {
+  it('plain results are ok', () => {
+    expect(classifyToolResult('hello\nworld')).toEqual({ verdict: 'ok' });
+  });
+
+  it('the kernel failure prefix is an error', () => {
+    expect(classifyToolResult('Error: file not found: x')).toEqual({ verdict: 'error' });
+  });
+
+  it('the interrupt mark is interrupted (the user did it)', () => {
+    expect(classifyToolResult('[interrupted by user]\npartial output')).toEqual({
+      verdict: 'interrupted',
+    });
+  });
+
+  it('a trailing non-zero exit line is the exit verdict with its code', () => {
+    expect(classifyToolResult('partial output\n(exit code: 3)')).toEqual({
+      verdict: 'exit',
+      code: 3,
+    });
+  });
+
+  it('exit code 0 is ok', () => {
+    expect(classifyToolResult('(exit code: 0)')).toEqual({ verdict: 'ok' });
+  });
+});
+
+describe('tool card verdict painting', () => {
+  it('an error result takes the danger voice and never fades', () => {
+    const el = createToolCard({ id: 'c1', name: 'bash', status: 'running' });
+    markToolCardComplete(el, 'Error: command failed');
+    expect(el.className).toContain('tool-error');
+    expect(el.className).toContain('done');
+    expect(el.querySelector('.tool-status')?.className).toBe('tool-status error');
+    expect(el.querySelector('.tool-status')?.textContent).toContain('error');
+  });
+
+  it('an interrupted result speaks the warn voice without the error rail', () => {
+    const el = createToolCard({ id: 'c1', name: 'bash', status: 'running' });
+    markToolCardComplete(el, '[interrupted by user]\npartial');
+    expect(el.className).toContain('tool-interrupted');
+    expect(el.className).not.toContain('tool-error');
+    expect(el.querySelector('.tool-status')?.className).toBe('tool-status interrupted');
+    expect(el.querySelector('.tool-status')?.textContent).toContain('interrupted');
+  });
+
+  it('an exit-code result carries its code in the status voice', () => {
+    const el = createToolCard({ id: 'c1', name: 'bash', status: 'running' });
+    markToolCardComplete(el, 'partial output\n(exit code: 3)');
+    expect(el.className).toContain('tool-exit');
+    expect(el.querySelector('.tool-status')?.textContent).toContain('exit 3');
+  });
+
+  it('the history path paints the verdict through setToolCardResult alone', () => {
+    const el = createToolCard({ id: 'c1', name: 'bash', status: 'done' });
+    setToolCardResult(el, 'Error: stored failure');
+    expect(el.className).toContain('tool-error');
+    expect(el.querySelector('.tool-status')?.className).toBe('tool-status error');
+  });
+
+  it('an ok result clears stale verdict classes and restores the completed voice', () => {
+    const el = createToolCard({ id: 'c1', name: 'bash', status: 'running' });
+    markToolCardComplete(el, 'Error: first attempt');
+    markToolCardComplete(el, 'recovered');
+    expect(el.className).not.toContain('tool-error');
+    expect(el.querySelector('.tool-status')?.className).toBe('tool-status completed');
+  });
+});
+
 describe('createErrorBubble', () => {
   it('creates an error div with icon and message', () => {
     const el = createErrorBubble('something went wrong');
@@ -182,6 +279,54 @@ describe('createErrorBubble', () => {
     // The icon is aria-hidden decoration + text nodes (textContent includes icon glyphs)
     expect(el.querySelector('.error-icon')?.getAttribute('aria-hidden')).toBe('true');
     expect(el.textContent).toContain('something went wrong');
+  });
+
+  it('pane-context errors carry retry + copy actions', () => {
+    const el = createErrorBubble('boom', { retry: true });
+    expect(el.querySelector('.error-actions')?.getAttribute('role')).toBe('group');
+    expect(el.querySelector('.error-action[aria-label^="Retry"]')).not.toBeNull();
+    expect(el.querySelector('.error-action[aria-label="Copy error message"]')).not.toBeNull();
+  });
+
+  it('the bare no-chat error carries no actions', () => {
+    const el = createErrorBubble('boom');
+    expect(el.querySelector('.error-actions')).toBeNull();
+  });
+
+  it('retry refills the composer with the LAST user turn — never sends', () => {
+    document.body.innerHTML =
+      '<div class="chat-pane">' +
+      '  <div class="message user"><div class="message-body prose">run the tests please</div></div>' +
+      '  <div class="tool done">x</div>' +
+      '</div>';
+    const pane = document.querySelector('.chat-pane') as HTMLElement;
+    const el = createErrorBubble('boom', { retry: true });
+    pane.appendChild(el); // in-pane: the walk-back has a sibling chain
+
+    const events: CustomEvent<string>[] = [];
+    const listener = (e: Event) => events.push(e as CustomEvent<string>);
+    window.addEventListener('flux:compose', listener);
+
+    (el.querySelector('.error-action[aria-label^="Retry"]') as HTMLButtonElement).click();
+
+    window.removeEventListener('flux:compose', listener);
+    expect(events).toHaveLength(1);
+    expect(events[0].detail).toBe('run the tests please');
+    document.body.innerHTML = '';
+  });
+
+  it('retry without a preceding user turn is a silent no-op', () => {
+    document.body.innerHTML = '<div class="chat-pane"></div>';
+    const pane = document.querySelector('.chat-pane') as HTMLElement;
+    const el = createErrorBubble('boom', { retry: true });
+    pane.appendChild(el);
+    const events: Event[] = [];
+    const listener = (e: Event) => events.push(e);
+    window.addEventListener('flux:compose', listener);
+    (el.querySelector('.error-action[aria-label^="Retry"]') as HTMLButtonElement).click();
+    window.removeEventListener('flux:compose', listener);
+    expect(events).toHaveLength(0);
+    document.body.innerHTML = '';
   });
 });
 
@@ -195,6 +340,20 @@ describe('toolSummary', () => {
   it('extracts the file path for file tools and the pattern for search tools', () => {
     expect(toolSummary('read_file', JSON.stringify({ path: '/a/b.rs' }))).toBe('/a/b.rs');
     expect(toolSummary('grep', JSON.stringify({ pattern: 'TODO', path: '/x' }))).toBe('TODO');
+  });
+
+  it('summarizes multi-item tools as "N items: <first path>"', () => {
+    expect(
+      toolSummary(
+        'read_files',
+        JSON.stringify({ files: [{ file_path: '/a.rs' }, { file_path: '/b.rs' }] }),
+      ),
+    ).toBe('2 items: /a.rs');
+    expect(
+      toolSummary('edit_files', JSON.stringify({ edits: [{ file_path: '/c.rs' }] })),
+    ).toBe('/c.rs');
+    // An array field without file_path objects falls back to the raw text.
+    expect(toolSummary('read_files', JSON.stringify({ files: ['nope'] }))).toBe('{"files":["nope"]}');
   });
 
   it('falls back to the first string field / raw text and truncates long values', () => {

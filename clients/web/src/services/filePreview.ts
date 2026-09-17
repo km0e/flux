@@ -2,11 +2,11 @@
  * filePreview.ts — open one file as a right-dock tab and land the fetched
  * content on it.
  *
- * Deliberately its own module (not a fs.ts export): Explorer clicks and
- * the round-artifacts panel (F-11) share ONE address space — the tab id
- * IS the path — and the Explorer tests mock the fs layer (readFile), so
- * this module must depend on fs.ts's EXPORTS, not live inside it (an
- * internal call would bypass the module mock and hit the wire).
+ * Deliberately its own module (not a fs.ts export): Explorer clicks use
+ * ONE address space — the tab id IS the path — and the Explorer tests
+ * mock the fs layer (readFile), so this module must depend on fs.ts's
+ * EXPORTS, not live inside it (an internal call would bypass the module
+ * mock and hit the wire).
  *
  * Provides: openFilePreview
  * Depends: services/fs.ts, core/state.ts

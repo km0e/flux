@@ -27,6 +27,13 @@ service ProviderService {
   // Remove a provider. Chats pinned to it keep their pin and fail on the
   // next round with an error naming the dead pin (recovery: SwitchChat).
   rpc RemoveProvider(RemoveProviderRequest) returns (RemoveProviderResponse);
+
+  // Edit a provider's endpoint (url / api_key) behind its id. The id is
+  // IDENTITY — chat pins and saved models reference it — so it never
+  // changes here (rename = remove + re-add). Pinned chats hot-apply the
+  // fresh endpoint at their next machine gate (the switch path: cache
+  // sync + carried-pin rebuild); no wire notice (the pin didn't move).
+  rpc UpdateProvider(UpdateProviderRequest) returns (UpdateProviderResponse);
 }
 
 message ListProvidersRequest {}
@@ -68,6 +75,26 @@ message RemoveProviderRequest {
 }
 
 message RemoveProviderResponse {
+  string id = 1;
+  optional string error = 2;
+}
+
+message UpdateProviderRequest {
+  // The registry id to edit — unknown ids are refused. NEVER changes:
+  // it is the reference chat pins and saved models carry.
+  string id = 1;
+  // Interface protocol — validated exactly like add (only "openai"
+  // today). Empty = the server default.
+  string protocol = 2;
+  // Endpoint base url. Absent/empty = the OpenAI default base url.
+  optional string url = 3;
+  // TRI-STATE: absent = KEEP the stored api_key (it never leaves the
+  // server, so the client has nothing to resend); present = replace it
+  // (empty string clears a stored key).
+  optional string api_key = 4;
+}
+
+message UpdateProviderResponse {
   string id = 1;
   optional string error = 2;
 }

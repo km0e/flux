@@ -18,8 +18,8 @@ use flux_core::ToolRegistry;
 use flux_session::ServerState;
 use flux_store::Store;
 use flux_tools::{
-    BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
-    SkillListTool, WriteFileTool,
+    BashTool, EditFileTool, EditFilesTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
+    ReadFilesTool, ReplaceLinesTool, SkillListTool, WriteFileTool,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -189,10 +189,12 @@ async fn main() -> anyhow::Result<()> {
     let tool_registry = Arc::new(ToolRegistry::new());
 
     tool_registry.register(Arc::new(ReadFileTool::new()));
+    tool_registry.register(Arc::new(ReadFilesTool::new()));
     tool_registry.register(Arc::new(GlobTool::new()));
     tool_registry.register(Arc::new(GrepTool::new()));
     tool_registry.register(Arc::new(ListDirectoryTool::new()));
     tool_registry.register(Arc::new(EditFileTool::new()));
+    tool_registry.register(Arc::new(EditFilesTool::new()));
     tool_registry.register(Arc::new(WriteFileTool::new()));
     tool_registry.register(Arc::new(ReplaceLinesTool::new()));
     tool_registry.register(Arc::new(BashTool::new()));

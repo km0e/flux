@@ -1,18 +1,31 @@
 /**
- * shots.mjs — screenshot tour of the Flux web UI (design review aid).
+ * shots.mjs — screenshot tour of the Flux web UI (design review aid +
+ * visual-regression driver).
  *
  * Drives the SAME real stack as ui-check.mjs (cargo flux-server +
  * fake-provider.mjs + headless Chrome over raw CDP — node ≥ 22 global
- * WebSocket, zero extra dependencies) but asserts nothing: it walks the
- * surface a designer/reviewer cares about and saves PNGs.
+ * WebSocket, zero extra dependencies) and walks the surface a
+ * designer/reviewer cares about.
  *
  * Shots (light + dark where it matters):
- *   1. empty-state      — fresh chat, prompt cards
- *   2. conversation     — user bubble + assistant reply + completed tool card
- *   3. settings         — the (lazy-loaded) Settings dialog, Providers section
- *   4. mobile           — 390×844: conversation with the drawer out
+ *   1.    empty-state      — fresh chat, prompt cards
+ *   2.x   conversation     — reply + prose sample + tool cards + search bar,
+ *                            palette, shortcuts sheet, mention popup
+ *   3.x   dark             — the conversation + the dock's terminal tab
+ *   4.x   settings (light) — Providers + the MCP section's empty face
+ *   5/6.  mobile           — 390×844: drawer out + plain chat
  *
- * Usage:  npm run shots          (from clients/web) → e2e/.shots/*.png
+ * Modes (e2e/visual-diff.mjs carries the pixel math — still zero deps,
+ * the diff runs inside the already-launched Chrome):
+ *   npm run shots           → e2e/.shots/*.png (gitignored), review aid
+ *   npm run shots:update    → snapshot the shots into e2e/.baseline/
+ *                             (LOCAL + gitignored — the session's
+ *                             accepted appearance, never a pinned design;
+ *                             re-snapshot whenever the new look is chosen)
+ *   npm run shots:check     → re-tour, then pixel-compare against the
+ *                             snapshot; exits 1 over the diff budget and
+ *                             writes <name>.diff.png heatmaps to .shots/
+ *
  * Requires the same as ui-check: node ≥ 22, cargo, Chrome/Chromium.
  */
 import { spawn, execSync } from 'node:child_process';
@@ -21,6 +34,7 @@ import { tmpdir } from 'node:os';
 import { createServer } from 'node:net';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { parseVisualArgs, updateBaselines, compareShot } from './visual-diff.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIR = path.resolve(HERE, '..');
@@ -28,6 +42,10 @@ const REPO_ROOT = path.resolve(WEB_DIR, '..', '..');
 const SERVER_BIN = path.join(REPO_ROOT, 'target', 'debug', 'flux-server');
 const DIST = path.join(WEB_DIR, 'dist');
 const OUT_DIR = path.join(HERE, '.shots');
+const BASELINE_DIR = path.join(HERE, '.baseline');
+
+/** Shot names captured this run, in tour order (the diff loops over it). */
+const taken = [];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -158,9 +176,18 @@ async function connectCdp(port, urlFilter) {
       await sleep(250);
     }
   };
-  /** Screenshot → OUT_DIR/<name>.png (fonts flushed first). */
+  /** Screenshot → OUT_DIR/<name>.png (fonts flushed, loops phase-locked). */
   const shot = async (name) => {
     await evalJs(`document.fonts.ready.then(() => {})`);
+    // Phase-lock INFINITE animations before capture: a looping effect is
+    // caught at a random phase and would diff every run. (The Flux line
+    // only sweeps while a round streams — the tour shoots after wrap-up —
+    // but this keeps the contract total for future looped effects.)
+    // Finite animations settle on their own; the tour's sleeps cover them.
+    await evalJs(
+      `document.getAnimations({subtree:true}).forEach((a)=>{` +
+        `try{if(a.effect.getTiming().iterations===Infinity){a.pause();a.currentTime=10000;}}catch{}})`,
+    );
     await sleep(150);
     const { data } = await send('Page.captureScreenshot', {
       format: 'png',
@@ -168,6 +195,7 @@ async function connectCdp(port, urlFilter) {
     });
     const file = path.join(OUT_DIR, `${name}.png`);
     writeFileSync(file, Buffer.from(data, 'base64'));
+    taken.push(name);
     console.log(`  📸 ${file}`);
   };
   return { ws, send, evalJs, waitFor, shot };
@@ -188,6 +216,19 @@ function findChrome() {
 // ── Tour ────────────────────────────────────────────────────────────────
 
 async function main() {
+  const visual = parseVisualArgs(process.argv.slice(2));
+  if (visual.mode === 'help') {
+    console.log(
+      'usage: node e2e/shots.mjs [--check | --update-baseline] [--max-diff=PCT] [--tolerance=N]\n' +
+        '  (no flag)          tour → e2e/.shots/*.png (design-review aid)\n' +
+        '  --update-baseline  tour, then snapshot shots into e2e/.baseline/ (local, gitignored)\n' +
+        '  --check            tour, then pixel-compare vs .baseline/; exit 1 over budget;\n' +
+        '                     writes <name>.diff.png heatmaps into .shots/\n' +
+        '  --max-diff=PCT     acceptance budget, % of pixels (default 0.2)\n' +
+        '  --tolerance=N      per-channel noise floor 0–255 (default 16)',
+    );
+    return;
+  }
   if (typeof WebSocket !== 'function') {
     console.error('shots needs node ≥ 22 (global WebSocket).');
     process.exit(2);
@@ -316,10 +357,83 @@ async function main() {
   await sleep(400);
   await shot('2-conversation-light');
 
+  // 2.5 Transcript search — the floating find bar over the conversation
+  // (matches painted by the Custom Highlight API, no DOM mutation).
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await evalJs(`(() => {
+    const input = document.querySelector('#transcript-search input');
+    const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+    setter.call(input, 'hello');
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+  await shot('2b-search-light');
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(200);
+
+  // 2.6 Command palette — the Ctrl/Cmd+K quick switcher over the registry.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', ctrlKey: true, bubbles: true, cancelable: true }))`,
+  );
+  await sleep(300);
+  await shot('2c-palette-light');
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(200);
+
+  // 2.7 Keyboard shortcuts sheet — registry chords + composer bindings.
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: '?', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(300);
+  await shot('2d-shortcuts-light');
+  await evalJs(
+    `document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }))`,
+  );
+  await sleep(200);
+
+  // 2.8 @-mention completion — the path popup over the composer.
+  await evalJs(`(() => {
+    const input = document.getElementById('input');
+    input.focus();
+    input.value = '@';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(300);
+  await shot('2e-mention-light');
+  await evalJs(`(() => {
+    const input = document.getElementById('input');
+    input.value = '';
+    input.dispatchEvent(new Event('input', { bubbles: true }));
+  })()`);
+  await sleep(150);
+
   // Dark theme, same conversation.
   await evalJs(`document.documentElement.dataset.theme = 'dark'`);
   await sleep(300);
   await shot('3-conversation-dark');
+
+  // 3.5 Terminal — the dock's terminal tab (xterm chrome + the NF terminal
+  // face under the dark theme). Explicit ask through the strip's "+" —
+  // never auto-spawned; the dock closes again so later shots start clean.
+  await evalJs(`document.getElementById('dock-toggle').click()`);
+  await sleep(300);
+  await evalJs(`document.querySelector('#right-dock button[aria-label="New terminal"]').click()`);
+  await waitFor(`!!document.querySelector('#right-dock .xterm')`, 'xterm mounted');
+  await sleep(800); // shell prompt lands, connecting pulse gone
+  await shot('3b-terminal-dark');
+  await evalJs(`document.getElementById('dock-toggle').click()`);
+  await sleep(250);
+
+  // Back to light — the settings shots are named -light, and the dark
+  // switch above must not leak into them.
+  await evalJs(`document.documentElement.dataset.theme = 'light'`);
+  await sleep(250);
 
   // 4. Settings — ALSO the runtime smoke of the lazy-loaded dialog chunk:
   // the gear click must pull SettingsDialog-*.js and render the panels.
@@ -331,9 +445,19 @@ async function main() {
   await sleep(600); // providers list fetch + catalog probe
   await shot('4-settings-providers-light');
 
-  // Close settings, back to dark conversation, close the drawer → plain chat.
+  // 4b. The MCP section — the rail + empty-state language (the fake stack
+  // registers no servers, so this is the panel's no-data face).
+  await evalJs(
+    `[...document.querySelectorAll('[role="dialog"] [role="tab"]')].find((t) => t.textContent.includes('MCP')).click()`,
+  );
+  await sleep(400);
+  await shot('4b-settings-mcp-light');
+
+  // Close settings, restore the dark theme for the mobile regime, close the drawer → plain chat.
   await evalJs(`document.querySelector('[role="dialog"] button[aria-label="Close"], [role="dialog"] [data-state="open"] [aria-label="Close"]')?.click()`);
   await sleep(300);
+  await evalJs(`document.documentElement.dataset.theme = 'dark'`);
+  await sleep(250);
 
   // 5. MOBILE regime — 390×844 (dsf 3, like a real phone).
   await send('Emulation.setDeviceMetricsOverride', { width: 390, height: 844, deviceScaleFactor: 3, mobile: true });
@@ -349,6 +473,47 @@ async function main() {
   await evalJs(`document.getElementById('sidebar-toggle').click()`);
   await sleep(400);
   await shot('6-mobile-chat-dark');
+
+  // ── Visual-regression dispatch (e2e/visual-diff.mjs) ──────────────────
+  if (visual.mode === 'update-baseline') {
+    updateBaselines(OUT_DIR, BASELINE_DIR, taken);
+    console.log(
+      `\nbaseline updated — ${taken.length} shots → ${path.relative(WEB_DIR, BASELINE_DIR)}` +
+        `\n(local + gitignored: the session's accepted appearance, not a pinned design —` +
+        `\n--check now diffs against THIS look; re-snapshot whenever you accept a new one.)`,
+    );
+  } else if (visual.mode === 'check') {
+    if (!existsSync(BASELINE_DIR)) {
+      console.error(
+        `\nno snapshot yet (${path.relative(WEB_DIR, BASELINE_DIR)} missing) — run: npm run shots:update`,
+      );
+      process.exit(2);
+    }
+    let failed = 0;
+    console.log(`\nvisual check — budget ${visual.maxDiff}% · tolerance ${visual.tolerance}:`);
+    for (const name of taken) {
+      const r = await compareShot({
+        evalJs,
+        shotsDir: OUT_DIR,
+        baselineDir: BASELINE_DIR,
+        name,
+        tolerance: visual.tolerance,
+      });
+      const pct = r.ratio * 100;
+      const pass = pct <= visual.maxDiff;
+      if (!pass) failed++;
+      console.log(
+        `  ${pass ? '  ✓' : '  ✗'} ${name} — ${r.diffPixels} px (${pct.toFixed(4)}%)` +
+          (pass ? '' : `  → ${name}.diff.png`),
+      );
+    }
+    if (failed > 0) {
+      console.error(`\nvisual check FAILED — ${failed}/${taken.length} shot(s) over budget.`);
+      console.log('done.');
+      process.exit(1);
+    }
+    console.log(`visual check passed — ${taken.length}/${taken.length} within budget.`);
+  }
 
   console.log('\ndone.');
   process.exit(0);

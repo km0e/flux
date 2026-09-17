@@ -5,10 +5,27 @@
  * deletion prunes).
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, fireEvent } from '@testing-library/react';
+import { render, fireEvent, screen } from '@testing-library/react';
 import { ChatInput } from '../../components/ChatInput';
 import { getDraft, saveDraft, pruneDrafts } from '../../services/drafts';
 import { pairForkDraft, stashForkDraft } from '../../services/forkDraft';
+import { useFlux, resetFluxForTest } from '../../core/state';
+import { listDir } from '../../services/fs';
+import { _resetMentionForTest } from '../../services/mention';
+import type { FsListing } from '../../core/types';
+
+vi.mock('../../services/fs', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../services/fs')>()),
+  listDir: vi.fn(),
+}));
+
+function fsListing(entries: Array<[string, 'dir' | 'file']>): FsListing {
+  return {
+    type: 'fs_listing',
+    requested: '',
+    entries: entries.map(([name, kind]) => ({ name, kind })),
+  };
+}
 
 // Drafts persist across renders BY DESIGN (that is the feature) — wipe the
 // memory LRU + sessionStorage before every test so the shared "test-chat"
@@ -193,5 +210,100 @@ describe('ChatInput drafts (per-chat composer preservation)', () => {
     expect(getDraft('draft-dead')).toBe('');
     expect(sessionStorage.getItem('flux:draft:draft-dead')).toBeNull();
     expect(getDraft('draft-alive')).toBe('kept chat');
+  });
+});
+
+// ── @-mention completion + drop-to-reference ─────────────────────────────
+// A nested describe with its OWN store reset: the popup needs a chat with
+// a workdir (the token has nowhere to resolve without one), and the file's
+// other suites run store-free.
+describe('ChatInput @-mentions', () => {
+  beforeEach(() => {
+    resetFluxForTest();
+    vi.clearAllMocks();
+    sessionStorage.clear();
+    pruneDrafts(new Set());
+    _resetMentionForTest(); // the dir cache outlives tests and would shadow the per-test listings
+    useFlux.setState({
+      chats: [
+        { id: 'test-chat', name: 'T', createdAt: 1, active: false, workdir: '/proj', provider: '', model: '' },
+      ],
+    });
+    vi.mocked(listDir).mockResolvedValue(
+      fsListing([
+        ['src', 'dir'],
+        ['notes.md', 'file'],
+        ['README.md', 'file'],
+      ]),
+    );
+  });
+
+  function type(text: string, caret: number) {
+    const input = screen.getByPlaceholderText(/Ask Flux/) as HTMLTextAreaElement;
+    input.value = text;
+    input.setSelectionRange(caret, caret);
+    fireEvent.input(input);
+    return input;
+  }
+
+  it("typing '@' opens the completion popup with the workdir listing", async () => {
+    render(<ChatInput chatId="test-chat" onSend={vi.fn()} onCancel={vi.fn()} disabled={false} streaming={false} />);
+    type('@', 1);
+    const popup = await screen.findByRole('listbox', { name: 'File path completion' });
+    expect(popup.textContent).toContain('src/');
+    expect(popup.textContent).toContain('notes.md');
+  });
+
+  it('Enter inserts the highlighted path + space, closes, and does NOT send', async () => {
+    vi.mocked(listDir).mockResolvedValue(fsListing([['notes.md', 'file']]));
+    const onSend = vi.fn();
+    render(<ChatInput chatId="test-chat" onSend={onSend} onCancel={vi.fn()} disabled={false} streaming={false} />);
+    const input = type('look at @', 9);
+    await screen.findByRole('listbox', { name: 'File path completion' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(input.value).toBe('look at notes.md ');
+    expect(screen.queryByRole('listbox', { name: 'File path completion' })).toBeNull();
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('ArrowDown roves; Escape closes locally without sending', async () => {
+    const onSend = vi.fn();
+    render(<ChatInput chatId="test-chat" onSend={onSend} onCancel={vi.fn()} disabled={false} streaming={false} />);
+    const input = type('@', 1);
+    await screen.findByRole('listbox', { name: 'File path completion' });
+    const options = () => [...screen.getByRole('listbox').querySelectorAll('[role="option"]')];
+    expect(options()[0].getAttribute('aria-selected')).toBe('true'); // dirs first
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    expect(options()[2].getAttribute('aria-selected')).toBe('true'); // files after dirs
+    fireEvent.keyDown(input, { key: 'Escape' });
+    expect(screen.queryByRole('listbox', { name: 'File path completion' })).toBeNull();
+    expect(input.value).toBe('@'); // untouched
+    expect(onSend).not.toHaveBeenCalled();
+  });
+
+  it('a directory choice keeps the popup open for the next segment', async () => {
+    render(<ChatInput chatId="test-chat" onSend={vi.fn()} onCancel={vi.fn()} disabled={false} streaming={false} />);
+    const input = type('@', 1);
+    await screen.findByRole('listbox', { name: 'File path completion' });
+    fireEvent.keyDown(input, { key: 'Enter' }); // picks 'src/' (dirs first)
+    expect(input.value).toBe('@src/'); // dirs KEEP the @ — the token re-anchors
+    // Still open — the drill-down listing resolves for the next segment.
+    const popup = await screen.findByRole('listbox', { name: 'File path completion' });
+    expect(popup).not.toBeNull();
+  });
+
+  it('dropping an Explorer row inserts the workdir-relative path at the caret', () => {
+    render(<ChatInput chatId="test-chat" onSend={vi.fn()} onCancel={vi.fn()} disabled={false} streaming={false} />);
+    const input = screen.getByPlaceholderText(/Ask Flux/) as HTMLTextAreaElement;
+    input.value = 'review ';
+    input.setSelectionRange(7, 7);
+    fireEvent.drop(input, {
+      dataTransfer: {
+        types: ['text/plain'],
+        getData: () => '/proj/src/lib/dom.ts',
+      },
+    });
+    expect(input.value).toBe('review src/lib/dom.ts ');
   });
 });

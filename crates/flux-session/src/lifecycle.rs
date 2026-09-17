@@ -85,6 +85,30 @@ impl ServerState {
         chat.task = Some(ChatTask {
             handle: handle.clone(),
         });
+        // Round boundaries → sidebar truth: the engine's round-state watch
+        // fires exactly on the Idle↔Streaming transitions (send mid-round
+        // wraps report both), and each flip re-broadcasts the chat list so
+        // EVERY window's sidebar `running` flag stays current — not just
+        // this chat's viewers. One spawn per task (lazy, on first message
+        // or stale replacement); the watcher exits when the task dies
+        // (clean halt, abort, chat deletion) — its sender drops with the
+        // consumer's deps.
+        let mut state_rx = handle.subscribe_state();
+        let state = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut saw_running = false;
+            while state_rx.changed().await.is_ok() {
+                saw_running = *state_rx.borrow() == flux_core::ChatStateKind::Streaming;
+                state.broadcast_chats().await;
+            }
+            // The task died: the slot never writes Idle on the way out, so
+            // a sidebar last shown a running chat would spin forever. One
+            // final broadcast — `info()` reads the live-task truth (a dead
+            // task is filtered), so it clears the flag (or drops the chat).
+            if saw_running {
+                state.broadcast_chats().await;
+            }
+        });
         Ok(handle)
     }
 
@@ -125,6 +149,57 @@ impl ServerState {
         }
     }
 
+    /// Re-resolve every chat pinned to `provider_id` against the CURRENT
+    /// registry and push the fresh instance to the chat cache AND its live
+    /// engines — the endpoint-edit path (UpdateProvider): url / api_key
+    /// changed BEHIND the pin, so the pin (id + model) stays while the
+    /// instance must not. The resolver arrives from the server registry
+    /// (the session layer owns no provider registry). The mechanics are
+    /// the switch path's: cache sync (`chat.provider`), then a
+    /// carried-pin `Rebuild` — a live round and queued turns finish
+    /// first, the fresh endpoint rides the re-begin at the fired gate; a
+    /// chat without a live task just re-reads its cache at the next lazy
+    /// spawn. A pin that no longer resolves (a racing remove) keeps its
+    /// stale instance — the next round fails naming the pin (the remove
+    /// semantics). No `provider_switched` wire notice: the pin didn't
+    /// move, only the endpoint behind it did.
+    pub async fn refresh_chats_pinned_to(
+        &self,
+        provider_id: &str,
+        resolve: impl Fn(&str, &str) -> Option<Arc<dyn flux_core::Provider>>,
+    ) {
+        // Snapshot the matching chats' (id, model) under the read lock;
+        // the per-chat work takes the write lock one entry at a time.
+        let matching: Vec<(String, String)> = {
+            let chats = self.manager.chats.read().await;
+            chats
+                .iter()
+                .filter(|(_, c)| c.provider_id == provider_id)
+                .map(|(id, c)| (id.clone(), c.model.clone()))
+                .collect()
+        };
+        for (chat_id, model) in matching {
+            let Some(provider) = resolve(provider_id, &model) else {
+                continue; // unresolvable (racing remove): keep the stale pin
+            };
+            let mut chats = self.manager.chats.write().await;
+            let Some(chat) = chats.get_mut(&chat_id) else {
+                continue; // reaped between the snapshot and the lock
+            };
+            if chat.provider_id != provider_id {
+                continue; // re-pinned meanwhile — never clobber a newer pin
+            }
+            chat.provider = Some(provider.clone());
+            if let Some(handle) = chat.live_task() {
+                handle.rebuild(Some(flux_chat::ResolvedPin {
+                    provider,
+                    id: chat.provider_id.clone(),
+                    model: chat.model.clone(),
+                }));
+            }
+        }
+    }
+
     /// Rebuild EVERY chat's engine. Tool-registry changes are global
     /// truth: each respawn re-assembles from the CURRENT global registry.
     /// Chats without a live task skip the quiesce — their next lazy spawn
@@ -149,6 +224,7 @@ mod tests {
     use flux_proto::flux::v1::subscribe_response::Kind;
     use flux_store::Store;
     use std::sync::Arc;
+    use std::sync::Mutex as StdMutex;
 
     async fn task_exists(state: &ServerState, chat_id: &str) -> bool {
         state
@@ -353,5 +429,112 @@ mod tests {
             MutateOutcome::Ok
         );
         assert!(state.manager.chats.read().await.get(&cid).is_none());
+    }
+
+    // ── refresh_chats_pinned_to (the provider ENDPOINT-edit apply) ────
+
+    #[tokio::test]
+    async fn refresh_swaps_the_cache_only_for_the_matching_pin() {
+        let state = test_state(Arc::new(Store::open_in_memory().await.unwrap())).await;
+        let old = Arc::new(DummyProvider) as Arc<dyn flux_core::Provider>;
+        let fresh = Arc::new(DummyProvider) as Arc<dyn flux_core::Provider>;
+        // Two chats: `c1` pinned to "test" (the create_chat helper's pin
+        // id), `c2` pinned to "other" — both on the SAME old instance.
+        let (c1, _frames, _r1) = create_chat(&state, "a", Arc::clone(&old)).await;
+        register(&state, "b").await;
+        let c2 = state
+            .create_chat(
+                &sess(&state, "b").await,
+                "c2",
+                "/tmp",
+                flux_chat::ResolvedPin {
+                    provider: Arc::clone(&old),
+                    id: "other".into(),
+                    model: String::new(),
+                },
+            )
+            .await
+            .unwrap()
+            .chat_id;
+
+        state
+            .refresh_chats_pinned_to("test", |id, _model| {
+                (id == "test").then(|| Arc::clone(&fresh))
+            })
+            .await;
+
+        let chats = state.manager.chats.read().await;
+        assert!(
+            Arc::ptr_eq(chats.get(&c1).unwrap().provider.as_ref().unwrap(), &fresh),
+            "the matching pin's cache instance must be the fresh one"
+        );
+        assert!(
+            Arc::ptr_eq(chats.get(&c2).unwrap().provider.as_ref().unwrap(), &old),
+            "a pin to a DIFFERENT provider is never touched"
+        );
+    }
+
+    #[tokio::test]
+    async fn refresh_keeps_the_stale_instance_when_the_pin_no_longer_resolves() {
+        let state = test_state(Arc::new(Store::open_in_memory().await.unwrap())).await;
+        let old = Arc::new(DummyProvider) as Arc<dyn flux_core::Provider>;
+        let (cid, _frames, _r) = create_chat(&state, "a", Arc::clone(&old)).await;
+
+        // A racing remove: the resolver misses. The stale instance stays —
+        // the next round fails naming the pin (the remove semantics), the
+        // cache never grows a phantom.
+        state.refresh_chats_pinned_to("test", |_, _| None).await;
+
+        let chats = state.manager.chats.read().await;
+        assert!(Arc::ptr_eq(
+            chats.get(&cid).unwrap().provider.as_ref().unwrap(),
+            &old
+        ));
+    }
+
+    #[tokio::test]
+    async fn refresh_carries_the_fresh_pin_to_a_live_engine() {
+        let state = test_state(Arc::new(Store::open_in_memory().await.unwrap())).await;
+        // Round 1 runs on the scripted provider; the FRESH instance is a
+        // recording one — its begin count is the rebuild's landing proof.
+        let provider = replay_provider(vec![vec![
+            ScriptItem::Chunk(Ok(StreamChunk::Text("one".into()))),
+            ScriptItem::Chunk(Ok(StreamChunk::End {
+                finish_reason: None,
+            })),
+        ]]);
+        let (cid, frames, _router) = create_chat(&state, "a", provider).await;
+        state
+            .send_message(&sess(&state, "a").await, &cid, "hi".into())
+            .await
+            .unwrap();
+        wait_for_kind(&frames, "stream_end").await;
+
+        let begins = Arc::new(StdMutex::new(Vec::new()));
+        let fresh: Arc<dyn flux_core::Provider> = Arc::new(crate::test_util::RecordingProvider {
+            opens: Arc::clone(&begins),
+        });
+        state
+            .refresh_chats_pinned_to("test", |_, _| Some(Arc::clone(&fresh)))
+            .await;
+
+        // The gate fired after the finished round: the fresh instance
+        // re-began over the full persisted history (user "hi" + assistant
+        // "one") — the carried-pin rebuild's landing proof.
+        wait_for(|| begins.try_lock().map(|b| !b.is_empty()).unwrap_or(false)).await;
+        {
+            let b = begins.lock().unwrap();
+            assert_eq!(b.len(), 1, "the fresh instance began exactly once");
+            assert_eq!(b[0].len(), 2);
+            assert_eq!(b[0][0].role, flux_core::Role::User);
+            assert_eq!(b[0][1].role, flux_core::Role::Assistant);
+        }
+        // The cache carries the fresh instance too (the lazy-spawn path).
+        let chats = state.manager.chats.read().await;
+        assert!(Arc::ptr_eq(
+            chats.get(&cid).unwrap().provider.as_ref().unwrap(),
+            &fresh
+        ));
+        assert!(task_exists(&state, &cid).await);
     }
 }

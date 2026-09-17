@@ -64,6 +64,27 @@ describe('Explorer', () => {
     expect(screen.getByText('120 B')).toBeTruthy();
   });
 
+  it('rows are drag sources carrying the absolute path (composer drop-to-reference)', async () => {
+    mockFs(() => ({
+      type: 'fs_listing',
+      requested: '/proj',
+      path: '/proj',
+      parent: '/',
+      entries: [{ name: 'README.md', kind: 'file' as const, size: 120 }],
+    }));
+    render(<Explorer key="/proj" />);
+    await waitFor(() => {
+      expect(screen.getByTitle('/proj/README.md')).toBeTruthy();
+    });
+    const row = screen.getByTitle('/proj/README.md');
+    expect(row.getAttribute('draggable')).toBe('true');
+    const setData = vi.fn();
+    fireEvent.dragStart(row, {
+      dataTransfer: { setData, effectAllowed: 'none' },
+    });
+    expect(setData).toHaveBeenCalledWith('text/plain', '/proj/README.md');
+  });
+
   it('expanding a subdirectory lists its contents', async () => {
     const listed: string[] = [];
     mockFs(

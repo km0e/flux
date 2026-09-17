@@ -154,7 +154,7 @@ function ModelEditForm(props: {
           onChange={(v) => patch({ top_p: v })}
         />
       </div>
-      <span className="text-2xs leading-relaxed text-faint">
+      <span className="text-2xs leading-relaxed text-muted">
         Unset fields are omitted — the upstream default applies. Edits never touch the
         models.dev snapshot; a failed round names a bad value.
       </span>

@@ -11,7 +11,7 @@
 
 use crate::identity::SessionRef;
 use crate::router::RouterHandle;
-use flux_core::{Provider, ToolRegistry};
+use flux_core::{ChatStateKind, Provider, ToolRegistry};
 use flux_store::Store;
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -112,6 +112,12 @@ impl CachedChat {
             last_activity_at: self.last_activity_at.clone(),
             // Wire `active` means a lease is held.
             active: self.lease.is_some(),
+            // Wire `running` = a live task's round is in flight. The done
+            // filter matters: a task that died mid-stream freezes its slot
+            // at Streaming — that is not a running chat.
+            running: self
+                .live_task()
+                .is_some_and(|h| h.state() == ChatStateKind::Streaming),
             workdir: self.workdir.clone(),
             provider: self.provider_id.clone(),
             model: self.model.clone(),
@@ -159,6 +165,9 @@ pub struct ChatInfoOwned {
     pub last_activity_at: String,
     /// Whether a session holds the lease — the wire `active` flag.
     pub active: bool,
+    /// Whether a round is in flight on the chat's live task — the wire
+    /// `running` flag (the sidebar's marker).
+    pub running: bool,
     /// The chat's working directory.
     pub workdir: String,
     /// The chat's pinned provider registry id.
@@ -178,6 +187,7 @@ impl From<&ChatInfoOwned> for flux_proto::flux::v1::ChatInfo {
             last_activity_at: i.last_activity_at.clone(),
             // Wire `active` means a lease is held.
             active: i.active,
+            running: i.running,
             workdir: i.workdir.clone(),
             provider: i.provider.clone(),
             model: i.model.clone(),

@@ -27,9 +27,25 @@ import { restoreTerminals } from '../services/terminal';
 import { useEscapeKey } from '../hooks/useEscapeKey';
 import { useEdgeResize, edgeResizeKeys, type EdgeResizeSpec } from '../hooks/useEdgeResize';
 import { isMobileViewport } from '../hooks/useIsMobile';
+
+/** A literal-character keypress (e.g. '?' = Shift+/) must not fire while
+ * the user is typing into a field — only bare app-surface keys open UI. */
+function isTypingTarget(target: EventTarget | null): boolean {
+  const el = target as HTMLElement | null;
+  if (!el) return false;
+  const tag = el.tagName;
+  return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || el.isContentEditable;
+}
 import { bridge } from '../core/bridge';
 import { discardInterrupt } from '../services/stream-handler';
-import { storeSidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from '../core/prefs';
+import {
+  closeSearch,
+  openSearch,
+  searchSupported,
+} from '../services/transcript-search';
+import { CommandPalette } from './CommandPalette';
+import { ShortcutsDialog } from './ShortcutsDialog';
+import { storeSidebarWidth, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH, clampSidebarWidth } from '../core/prefs';
 import { cn } from '../lib/cn';
 
 export function App(): React.ReactElement {
@@ -57,6 +73,13 @@ export function App(): React.ReactElement {
     )
       return;
     const { activeChatId, streaming, sidebarOpen } = useFlux.getState();
+    // The transcript search bar is a non-Radix surface but owns Escape
+    // when open: closing it must not ALSO cancel the live round beneath
+    // (same layering rule as the drawer — one Escape, one surface).
+    if (useFlux.getState().searchOpen) {
+      closeSearch();
+      return;
+    }
     // The mobile drawer is the topmost surface while open and has no Radix
     // layer of its own — Escape closes it first, and must not ALSO cancel
     // the live round underneath. Desktop Escape falls through to cancel.
@@ -72,9 +95,21 @@ export function App(): React.ReactElement {
   useEscapeKey(onEscape);
 
   // Ctrl/Cmd+B toggles the sidebar; Ctrl/Cmd+J toggles the file &
-  // terminal dock (VS Code's panel chord — the two edges pair).
+  // terminal dock (VS Code's panel chord — the two edges pair);
+  // Ctrl/Cmd+F opens the scoped transcript search — but ONLY when the
+  // Custom Highlight API exists (the interception REPLACES native find;
+  // without it the browser's own find bar stays available) and a chat is
+  // active (no pane, nothing to search).
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      // '?' (Shift+/) opens the shortcuts sheet — but never while the
+      // user is TYPING (inputs, textareas, contentEditables): a literal
+      // question mark must stay a question mark.
+      if (e.key === '?' && !isTypingTarget(e.target)) {
+        e.preventDefault();
+        useFlux.getState().setShortcutsOpen(true);
+        return;
+      }
       if (!(e.ctrlKey || e.metaKey)) return;
       const key = e.key.toLowerCase();
       if (key === 'b') {
@@ -83,6 +118,16 @@ export function App(): React.ReactElement {
       } else if (key === 'j') {
         e.preventDefault();
         useFlux.setState({ dockOpen: !useFlux.getState().dockOpen });
+      } else if (key === 'f') {
+        if (!searchSupported() || !useFlux.getState().activeChatId) return;
+        e.preventDefault();
+        openSearch();
+      } else if (key === 'k') {
+        // The palette is ALWAYS available (actions work without a chat) —
+        // and the intercept must preventDefault unconditionally, or Chrome
+        // moves focus to the omnibox.
+        e.preventDefault();
+        useFlux.getState().setPaletteOpen(true);
       }
     };
     window.addEventListener('keydown', onKey);
@@ -104,11 +149,18 @@ export function App(): React.ReactElement {
   // lives in the shared hook — the sidebar tracks the pointer's x. The
   // keyboard contract rides the same spec: the separator is focusable and
   // the arrows nudge ±24px (the dock's separator behaves identically).
+  // The clamp is dock-aware: an OPEN dock plus the conversation floor
+  // bounds the sidebar on narrow viewports (CONVERSATION_MIN_WIDTH).
   const sidebarSpec: EdgeResizeSpec = {
     cssVar: '--fx-sidebar-w',
     dragClass: 'resizing-sidebar',
     widthAt: (e) => e.clientX,
-    clamp: (x: number) => Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, x)),
+    clamp: (x: number) =>
+      clampSidebarWidth(
+        x,
+        window.innerWidth,
+        useFlux.getState().dockOpen ? useFlux.getState().previewWidth : 0,
+      ),
     commit: (next: number) => {
       useFlux.setState({ sidebarWidth: next });
       storeSidebarWidth(next);
@@ -180,6 +232,8 @@ export function App(): React.ReactElement {
           {/* Unified non-blocking notifications (filesystem surfaces) — fixed
               stack, top right under the bar; fixed is out of flow so its
               position in the tree carries no layout. */}
+          <CommandPalette />
+          <ShortcutsDialog />
           <Toasts />
         </div>
       </ErrorBoundary>

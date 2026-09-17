@@ -2,15 +2,19 @@
  * ChatInput.tsx — Message composer.
  *
  * Auto-growing textarea with Enter-to-send (IME-safe), Shift+Enter newline,
- * a near-limit char counter, and a unified send/stop button.
+ * a near-limit char counter, and a unified send/stop button. `@` opens
+ * file-path completion (services/mention.ts — workdir-relative, lazy
+ * cached); dropping an Explorer row inserts its path at the caret.
  *
  * Provides: ChatInput
  */
 import { useEffect, useRef, useState } from 'react';
 import { cn } from '../lib/cn';
+import { useFlux } from '../core/state';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { takePendingDraft } from '../services/forkDraft';
 import { getDraft, saveDraft, clearDraft } from '../services/drafts';
+import { mentionTokenAt, completeMention, relativeToWorkdir } from '../services/mention';
 import { ArrowUp, Square } from 'lucide-react';
 
 interface ChatInputProps {
@@ -49,6 +53,19 @@ const CHAR_WARN_AT = 8000;
 export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: ChatInputProps): React.ReactElement {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [len, setLen] = useState(0);
+  // The composer's chat workdir — the mention tree and drop-path
+  // relativization both anchor here.
+  const workdir = useFlux((s) => s.chats.find((c) => c.id === chatId)?.workdir) ?? '';
+  // @-mention completion state: the token under the caret, its items,
+  // the roving index. The textarea is uncontrolled (house style); the
+  // popup is composer-local — Escape is consumed HERE (stopPropagation
+  // shields the app-level chain; a mention popup is narrower than the
+  // search bar, which is narrower than the drawer).
+  const [mention, setMention] = useState<{ start: number; token: string } | null>(null);
+  const [mentionItems, setMentionItems] = useState<string[]>([]);
+  const [mentionActive, setMentionActive] = useState(0);
+  const mentionKeyRef = useRef('');
+  const mentionSeqRef = useRef(0);
   // The keyboard-hint suffix is desktop-only: at the mobile 16px composer
   // font the full placeholder wraps to a second line inside the 40px
   // single-row textarea and clips mid-glyph.
@@ -142,9 +159,87 @@ export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: Cha
     if (!el) return;
     grow(el);
     setLen(el.value.length);
+    updateMention(el.value, el.selectionStart ?? el.value.length);
+  };
+
+  /** Re-evaluate the @-token under the caret. A key-ref dedupes: the
+   * keyup of an intercepted ArrowDown replays this with an UNCHANGED
+   * caret and must not reset the roving index (or refetch). */
+  const updateMention = (text: string, caret: number) => {
+    const m = mentionTokenAt(text, caret);
+    const key = m ? `${m.start}:${m.token}` : '';
+    if (key === mentionKeyRef.current) return;
+    mentionKeyRef.current = key;
+    if (!m || !workdir) {
+      setMention(null);
+      setMentionItems([]);
+      return;
+    }
+    setMention(m);
+    setMentionActive(0);
+    const seq = ++mentionSeqRef.current;
+    void completeMention(workdir, m.token).then((items) => {
+      if (mentionSeqRef.current !== seq) return; // a newer token won
+      setMentionItems(items);
+    });
+  };
+
+  const closeMention = () => {
+    mentionKeyRef.current = '';
+    setMention(null);
+    setMentionItems([]);
+  };
+
+  /** Replace the @-token with the chosen path. Files consume the '@'
+   * (the reference is complete — trailing space); directories KEEP it —
+   * '@src/' stays visible, the token re-anchors on the next segment, and
+   * the completion keeps drilling. */
+  const insertMention = (choice: string) => {
+    const el = inputRef.current;
+    if (!el || !mention) return;
+    const caret = el.selectionStart ?? el.value.length;
+    const isDir = choice.endsWith('/');
+    const head = isDir ? mention.start + 1 : mention.start;
+    const next = el.value.slice(0, head) + choice + (isDir ? '' : ' ') + el.value.slice(caret);
+    el.value = next;
+    const pos = head + choice.length + (isDir ? 0 : 1);
+    el.setSelectionRange(pos, pos);
+    grow(el);
+    setLen(el.value.length);
+    el.focus();
+    if (isDir) updateMention(el.value, pos);
+    else closeMention();
   };
 
   const onKeyDown = (e: React.KeyboardEvent) => {
+    // Completion keystrokes outrank composer chords: while the popup is
+    // open, Enter/Tab INSERT (never send), arrows rove, Escape closes
+    // locally (stopPropagation shields the app-level Escape chain).
+    if (mention && mentionItems.length > 0) {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault();
+        setMentionActive((a) => (a + 1) % mentionItems.length);
+        return;
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault();
+        setMentionActive((a) => (a - 1 + mentionItems.length) % mentionItems.length);
+        return;
+      }
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        const nat = e.nativeEvent as KeyboardEvent & { keyCode: number };
+        if (e.key === 'Enter' && (nat.isComposing || nat.keyCode === 229)) return;
+        e.preventDefault();
+        insertMention(mentionItems[mentionActive] as string);
+        return;
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        e.stopPropagation();
+        closeMention();
+        return;
+      }
+    }
     if (e.key === 'Enter' && !e.shiftKey) {
       // Enter during IME composition (CJK candidate selection) confirms the
       // candidate, it does not send — keyCode 229 is the legacy
@@ -161,7 +256,38 @@ export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: Cha
   };
 
   return (
-    <div id="input-area" className="flex flex-col">
+    <div id="input-area" className="relative flex flex-col">
+      {mention && mentionItems.length > 0 && (
+        <ul
+          id="mention-popup"
+          role="listbox"
+          aria-label="File path completion"
+          className={cn(
+            'absolute bottom-full left-0 z-20 mb-1 max-h-56 w-full overflow-y-auto',
+            'rounded-md border border-border bg-elev p-1 shadow-[var(--fx-shadow-pop)]',
+          )}
+        >
+          {mentionItems.map((p, i) => (
+            <li
+              key={p}
+              role="option"
+              aria-selected={i === mentionActive}
+              // mousedown, not click: it must run before the textarea
+              // blurs (preventDefault keeps the focus in the composer).
+              onMouseDown={(e) => {
+                e.preventDefault();
+                insertMention(p);
+              }}
+              className={cn(
+                'cursor-pointer truncate rounded-sm px-2.5 py-1.5 font-mono text-sm',
+                i === mentionActive ? 'bg-active text-fg' : 'text-muted hover:text-fg',
+              )}
+            >
+              {p}
+            </li>
+          ))}
+        </ul>
+      )}
       <div
         id="input-row"
         className={cn(
@@ -180,6 +306,31 @@ export function ChatInput({ chatId, onSend, onCancel, disabled, streaming }: Cha
           aria-description="Enter to send, Shift+Enter for newline, Escape to cancel"
           onKeyDown={onKeyDown}
           onInput={onInput}
+          onKeyUp={() => {
+            const el = inputRef.current;
+            if (!el) return;
+            updateMention(el.value, el.selectionStart ?? el.value.length);
+          }}
+          onDragOver={(e) => {
+            // Accept only Explorer-row drags (text/plain paths).
+            if (e.dataTransfer.types.includes('text/plain')) e.preventDefault();
+          }}
+          onDrop={(e) => {
+            const abs = e.dataTransfer.getData('text/plain');
+            if (!abs) return;
+            e.preventDefault();
+            const rel = relativeToWorkdir(abs, workdir);
+            if (!rel) return;
+            const el = inputRef.current;
+            if (!el) return;
+            const caret = el.selectionStart ?? el.value.length;
+            el.value = el.value.slice(0, caret) + rel + ' ' + el.value.slice(caret);
+            const pos = caret + rel.length + 1;
+            el.setSelectionRange(pos, pos);
+            grow(el);
+            setLen(el.value.length);
+            el.focus();
+          }}
           disabled={disabled}
           // `max-md:text-[16px]` is the ONE deliberate exception to the type
           // scale: iOS Safari zooms any focused input whose font is under

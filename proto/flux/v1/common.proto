@@ -95,6 +95,10 @@ message ChatInfo {
   // resolvable client-side from the chats list; a deleted source leaves
   // the raw id). Absent = not a fork.
   optional string forked_from_chat_id = 10;
+  // A round is in flight on this chat (the machine's Streaming state — a
+  // pending `question` counts). The sidebar's running marker; the truth is
+  // the live task's round state, re-broadcast on every round boundary.
+  bool running = 11;
 }
 
 // The model's question to the user (the `question` tool). Entirely

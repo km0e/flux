@@ -295,3 +295,109 @@ fn vec_field_has_array_type() {
     assert_eq!(item_schema["type"], "array");
     assert_eq!(item_schema["items"]["type"], "string");
 }
+
+// ── Array of objects: ToolItem derive ──
+
+#[derive(flux_macros::ToolItem, ::serde::Deserialize)]
+struct FilterItem {
+    /// Field name to filter on.
+    field: String,
+    /// Optional comparison value.
+    value: Option<String>,
+}
+
+#[derive(Tool, ::serde::Deserialize)]
+#[tool(name = "multi_tool", description = "Takes a list of items")]
+struct MultiTool {
+    /// The items to process.
+    items: Vec<FilterItem>,
+    /// Optional plain tags.
+    tags: Option<Vec<String>>,
+}
+
+impl MultiTool {
+    async fn execute(&self, _ctx: flux_core::ToolCtx) -> Result<String, CoreError> {
+        Ok(self
+            .items
+            .iter()
+            .map(|i| i.field.clone())
+            .collect::<Vec<_>>()
+            .join(","))
+    }
+}
+
+#[test]
+fn tool_item_schema_object_shape() {
+    let s = FilterItem::item_schema();
+    assert_eq!(s["type"], "object");
+    assert_eq!(s["properties"]["field"]["type"], "string");
+    assert_eq!(
+        s["properties"]["field"]["description"],
+        "Field name to filter on."
+    );
+    assert_eq!(s["properties"]["value"]["type"], "string");
+    assert_eq!(
+        s["properties"]["value"]["description"],
+        "Optional comparison value."
+    );
+    let required: Vec<_> = s["required"].as_array().unwrap().to_vec();
+    assert_eq!(
+        required,
+        vec![json!("field")],
+        "Option field stays optional"
+    );
+    assert_eq!(s["additionalProperties"], false);
+}
+
+#[test]
+fn array_of_objects_delegates_to_item_schema() {
+    let t = MultiTool {
+        items: vec![],
+        tags: None,
+    };
+    let schema = t.schema();
+    let items = &schema["properties"]["items"];
+    assert_eq!(items["type"], "array");
+    assert_eq!(items["description"], "The items to process.");
+    // Non-primitive item type → the item struct's own object schema.
+    assert_eq!(items["items"]["type"], "object");
+    assert_eq!(items["items"]["properties"]["field"]["type"], "string");
+    assert_eq!(items["items"]["additionalProperties"], false);
+    // Primitive item type (through Option<Vec<String>>) → typed scalar.
+    assert_eq!(schema["properties"]["tags"]["type"], "array");
+    assert_eq!(schema["properties"]["tags"]["items"]["type"], "string");
+    // Vec field is required; Option<Vec<_>> is not.
+    let required: Vec<_> = schema["required"].as_array().unwrap().to_vec();
+    assert_eq!(required, vec![json!("items")]);
+}
+
+#[tokio::test]
+async fn call_deserializes_nested_items() {
+    let t = MultiTool {
+        items: vec![],
+        tags: None,
+    };
+    let args = HashMap::from([(
+        "items".to_string(),
+        json!([{ "field": "a", "value": "x" }, { "field": "b" }]),
+    )]);
+    assert_eq!(
+        t.call(args, flux_core::ToolCtx::new()).await.unwrap(),
+        "a,b"
+    );
+}
+
+#[tokio::test]
+async fn call_rejects_malformed_nested_items() {
+    let t = MultiTool {
+        items: vec![],
+        tags: None,
+    };
+    // A string where the item object is expected → InvalidArguments.
+    let args = HashMap::from([("items".to_string(), json!(["not-an-object"]))]);
+    let err = t.call(args, flux_core::ToolCtx::new()).await.unwrap_err();
+    assert!(
+        matches!(err, CoreError::InvalidArguments(_)),
+        "malformed items must be InvalidArguments, got: {err}"
+    );
+}

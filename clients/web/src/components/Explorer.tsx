@@ -5,7 +5,8 @@
  * navigation, virtualization and a11y — Radix has no tree). Nodes are
  * addressed by full path (id IS the path) so the tree and the right-dock
  * preview share one address space. Directories lazy-load their children
- * via `fs_list` on first expand (onToggle). Drag-and-drop is disabled —
+ * via `fs_list` on first expand (onToggle). Rows drag OUT as text/plain
+ * paths (the composer's drop-to-reference) but the tree accepts no drops —
  * this is a browser, not a mover.
  *
  * Refresh: a manual button re-lists every loaded directory in place
@@ -342,6 +343,14 @@ function NodeRenderer(props: NodeRendererProps<FsNode>): React.ReactElement {
         previewing && 'bg-active',
       )}
       title={git ? `${d.id} (${git.word})` : d.id}
+      // A drag SOURCE only — the row's absolute path rides text/plain for
+      // the composer's drop-to-reference; the tree itself accepts no
+      // drops (a browser, not a mover).
+      draggable
+      onDragStart={(e) => {
+        e.dataTransfer.setData('text/plain', d.id);
+        e.dataTransfer.effectAllowed = 'copy';
+      }}
       onClick={(e) => {
         e.stopPropagation();
         if (d.kind === 'dir') node.toggle();

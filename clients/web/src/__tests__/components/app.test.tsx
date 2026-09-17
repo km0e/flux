@@ -4,10 +4,12 @@
  * bookkeeping).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { render, fireEvent, createEvent } from '@testing-library/react';
+import { render, fireEvent, createEvent, act } from '@testing-library/react';
 import { App } from '../../components/App';
 import { useFlux, resetFluxForTest } from '../../core/state';
 import { resetBridgeForTest, setBridge } from '../../core/bridge';
+import { getPane, _resetPanesForTest } from '../../services/panes';
+import { _resetSearchForTest, openSearch } from '../../services/transcript-search';
 
 // matchMedia stub — the drawer tests need the MOBILE regime; everything
 // else gets desktop. The flag is read live (useIsMobile's initializer and
@@ -29,6 +31,8 @@ describe('App', () => {
     vi.stubGlobal('matchMedia', matchMediaStub);
     resetFluxForTest();
     resetBridgeForTest();
+    _resetPanesForTest();
+    _resetSearchForTest();
     document.body.innerHTML = '<div id="host"></div>';
     localStorage.clear();
   });
@@ -99,6 +103,26 @@ describe('App', () => {
     expect(useFlux.getState().sidebarOpen).toBe(true);
   });
 
+  it("'?' opens the shortcuts sheet — a literal ? typed into a field does not", () => {
+    render(<App />);
+    fireEvent.keyDown(window, { key: '?' });
+    expect(useFlux.getState().shortcutsOpen).toBe(true);
+    useFlux.setState({ shortcutsOpen: false });
+    // A typing target must keep its literal question mark.
+    const ta = document.createElement('textarea');
+    document.body.appendChild(ta);
+    fireEvent.keyDown(ta, { key: '?' });
+    expect(useFlux.getState().shortcutsOpen).toBe(false);
+  });
+
+  it('Ctrl+K opens the command palette (with or without a chat)', () => {
+    render(<App />);
+    fireEvent.keyDown(window, { key: 'k', ctrlKey: true });
+    expect(useFlux.getState().paletteOpen).toBe(true);
+    fireEvent.keyDown(window, { key: 'k', metaKey: true });
+    expect(useFlux.getState().paletteOpen).toBe(true);
+  });
+
   it('Escape cancels the streaming round', () => {
     const send = vi.fn();
     setBridge({ send });
@@ -110,6 +134,33 @@ describe('App', () => {
       streaming: { c1: true },
     });
     render(<App />);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    expect(send).toHaveBeenCalledWith({ type: 'cancel', chat_id: 'c1' });
+  });
+
+  it('Escape closes the transcript search first and does NOT cancel the round', () => {
+    const send = vi.fn();
+    setBridge({ send });
+    useFlux.setState({
+      chats: [
+        { id: 'c1', name: 'R', createdAt: 1, active: false, workdir: '', provider: '', model: '' },
+      ],
+      activeChatId: 'c1',
+      streaming: { c1: true },
+    });
+    render(<App />);
+    // Open through the service (not a store preset) — the projection must
+    // be consistent with the service's opened-for chat.
+    getPane('c1').innerHTML = '<p>hit</p>';
+    act(() => {
+      openSearch();
+    });
+    expect(useFlux.getState().searchOpen).toBe(true);
+    fireEvent.keyDown(window, { key: 'Escape' });
+    // The search bar is the topmost surface — it closes; the round survives.
+    expect(useFlux.getState().searchOpen).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+    // Search closed — Escape cancels as usual.
     fireEvent.keyDown(window, { key: 'Escape' });
     expect(send).toHaveBeenCalledWith({ type: 'cancel', chat_id: 'c1' });
   });
@@ -274,9 +325,10 @@ describe('App', () => {
     // During the drag the var moves directly (zero React renders per
     // pointermove); the store stays untouched until release.
     fireEvent.pointerMove(window, { clientX: 200 });
-    // Clamped to both ceilings: innerWidth-280 (=1000) and PREVIEW_MAX (1080).
+    // Clamped to both ceilings: innerWidth-sidebar-280 (=760, the
+    // conversation floor behind BOTH panes) and PREVIEW_MAX (1080).
     expect(document.documentElement.style.getPropertyValue('--fx-preview-w')).toBe(
-      `${1280 - 280}px`,
+      `${1280 - 240 - 280}px`,
     );
     expect(useFlux.getState().previewWidth).toBe(480); // not yet committed
     // Release commits the store + persists + clears the drag state.

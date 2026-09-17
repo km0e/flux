@@ -31,7 +31,8 @@ import { McpPanel } from './McpPanel';
 import { ProvidersPanel } from './ProvidersPanel';
 import { SkillsPanel } from './SkillsPanel';
 
-export type SettingsTab = 'providers' | 'mcp' | 'skills';
+import type { SettingsTab } from '../../core/types';
+export type { SettingsTab };
 
 const TAB_VALUES: SettingsTab[] = ['providers', 'mcp', 'skills'];
 

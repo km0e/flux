@@ -48,6 +48,7 @@ function toChat(c: ChatInfo): Chat {
     createdAt: new Date(c.created_at).getTime(),
     lastActivityAt: new Date(c.last_activity_at).getTime(),
     active: c.active,
+    running: c.running ?? false,
     workdir: c.workdir,
     provider: c.provider,
     model: c.model,

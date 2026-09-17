@@ -55,6 +55,14 @@ pub enum LoopInput {
     /// turns queued behind it, which belong to the pre-rebuild context —
     /// runs to its wrap-up, where the gate fires with the same fact. The
     /// flag is never sticky: consumed the moment the gate fires.
+    ///
+    /// The gate fire is also the point where `pending` is DISCARDED: the
+    /// rebuilt connection is begun over the full persisted history, which
+    /// already carries every message pending delivery (deferred tool-result
+    /// voids included), so keeping them would duplicate them in the next
+    /// request. Queued turns started BEFORE the gate still deliver the
+    /// pending residue — they run on the pre-rebuild connection, whose
+    /// prefix does not carry it yet.
     Hold,
 }
 

@@ -20,7 +20,7 @@ Flux is a general-purpose coding agent framework in Rust with a browser chat UI 
 It is built as a Cargo workspace:
 
 - [`flux-core`](crates/flux-core/) — the agent-runtime contract layer: pure types (`Message`, `Role`, `ToolCall`, `CoreError`, `ErrorCode`, `ChatStateKind`), `WireEvent` (kernel output vocabulary), `Tool` trait + `ToolRegistry` + `ToolCtx` (cancel token, call id, sandbox boundary with `resolve`), the four kernel ports, and the `Provider` session factory (deps: `serde`, `serde_json`, `strum`, `thiserror`, `async-trait`, `tracing`, `futures`).
-- [`flux-macros`](crates/flux-macros/) — proc-macro for `#[derive(Tool)]`.
+- [`flux-macros`](crates/flux-macros/) — proc-macros: `#[derive(Tool)]` (field-inferred JSON Schema + `call` deserialization) and `#[derive(ToolItem)]` (object schema for nested array-of-object parameters, consumed by `Tool`'s `Vec<Item>` inference).
 - [`flux-test-support`](crates/flux-test-support/) — shared test support, a DEV-DEPENDENCY ONLY crate (never a regular dep — the guard mutates process env): the hermeticity guard (`test_env_guard!` — strips proxy/`FLUX_*` vars pre-`main`, single home for the var list) and the proxy-proof loopback test HTTP client.
 - [`flux-provider`](crates/flux-provider/) — OpenAI-compatible implementation + SSE client, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`).
 - [`flux-tools`](crates/flux-tools/) — built-in filesystem, shell, search, and skill tools; tools resolve paths against the chat boundary via `ToolCtx::resolve` .
@@ -52,19 +52,19 @@ flux/
 │ │ ├── ports.rs # ToolPort (tool execution) + OutputPort (adapter-side wire sink) — persistence is a fact-trace fold, the provider is a Connection
 │ │ ├── loop_io.rs # Loop I/O vocabulary: LoopInput / LoopFact + RoundOutcome / StreamEvent / StreamHandle / Connection
 │ │ └── wire.rs # WireEvent vocabulary
-│ ├── flux-macros/ # #[derive(Tool)] proc-macro
+│ ├── flux-macros/ # #[derive(Tool)] / #[derive(ToolItem)] proc-macros
 │ │ ├── src/lib.rs
 │ │ └── tests/derive_tool.rs
 │ ├── flux-provider/ # OpenAI impl + SSE client (implements flux-core's Provider session factory)
 │ │ └── src/
 │ │ ├── lib.rs # Re-exports
-│ │ ├── openai.rs # OpenAI-compatible: prefix/suffix cache, SSE parsing
+│ │ ├── openai.rs # OpenAI-compatible: prefix/suffix cache, SSE parsing (tool-call fragments accumulate by wire index — indices ≥ MAX_TOOL_CALL_INDEX (128) are dropped with a warn-ONCE latch; the accumulator never self-sizes from the index)
 │ │ └── sse.rs # SSE client + byte parser
 │ ├── flux-proto/ # Generated protobuf/tonic contracts (build-time codegen from proto/)
 │ ├── flux-tools/ # Built-in tool implementations
 │ │ └── src/
 │ │ ├── lib.rs # Tool registration
-│ │ ├── fs.rs # read_file, edit_file (str_replace), write_file, replace_lines, list_directory
+│ │ ├── fs.rs # read_file, read_files, edit_file (str_replace), edit_files (per-file atomic), write_file, replace_lines, list_directory
 │ │ ├── shell.rs # bash
 │ │ ├── search.rs # glob, grep
 │ │ ├── subprocess.rs # Shared command runner (kill-hygiene: process-group timeout + kernel parent-death signal)
@@ -77,7 +77,7 @@ flux/
 │ │ │ ├── chats.rs # insert_chat, list_chats, delete_chat, rename_chat
 │ │ │ ├── mcp.rs # list/insert/delete MCP-server connect rows (the MCP launch list's ONLY home; kind = stdio | http)
 │ │ ├── messages.rs # load_messages, append_messages
-│ │ │ ├── providers.rs # list_providers, insert_provider, delete_provider — the provider registry's ONLY home
+│ │ │ ├── providers.rs # list_providers, get_provider, insert_provider, update_provider, delete_provider — the provider registry's ONLY home
 │ │ │ └── state.rs # load_state, save_state_entry
 │ │ └── migrations/
 │ │ └── 001_consolidated_schema.sql # 单一合并 schema
@@ -114,7 +114,7 @@ flux/
 │ ├── src/
 │ │ ├── main.rs # CLI entry (NO config file — flags only), DI assembly, MCP restore (DB rows, skip-with-warn), start transport
 │ │ ├── registry.rs # ProviderRegistry — DB-backed (hydrate at startup; Add/RemoveProvider persist-first), instance building, model probes
-│ │ ├── mcp.rs # MCP launch-list management (persist-first + live apply: connect/register/unregister; self-healing supervisor; env values redacted to keys)
+│ │ ├── mcp.rs # MCP launch-list management (persist-first + live apply: connect/register/unregister; self-healing supervisor guarded by an entry generation paired with entry+task — the remove→re-add respawn race is structurally closed; env values redacted to keys)
 │ │ ├── management.rs # Management-plane operations (providers/models/mcp/skills mutations — shared by the RPC shims and the MCP supervisor)
 │ │ ├── models_dev.rs # models.dev catalog fetch + (base_url, model) matching (lazy, TTL cache, best-effort)
 │ │ ├── skills.rs # Skill install/browse/remove (local dir or git URL; global dir only)
@@ -134,25 +134,31 @@ flux/
 │ └── src/
 │ ├── main.tsx # entry: log level + mountChat
 │ ├── mount.tsx # mountChat: flushSync render-first init, restore, lease-switch subscription, the title's transition-gated subscription
-│ ├── components/ # React UI: App, TopBar, ChatHeader, Sidebar, ChatView, MessageList, ChatInput,
-│ │ # UsageStats, Explorer (react-arborist), RightDock (round-artifacts tab + file tabs + terminal),
-│ │ # RoundPanel, FileTabView, TerminalPanel, FileIcon, Toasts, ErrorBoundary
-│ │ ├── ui/ # the component library: control primitives (button/fields/badge/spinner +
+│ │ ├── components/ # React UI: App, TopBar, ChatHeader, Sidebar, ChatView, MessageList, ChatInput,
+│ │ # UsageStats, Explorer (react-arborist), RightDock (file tabs + terminal),
+│ │ # FileTabView, TerminalPanel, FileIcon, Toasts, ErrorBoundary,
+│ │ # TranscriptSearchBar, CommandPalette, ShortcutsDialog
+│ │ ├── ui/ # the component library: control primitives (button/fields/badge/spinner/skeleton +
 │ │ # index barrel — styling authority) and Radix wrappers (shadcn conventions):
 │ │ # dialog, dropdown-menu, tooltip, tabs
 │ │ ├── dialogs/ # first-party promise-shaped dialogs: registry (service registration), ConfirmDialog,
 │ │ # NewChatDialog (fs browser + kind picker), QuestionCard
 │ │ └── settings/ # the Settings surface: SettingsDialog (one tabbed dialog, Providers / MCP /
-│ │ # Skills sections) + the panels; the Providers panel carries the LOCAL model registry
+│ │ # Skills sections) + the panels — each panel's form section split into its own
+│ │ # module (provider-forms.tsx, mcp-form.tsx) over shared building blocks (shared.tsx);
+│ │ # the Providers panel carries the LOCAL model registry
 │ │ # (saved models + models.dev metadata; desktop master-detail —
-│ │ # rail + preview/form detail; mobile stacked; shared.ts = shared building blocks)
-│ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (Subscribe stream = the identity anchor), session.ts, prefs.ts (+theme), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
-│ ├── services/ # panes, stream, stream-handler, history, dispatch, handlers,
-│ │ # artifacts (per-round touched files + invocations, F-11), filePreview, code-copy, lease, forkDraft,
+│ │ # rail + preview/form detail; mobile stacked) and the UpdateProvider edit form
+│ ├── core/ # state.ts (zustand store), grpc.ts (Connect clients), grpc-connection.ts (the stateful manager: Subscribe stream = the identity anchor) + grpc-frames.ts (pure frame translation) + grpc-send.ts (the send path), session.ts, prefs.ts (sidebar/dock prefs + the conversation floor), viewport.ts (keyboard-safe --fx-vvh), bridge.ts, failsafe.ts, types.ts
+│ ├── services/ # panes, stream (facade/registries) + stream-controller (the controller body)
+│ │ # + stream-state (shared registries), stream-handler, history, dispatch, handlers,
+│ │ # transcript-search (Ctrl/Cmd+F over the rendered DOM), commands (the palette's
+│ │ # single registry), mention (composer @-completion), theme (applies the store's choice),
+│ │ # filePreview, code-copy, lease, forkDraft,
 │ │ # drafts (per-chat composer drafts, sessionStorage write-through), title (document-title
 │ │ # composition — name / working… / background-attention counter),
 │ │ # fs, new-chat, dialogs (promise-shaped impls), providers, models, mcp, skills, terminal
-│ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, follow, highlight (+hljs-bundle), cn (clsx+twMerge), fileIcons, clipboard, format, id
+│ ├── lib/ # markdown (marked+DOMPurify), render (rAF pipeline), dom, toolcard (the tool-card family + verdict classification), follow, highlight (+hljs-bundle), cn (clsx+twMerge), fileIcons, clipboard, format, id
 │ ├── styles/ # app.css (tailwind entry + @theme bridge + the flux line), tokens.css (--fx-* light-dark),
 │ │ # stream.css (imperative DOM), fonts.css (@font-face for the bundled fonts)
 │ ├── assets/fonts/ # bundled fonts (IBM Plex Sans UI voice + JetBrains Mono machine/terminal voice, OFL-1.1;
@@ -230,7 +236,7 @@ Three core concepts:
 
 **Key design**: 任务归 ChatManager（session 无关）；对话权 = 每 chat 至多一个 `lease`（发消息/取消/应答 question/删除/改名需租约，他人操作被拒 → `ErrorEvent{chat_busy}` / failed_precondition status）；观看权 = `viewers` 集合（ClaimChat 隐含订阅；OpenChat 为 viewer 降级订阅，可并发）。流断开 = **detach**：租约保留一个宽限期等流重开采纳，过期由 reaper 释放（任务继续跑）。Chat IDs are UUID v4.
 
-**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在全量持久历史上 re-begin 连接。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
+**引擎重建（generic restart primitive — 边界原地换装）**：chat 分**外壳**（CachedChat：router/lease/viewers/questions/pin/元数据）与**引擎**（ChatTask：loop+consumer+connection，飞行监督在 consumer 内，全部装配而来）。真相源变更（provider pin / 全局工具注册表）从不打断运行中的轮次：变更方写真相源（请求时持久化）→ `Rebuild` ctrl 命令（provider 热切换携带新实例）→ 消费者武装机器门（活轮次与其后排队的轮先跑完——它们属于重建前上下文）→ 在 `GateReleased` 处**原地重建**：以与初始 spawn 相同的装配函数重装注册表（当前全局注册表），以新 provider 实例在全量持久历史上 re-begin 连接。引擎永不因重建而死亡；轮次之间消费者继续折叠；重建期间到达的发送直接入内核队列。**门触发即丢弃 pending**（两个触发点同规：Hold 到达于 Idle、武装门在收尾）——中断残留由重建前缀（全量持久历史，触发时必已提交）携带，重发即重复工具消息；取消前已排队的轮次仍按旧语义投递（跑在重建前连接上）。崩溃/正常退出仍走惰性替换（无崩溃观察者哲学不变）。
 
 ### Lifecycle
 
@@ -401,7 +407,7 @@ gap notices).
 | EventService | Subscribe | THE stream: ready{session_id, leases} → events (below) + keepalives; close = detach |
 | SessionService | — | (deleted: resume collapsed into Subscribe, ping replaced by keepalives) |
 | FileSystemService | FsList / FsRead | Workdir picker + explorer (git status per entry; inline errors; 256KB preview budget) |
-| ProviderService | ListProviders / GetModels / AddProvider / RemoveProvider | Registry (api_key never leaves); probe = GET /models (inline error) |
+| ProviderService | ListProviders / GetModels / AddProvider / UpdateProvider / RemoveProvider | Registry (api_key never leaves); probe = GET /models (inline error); UpdateProvider swaps url/api_key behind the fixed id (api_key tri-state: absent keeps, present replaces, empty clears), persists first, re-resolves pinned chats' instances — live engines hot-apply at the gate |
 | ModelService | ListModels / SaveModel / RemoveModel / SyncModels | LOCAL model registry (`params_json`/`meta_json` verbatim passthrough; models.dev auto-fill on create; matching chats rebuild) |
 | McpService | ListServers / AddServer / RemoveServer | Launch list (persist-first + live apply; apply failure rides the ack inline, row stays); rows are stdio child processes OR Streamable HTTP endpoints (url + headers, header values never leave) |
 | SkillService | ListSkills / AddSkill / RemoveSkill | Global skills (immediate effect; chat_id scopes project skills, read-only) |
@@ -454,7 +460,7 @@ kernel, no lease gate (same-origin trust; a UI affordance for the human).
 - Chat metadata: `insert_chat`, `list_chats`, `delete_chat`, `rename_chat`
 - Messages: `load_messages`, `append_messages`
 - State: `load_state`, `save_state_entry`
-- Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 AddProvider/RemoveProvider RPC 管理，**先写库后改内存**）
+- Providers: `list_providers`, `insert_provider`（duplicate → `Ok(false)`）, `update_provider`（UpdateProvider——只改 url/api_key，id 不可变；api_key 三态：缺省保留、present 替换、空清除）, `delete_provider` —— 注册表的唯一家（服务端无 config 文件；启动时 hydrate 入内存注册表，UI 经 AddProvider/UpdateProvider/RemoveProvider RPC 管理，**先写库后改内存**——UpdateProvider 随后重解析钉住对话的实例，活引擎在门处热应用）
 - Saved models: `list_models`, `upsert_model`（**只写 params 保留 meta**）, `update_model_meta`（**只写 meta 保留 params**）, `delete_model` —— 本地模型注册表的唯一家（`(provider_id, model_id)` 主键 + `params`/`meta` 两个写权分离的 JSON 列；provider 删除级联；UI 经 `model_save`/`model_remove`/`model_sync` 管理，models.dev 填充仅在创建/刷新路径写 `meta`）
 - MCP servers: `list_mcp_servers`, `insert_mcp_server`, `delete_mcp_server` —— MCP 启动列表的唯一家（kind = `stdio` 子进程启动三无组 / `http` Streamable HTTP 端点 url+headers；headers 值同 env 值：入库不上线。启动时 McpManager 读行连接注册，UI 管理变更 **persist-first + 即时应用**，连接失败的行保留、下次启动重试）
 - Buffered outputs: `save_buf_entry`, `load_buf_entry` —— 溢出缓冲的唯一家（按 tool call id 锚定、不覆盖；生命周期 = chat 生命周期，fork 复制其副本携带的调用条目；chat 删除级联）
@@ -476,9 +482,13 @@ behavior — the streaming pipeline is imperative DOM.
 streaming flags, usage totals, readonly marks, UI prefs, the provider registry
 (`providers`) with its probed model catalogs (`providerModels` + `providerProbeErrors`),
 the MCP launch list (`mcpServers`) + the forwarded MCP notice bell
-(`mcpNotices` + `mcpNoticesUnread`), and the current round's artifacts
-(`roundArtifacts` — written by `services/artifacts.ts`, the dock's Round tab reads it).
-Components subscribe via
+(`mcpNotices` + `mcpNoticesUnread`), the search projection (`searchOpen`/`searchMatches`/
+`searchCurrent` — the service owns the ranges and the observer; the store carries only
+the counts), `paletteOpen`/`shortcutsOpen` (the palette's and the shortcuts sheet's
+visibility), `theme` (the theme CHOICE — what it DOES lives in `services/theme.ts`, a
+store action never touches the DOM), `settingsOpen`/`settingsTab` (open flag + the
+palette's open-at-section one-shot intent), and `backgroundEvents` (the document title's
+"(n)" attention counter). Components subscribe via
 selectors (`useFlux((s) => s.chats)`); the imperative services read/write through
 `useFlux.getState` / store actions — no React, no hooks below the component layer.
 **`DispatchContext.state` MUST be wired as a getter** — zustand `setState` replaces
@@ -493,9 +503,11 @@ Tests inject stubs via `setDialogImpls`.
 **TopBar** (`components/TopBar.tsx`): the GLOBAL bar — toggle (Menu icon) → brand mark →
 spacer → streaming indicator (click = cancel) → MCP notice bell (warning+ log notices,
 unread badge, cap 100) → connection (reconnect button when down) →
-Settings menu (Providers / MCP / Skills — one dropdown whose items open the one tabbed
-SettingsDialog on the chosen section) → theme
-toggle (auto/dark/light, persisted in localStorage, applied pre-paint by an inline script
+Settings gear (opens the ONE tabbed SettingsDialog DIRECTLY — no menu; the open flag and
+the section intent live in the STORE so the command palette can drive them; the palette
+carries plain and open-at-section settings actions) → theme
+toggle (auto/dark/light — the CHOICE lives in the store, persisted in localStorage,
+applied pre-paint by an inline script
 in index.html — no flash). It carries NO chat state and never appears/disappears with the
 active chat.
 
@@ -506,7 +518,10 @@ Chat identity lives HERE, not in the TopBar.
 **Sidebar**: Radix Tabs styled as a segmented control (Chats/Files — the app's one tab language) + new-chat button + client-side filter
 (name/workdir substring) + chat rows (name, kind badge, In-use badge, relative time,
 workdir line) + Radix DropdownMenu row actions (rename = inline controlled input,
-Enter/blur commit, Esc revert; delete = confirm dialog). Selection = a lease handover
+Enter/blur commit, Esc revert; delete = confirm dialog). Rows carry a RUNNING marker —
+an accent Spinner before the title, ORing the wire `running` flag (the chats broadcast's
+round-boundary truth, visible across windows) with the local `streaming` flag; the
+row's accessible name grows ", running". Selection = a lease handover
 (the activeChatId subscription in mount.tsx sends chat_claim). The MOBILE regime (`<768px`, the one breakpoint) runs
 the sidebar as an overlay drawer; desktop drag-resize (160–360px) persists width.
 The sidebar's width is AUTHORED in app.css (`#sidebar { width: var(--fx-sidebar-w) }`,
@@ -586,10 +601,9 @@ service layer only sets the flag and sends `chat_open` (pinned by handlers.test)
 
 **File explorer**: `components/Explorer.tsx` on react-arborist — nodes addressed by
 absolute path (id IS the path), directories lazy-load children via `fs_list` on first
-expand (`onToggle`), files open as TABS in the right dock (`RightDock`: the round-
-artifacts tab (present only while the current round has artifacts — file rows open
-previews, invocation rows pulse their tool card) + multi-file
-preview tabs + a pinned Terminal tab; drag-resizable, persisted width; `.md` renders
+expand (`onToggle`), files open as TABS in the right dock (`RightDock`:
+multi-file preview tabs + a pinned Terminal tab — no dynamic tab churn mid-round; the
+transcript is the round's record; drag-resizable, persisted width; `.md` renders
 markdown + Raw toggle, truncated badge carries a size hint; wrap support removed —
 file bodies always scroll horizontally). Entries carry
 git working-tree status (`fs_listing` 的 `git` 字段；server 每次列目录跑一次

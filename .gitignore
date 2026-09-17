@@ -30,4 +30,5 @@ dist/
 
 # Screenshot tour output (e2e/shots.mjs)
 clients/web/e2e/.shots/
+clients/web/e2e/.baseline/
 

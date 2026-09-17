@@ -12,6 +12,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { mountSession, terminalSession, type TermStatus } from '../services/terminal';
+import { Skeleton } from './ui';
 
 export function TerminalPanel(props: { tabId: string }): React.ReactElement {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -55,26 +56,39 @@ export function TerminalPanel(props: { tabId: string }): React.ReactElement {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col">
-      <div ref={hostRef} data-testid="terminal-host" className="relative min-h-0 flex-1 overflow-hidden" />
+      <div ref={hostRef} data-testid="terminal-host" className="relative min-h-0 flex-1 overflow-hidden">
+        {/* First frame: the shell's opening lines are incoming — quiet
+            shape placeholders, not a blank inset void. `undefined` is the
+            not-yet-created session, 'connecting' the handshake; both mean
+            an empty host. Gone the moment the session runs (xterm paints
+            under them). */}
+        {(status === undefined || status === 'connecting') && (
+          <div className="absolute inset-0 flex flex-col gap-2.5 p-3">
+            <Skeleton className="h-3 w-2/5" />
+            <Skeleton className="h-3 w-3/5" />
+            <Skeleton className="h-3 w-1/2" />
+          </div>
+        )}
+      </div>
       <div className="flex items-center justify-between gap-2 border-t border-border bg-panel px-3 py-1.5">
         {status === 'exited' ? (
           <>
             <span className="text-xs text-muted">
               Shell exited (code {terminalSession(props.tabId)?.exitedCode ?? '?'})
             </span>
-            <span className="text-2xs text-faint">Use “+” to open a new terminal</span>
+            <span className="text-2xs text-muted">Use “+” to open a new terminal</span>
           </>
         ) : status === 'failed' ? (
           <span className="text-xs text-danger">
             Terminal connection failed — try again in a moment
           </span>
         ) : status === 'running' ? (
-          <span className="inline-flex items-center gap-1.5 text-2xs text-faint">
+          <span className="inline-flex items-center gap-1.5 text-2xs text-muted">
             <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-success" />
             running — backgrounded output keeps buffering
           </span>
         ) : (
-          <span className="inline-flex items-center gap-1.5 text-2xs text-faint">
+          <span className="inline-flex items-center gap-1.5 text-2xs text-muted">
             <span aria-hidden="true" className="size-1.5 animate-pulse rounded-full bg-warn" />
             connecting…
           </span>

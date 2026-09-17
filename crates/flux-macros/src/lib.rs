@@ -81,6 +81,11 @@
 //! - `schema()` is inferred from the struct fields: doc comments become
 //!   descriptions, `Option<T>` fields are optional, and `#[tool(skip)]`
 //!   excludes a field from the schema.
+//! - `Vec<T>` fields become `{"type": "array", "items": ...}`. Primitive
+//!   item types (`String`/`bool`/integers/floats, optionally
+//!   `Option`-wrapped) map to a `{"type": <name>}` item schema; any other
+//!   item type delegates to `<T>::item_schema()` — the item struct carries
+//!   `#[derive(ToolItem)]` (see below) and the build fails without it.
 //! - `call()` converts the raw `HashMap<String, Value>` arguments to a JSON
 //!   object, deserializes into `Self` (failures become
 //!   `CoreError::InvalidArguments`) and delegates to `self.execute(ctx)`, which
@@ -91,6 +96,34 @@
 //!   chat boundary rides the invocation context — resolve path arguments
 //!   through [`::flux_core::ToolCtx::resolve`], never by trusting raw
 //!   LLM-supplied locations. Tools never touch the state store.
+//!
+//! ## Nested items: `#[derive(ToolItem)]`
+//!
+//! An array-of-objects parameter needs an object schema for its items:
+//!
+//! ```ignore
+//! #[derive(ToolItem, ::serde::Deserialize)]
+//! struct EditItem {
+//!     /// Path to the file to edit.
+//!     file_path: String,
+//!     /// Replacement text.
+//!     new_string: String,
+//! }
+//!
+//! #[derive(Tool, ::serde::Deserialize)]
+//! #[tool(name = "edit_files", description = "...")]
+//! struct EditFilesTool {
+//!     /// Edits to apply.
+//!     edits: Vec<EditItem>,
+//! }
+//! ```
+//!
+//! `ToolItem` generates `EditItem::item_schema()` — the object schema built
+//! from the item's fields under the same rules as `Tool` (doc comments as
+//! descriptions, `Option<T>` optional, `#[tool(skip)]`/`#[tool(required)]`).
+//! The `Tool` derive references it for `Vec<EditItem>` fields; item structs
+//! must also derive `Deserialize`, and `#[serde(default)]` is unsupported on
+//! item fields (optionality is `Option<T>` only — see the derive's docs).
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -199,6 +232,69 @@ fn derive_tool_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream>
     Ok(expanded)
 }
 
+/// Derive macro for nested tool-parameter item structs.
+///
+/// Generates an inherent `pub fn item_schema() -> ::serde_json::Value` — the
+/// JSON object schema an enclosing `#[derive(Tool)]` struct emits for
+/// `Vec<Item>` fields (its array inference calls `<Item>::item_schema()` for
+/// non-primitive item types; a missing derive fails compilation).
+///
+/// Field rules mirror `Tool`: doc comments become descriptions, `Option<T>`
+/// fields are optional, `#[tool(skip)]` excludes a field, `#[tool(required)]`
+/// forces an `Option<T>` into `required`, and the object always sets
+/// `"additionalProperties": false`.
+///
+/// The item struct must also derive `Deserialize` (the enclosing tool's
+/// `call()` deserializes the whole argument object). `#[serde(default)]` is
+/// not supported on item fields — express optionality with `Option<T>` only,
+/// so the schema's `required` list can never be looser than the runtime.
+#[proc_macro_derive(ToolItem, attributes(tool))]
+pub fn derive_tool_item(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as DeriveInput);
+    match derive_tool_item_impl(input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn derive_tool_item_impl(input: DeriveInput) -> syn::Result<proc_macro2::TokenStream> {
+    let struct_name = &input.ident;
+    let fields = match &input.data {
+        syn::Data::Struct(s) => &s.fields,
+        _ => {
+            return Err(syn::Error::new_spanned(
+                &input,
+                "ToolItem can only be derived for structs",
+            ));
+        }
+    };
+    for field in fields {
+        validate_tool_attr_keys(&field.attrs, FIELD_TOOL_KEYS, "a field")?;
+    }
+
+    let (schema_fields, required_fields) = build_schema_fields(fields);
+    let required = if required_fields.is_empty() {
+        quote! { "required": [], }
+    } else {
+        quote! { "required": [ #(#required_fields),* ], }
+    };
+    Ok(quote! {
+        #[automatically_derived]
+        impl #struct_name {
+            pub fn item_schema() -> ::serde_json::Value {
+                ::serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        #(#schema_fields),*
+                    },
+                    #required
+                    "additionalProperties": false,
+                })
+            }
+        }
+    })
+}
+
 /// Extract a required string attribute from `#[tool(name = "...", ...)]`.
 fn parse_attr_str(attrs: &[syn::Attribute], key: &str) -> syn::Result<String> {
     parse_attr_str_opt(attrs, key).ok_or_else(|| {
@@ -302,11 +398,11 @@ fn build_schema_fields(fields: &syn::Fields) -> (Vec<proc_macro2::TokenStream>, 
         }
 
         let type_token = if json_type == "array" {
-            let inner = infer_array_item_type(&field.ty);
+            let items = array_items_expr(&field.ty);
             quote! {
                 ::serde_json::json!({
                     "type": "array",
-                    "items": { "type": #inner },
+                    "items": #items,
                     "description": #description,
                 })
             }
@@ -364,18 +460,70 @@ fn infer_json_type(ty: &syn::Type) -> (String, bool) {
     (json_type, false)
 }
 
-/// Extract the inner type of Vec<T> as a JSON Schema type name.
-fn infer_array_item_type(ty: &syn::Type) -> String {
-    if let syn::Type::Path(p) = ty
-        && let Some(seg) = p.path.segments.last()
-        && seg.ident == "Vec"
-        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-    {
-        let (t, _) = infer_json_type(inner);
-        return t;
+/// The element type of an array field, looking through `Option<...>` layers
+/// (`Vec<T>` → `T`, `Option<Vec<T>>` → `T`); `None` when the type is not an
+/// array under those wrappers.
+fn vec_item_type(ty: &syn::Type) -> Option<&syn::Type> {
+    let syn::Type::Path(p) = ty else {
+        return None;
+    };
+    let seg = p.path.segments.last()?;
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+        return None;
+    };
+    let syn::GenericArgument::Type(inner) = args.args.first()? else {
+        return None;
+    };
+    match seg.ident.to_string().as_str() {
+        "Vec" => Some(inner),
+        "Option" => vec_item_type(inner),
+        _ => None,
     }
-    "string".to_string()
+}
+
+/// JSON type name for a PRIMITIVE array item — `bool`/integers/floats/
+/// `String`, optionally `Option`-wrapped (mirrors `infer_json_type`'s
+/// fallback semantics). `None` for any other path type.
+fn primitive_json_type(ty: &syn::Type) -> Option<String> {
+    let syn::Type::Path(p) = ty else {
+        return None;
+    };
+    let seg = p.path.segments.last()?;
+    let name = seg.ident.to_string();
+    if name == "Option" {
+        let syn::PathArguments::AngleBracketed(args) = &seg.arguments else {
+            return None;
+        };
+        let syn::GenericArgument::Type(inner) = args.args.first()? else {
+            return None;
+        };
+        return primitive_json_type(inner);
+    }
+    match name.as_str() {
+        "bool" => Some("boolean".into()),
+        "i8" | "i16" | "i32" | "i64" | "isize" | "u8" | "u16" | "u32" | "u64" | "usize" => {
+            Some("integer".into())
+        }
+        "f32" | "f64" => Some("number".into()),
+        "String" => Some("string".into()),
+        _ => None,
+    }
+}
+
+/// The JSON expression for an array field's `"items"` value: a primitive
+/// item type maps to `{ "type": <name> }`; any other path type to
+/// `(<item>::item_schema())` — the item struct must `#[derive(ToolItem)]`
+/// or compilation fails (a wrong schema fails loudly, not silently).
+fn array_items_expr(ty: &syn::Type) -> proc_macro2::TokenStream {
+    match vec_item_type(ty) {
+        Some(item) => match primitive_json_type(item) {
+            Some(t) => quote! { { "type": #t } },
+            None => quote! { (#item::item_schema()) },
+        },
+        // Unreachable for fields infer_json_type already typed "array";
+        // the legacy fallback keeps that path harmless.
+        None => quote! { { "type": "string" } },
+    }
 }
 
 /// True when a `#[serde(...)]` attribute carries a `default` meta item —

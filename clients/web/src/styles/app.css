@@ -368,8 +368,15 @@
     /* Width is authored here — the drag writes the --fx-preview-w var
        directly (zero React renders per pointermove, mirroring the
        sidebar); the store commit happens once on release. The mobile
-       sheet's width:100% !important below still beats this var. */
-    width: var(--fx-preview-w, 480px);
+       sheet's width:100% !important below still beats this var.
+       The min() is the RENDER-time guard the drag clamp can't be: a
+       persisted width from a wide monitor (or a live window shrink) must
+       still leave the conversation its floor — 280px, the shared
+       CONVERSATION_MIN_WIDTH (core/prefs.ts), behind BOTH panes. */
+    width: min(
+      var(--fx-preview-w, 480px),
+      calc(100vw - var(--fx-sidebar-w, 240px) - 280px)
+    );
   }
 
   /* MOBILE regime: the dock is a FULL-SCREEN sheet (files/terminals are

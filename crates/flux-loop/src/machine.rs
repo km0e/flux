@@ -161,6 +161,16 @@ impl Machine {
                 // so nothing can start a round behind it.
                 LoopInput::Hold => {
                     self.hold = false;
+                    // The gate fire is the engine-rebuild point: the new
+                    // connection is begun over the FULL persisted history,
+                    // which already carries every message sitting in
+                    // `pending` (all pending writes are committed to the
+                    // transcript before a gate can fire — dual_write pushes
+                    // to both, and the gate only fires at Idle / wrap-up
+                    // where the transcript was just committed). Keeping
+                    // them would re-send duplicates on the next round's
+                    // request — drop them here.
+                    self.pending.clear();
                     vec![LoopFact::GateReleased]
                 }
                 // Stale chunk/feedback racing a round boundary — ignore.
@@ -450,6 +460,13 @@ impl Machine {
             } else {
                 self.hold = false;
                 self.state = State::Idle;
+                // The gate fire is the engine-rebuild point: the new
+                // connection is begun over the FULL persisted history,
+                // which already carries every message sitting in `pending`
+                // (the wrap-up's TranscriptCommitted above landed first).
+                // Keeping them would re-send duplicates on the next
+                // round's request — drop them here.
+                self.pending.clear();
                 facts.push(LoopFact::GateReleased);
             }
         } else if let Some(next) = self.queued.pop_front() {
@@ -598,7 +615,10 @@ impl Machine {
     /// tool is exempt — it reports a real result through [`Self::dual_write`]
     /// on its own `ToolFinished`. The voids ride in `pending` and are delivered
     /// together with the next round's user message (deferred delivery), so no
-    /// provider round-trip is spent on a user interrupt.
+    /// provider round-trip is spent on a user interrupt — on the SAME
+    /// connection. An engine rebuild (the `Hold` gate) DISCARDS them instead:
+    /// the rebuilt connection is begun over the full persisted history, which
+    /// already carries the voids, and re-sending them would duplicate them.
     fn void_cancelled_tools(&mut self, exec_queue: &VecDeque<ToolCallWithArgs>) {
         for (call, _) in exec_queue.iter() {
             self.dual_write(&call.id, "cancelled by user");

@@ -215,6 +215,27 @@ export async function grpcRemoveProvider(id: string): Promise<string | undefined
   return resp.error ?? undefined;
 }
 
+/** Edit a provider's endpoint behind its id (the id itself never changes
+ * — it is what chat pins and saved models reference). Resolves with the
+ * inline error, or undefined on success. api_key is TRI-STATE: omitted
+ * keeps the stored key (it never left the server), '' clears it. */
+export async function grpcUpdateProvider(input: {
+  id: string;
+  url?: string;
+  api_key?: string;
+}): Promise<string | undefined> {
+  const resp = await providerClient.updateProvider(
+    {
+      id: input.id.trim(),
+      protocol: 'openai',
+      url: input.url?.trim() || undefined,
+      apiKey: input.api_key,
+    },
+    { timeoutMs: 8000, ...auth() },
+  );
+  return resp.error ?? undefined;
+}
+
 /** Probe one provider's upstream catalog. Resolves with the models + the
  * in-band error (undefined = clean probe). */
 export async function grpcProbeProvider(

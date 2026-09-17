@@ -31,6 +31,10 @@ export interface ChatInfo {
   last_activity_at: string;
   /** Another window holds the lease (non-null) — the sidebar shows "In use". */
   active: boolean;
+  /** A round is in flight on the chat (server truth, re-broadcast on
+   * every round boundary) — the sidebar's running marker. Absent = idle
+   * (proto3 default). */
+  running?: boolean;
   /** The chat's working directory (the tool sandbox boundary; shown as a cwd line). */
   workdir: string;
   /** The chat's pinned provider registry id. */
@@ -106,22 +110,6 @@ export interface SavedModelInfo {
  * then the manager spawns/registers and the chats rebuild at the gate. */
 /** Live state of one MCP server (the self-healing supervisor). */
 export type McpState = 'unspecified' | 'running' | 'backoff' | 'offline';
-
-/** One entry of the current round's artifacts (F-11). `file` = a path the
- * round created/modified (extracted from the tool's declared path
- * argument); `tool` = a shell command or an MCP invocation (no path to
- * extract — the label IS the entry). `callId` is the LATEST touch's tool
- * call — the jump anchor into the message stream. */
-export interface RoundArtifact {
-  kind: 'file' | 'tool';
-  callId: string;
-  /** file: the path; tool: the display label (command / tool name). */
-  target: string;
-  /** file only: how the tool touched the path. */
-  change?: 'write' | 'edit';
-  /** tool only: where the invocation came from. */
-  source?: 'shell' | 'mcp';
-}
 
 /** How flux connects to one registered MCP server. */
 export type McpKind = 'stdio' | 'http';
@@ -422,3 +410,8 @@ export interface HistoryMessage {
   tool_calls?: HistoryToolCall[];
   tool_call_id?: string;
 }
+
+/** The settings dialog's sections — lives in CORE so the store can carry
+ * the command palette's "open AT section" intent without reaching into a
+ * component (SettingsDialog re-exports it). */
+export type SettingsTab = 'providers' | 'mcp' | 'skills';
