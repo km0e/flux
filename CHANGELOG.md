@@ -6,7 +6,7 @@ All notable changes to Flux are documented here. Format: [Keep a Changelog](http
 > parses this file); the full docs live in [`README.md`](README.md) and
 > [`docs/architecture.md`](docs/architecture.md).
 
-## [Unreleased]
+## [0.2.1] - 2026-09-17
 
 ### Added
 
