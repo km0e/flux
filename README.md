@@ -6,7 +6,7 @@
 
 ## 功能特性
 
-- **内置工具**：`read_file`、`read_files`（一次多处阅读）、`edit_file`、`edit_files`（一次多处修改，按文件原子）、`write_file`、`replace_lines`、`list_directory`、`glob`、`grep`、`bash`，以及每 chat 的 `question`（向用户提问）、`state_get`/`state_set`、`buf_read`（溢出输出分页读取）。输出限幅防止上下文溢出：所有工具结果统一经过 8000 字符内联预算——超限输出整体存入每 chat 的溢出缓冲，模型用 `buf_read` 分页读取；grep 按匹配窗口塑形（上限 500 条），glob 上限 500 条。
+- **内置工具**：`read_file`（单文件多窗口阅读，`ranges` ≤ 16 窗）、`edit_file`（单文件多 edits，整调用原子）、`write_file`、`replace_lines`、`list_directory`、`glob`、`grep`（1..=8 个批量 pattern）、`bash`，以及每 chat 的 `question`（向用户提问）、`state_get`/`state_set`、`buf_read`（溢出输出分页读取）。输出限幅防止上下文溢出：所有工具结果统一经过 8000 字符内联预算——超限输出整体存入每 chat 的溢出缓冲，模型用 `buf_read` 分页读取；grep 按匹配窗口塑形（单 pattern 上限 500 行；多 pattern 每 pattern 200 行、全局 500 行），glob 上限 500 条。
 - **Agent Skills**：惰性加载的能力包（`SKILL.md` 目录，遵循 [Agent Skills 标准](https://agentskills.io)）——模型经 `skill_list` 发现、按需经 `skill_read` 加载完整指令（不向 prompt 注入任何内容；项目技能在 `<workdir>/.flux/skills/`，全局在 `~/.flux/skills/`，同名时项目覆盖全局）。Web UI 的 Skills 对话框管理它们：从本地目录或 git URL 安装（可选 subpath 支持多技能仓库）、删除全局条目——立即生效，无需重启。
 - **LLM Provider**：OpenAI / OpenAI 兼容端点——纯端点（id · url · api key），由 Web UI 的 Providers 对话框管理（增、删、改——编辑在 id 背后换 url / api key，钉住的对话在轮边界热应用，不中断）、存入服务端数据库（没有配置文件）。**本地模型注册表**按模型保存请求参数（自动从 [models.dev](https://models.dev) 元数据富化）；切换对话的 provider 在轮边界热切换——引擎在全量历史上原地 re-begin，不会中断。
 - **流式输出**：经 gRPC-Web 实时推送文本 + 推理（reasoning）增量——接收与渲染解耦一帧（delta 追加到 raw 缓冲，rAF 合帧渲染，每帧至多一次增量渲染）。已提交段落只渲染一次、append-only 追加，代码块稳定打字、高亮恰好一次；粘滞滚动状态机让跟随平滑，不把正在阅读的用户拽回去。

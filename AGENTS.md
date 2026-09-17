@@ -368,7 +368,8 @@ copies the entries of the calls its copied transcript carries; chat deletion
 cascades. Entries capped at
 1M chars with an in-buffer drop marker. Per-tool caps merged into this layer: bash 8KB and
 read_file line-length/total caps removed; grep keeps its match-window shaping (500
-chars/line around the match) and the match cap rose to 500.
+chars/line around the match) with row caps — single pattern 500 rows; multi-pattern 200
+rows per pattern under a 500-row global cap (context lines counted); glob caps at 500 entries.
 
 ### Connect protocol (`proto/flux/v1` — the single contract)
 
