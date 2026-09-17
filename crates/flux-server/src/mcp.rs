@@ -406,7 +406,12 @@ impl McpManager {
             .collect()
     }
 
-    fn spawn_supervisor(self: &Arc<Self>, id: String, handle: Box<dyn McpSessionHandle>, generation: u64) {
+    fn spawn_supervisor(
+        self: &Arc<Self>,
+        id: String,
+        handle: Box<dyn McpSessionHandle>,
+        generation: u64,
+    ) {
         let mgr = Arc::clone(self);
         tokio::spawn(mgr.supervise(id, handle, generation));
     }
@@ -602,9 +607,8 @@ impl McpManager {
                         // its tools into the registry (the dropped handle
                         // kills the duplicate child).
                         let mut entries = self.entries.write().unwrap();
-                        let Some(entry) = entries
-                            .get_mut(&id)
-                            .filter(|e| e.generation == generation)
+                        let Some(entry) =
+                            entries.get_mut(&id).filter(|e| e.generation == generation)
                         else {
                             tracing::info!(
                                 id = %id,

@@ -588,7 +588,8 @@ fn queued_turn_pre_gate_still_delivers_pending_residue() {
         call: call("inflight", "slow"),
         result: "partial".into(),
     });
-    let Fact::ModelInputRequested(pending) = &step.facts
+    let Fact::ModelInputRequested(pending) = &step
+        .facts
         .iter()
         .find(|f| matches!(f, Fact::ModelInputRequested(_)))
         .unwrap()
@@ -605,7 +606,9 @@ fn queued_turn_pre_gate_still_delivers_pending_residue() {
     );
     // The queued round wraps → the gate fires → the residue (already
     // delivered) is gone from the machine.
-    let step = m.step(chunk(StreamChunk::End { finish_reason: None }));
+    let step = m.step(chunk(StreamChunk::End {
+        finish_reason: None,
+    }));
     assert_eq!(*step.facts.last().unwrap(), Fact::GateReleased);
     assert_eq!(m.state(), &State::Idle);
     let step = m.step(Input::UserMessage("next".into()));

@@ -180,11 +180,5 @@ pub async fn spawn(
 
     let aborts: Vec<tokio::task::AbortHandle> =
         vec![loop_task.abort_handle(), consumer_task.abort_handle()];
-    ChatHandle::new(
-        loop_tx,
-        RoundControl::new(ctrl_tx),
-        aborts,
-        done,
-        state_tx,
-    )
+    ChatHandle::new(loop_tx, RoundControl::new(ctrl_tx), aborts, done, state_tx)
 }

@@ -2,8 +2,8 @@ use super::*;
 use crate::test_util::{
     DummyProvider, create_chat, find_chats, find_kind, register, sess, test_state, wait_for,
 };
-use flux_core::test_util::{ScriptItem, ScriptedProvider};
 use flux_core::StreamChunk;
+use flux_core::test_util::{ScriptItem, ScriptedProvider};
 use flux_proto::flux::v1::subscribe_response::Kind;
 use flux_store::Store;
 
@@ -779,8 +779,11 @@ async fn round_boundaries_broadcast_running_flag() {
     // (a running=true frame already landed, so a later false one means the
     // end transition actually broadcast).
     wait_for(|| {
-        find_chats(&b.lock().unwrap())
-            .is_some_and(|c| c.chats.first().is_some_and(|x| x.chat_id == cid && !x.running))
+        find_chats(&b.lock().unwrap()).is_some_and(|c| {
+            c.chats
+                .first()
+                .is_some_and(|x| x.chat_id == cid && !x.running)
+        })
     })
     .await;
 }
