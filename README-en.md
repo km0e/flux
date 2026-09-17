@@ -110,14 +110,14 @@ bindings by `buf generate` (the web package's prebuild/pretest hooks).
 Application-level failures ride the response's inline `error` field;
 transport/infrastructure failures are gRPC statuses. The full semantics —
 identity lifecycle, lease/viewer model, stream elements, snapshot
-reconciliation — are documented in `docs/architecture.md` §3.8.
+reconciliation — are documented in `docs/architecture.md` (the "Connect Protocol & Backpressure" section).
 
 ## Web frontend
 
 React 19 + TypeScript on Vite; Radix UI primitives own dialog/menu/tooltip/tabs
 behavior; zustand carries app state; Tailwind CSS v4 drives component styling;
 marked + DOMPurify + highlight.js drive the imperative markdown/streaming pipeline
-(rAF-coalesced, append-only paragraphs — see `docs/architecture.md` §4).
+(rAF-coalesced, append-only paragraphs — see the "Frontend: Streaming render" section of `docs/architecture.md`).
 
 ```bash
 cd clients && pnpm install   # pnpm workspace root

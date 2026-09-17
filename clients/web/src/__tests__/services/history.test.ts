@@ -537,6 +537,49 @@ describe('tail-first history pagination', () => {
     expect(btn?.textContent).toBe('Load earlier messages (30)');
   });
 
+  it('merges tool pairs inside a CLICK-loaded earlier page (off-pane fragment)', async () => {
+    // The earlier page builds into an unmounted DocumentFragment: while the
+    // loop runs, a pane query cannot see the call cards created moments
+    // earlier in the SAME page — the merge must consult the page's own
+    // registry (the bug: every same-page pair rendered call card + orphan
+    // anonymous result card). Pagination: the tool round sits at indices
+    // 0–2, followed by 40 user/assistant pairs (83 total) — the tail page
+    // starts at index 23, so the round only enters on a click.
+    const msgs: HistoryMessage[] = [
+      { role: 'user', content: 'q-early', id: 1, tool_calls: [] },
+      {
+        role: 'assistant',
+        content: '',
+        id: 2,
+        tool_calls: [{ id: 'call-early', name: 'bash', arguments: '{}' }],
+      },
+      { role: 'tool', content: 'early output', tool_call_id: 'call-early' },
+    ];
+    for (let r = 0; r < 40; r++) {
+      msgs.push({ role: 'user', content: `q-${r}`, id: 3 + r * 2, tool_calls: [] });
+      msgs.push({ role: 'assistant', content: `a-${r}`, id: 4 + r * 2, tool_calls: [] });
+    }
+    await renderHistoryMessages('test-chat', msgs);
+    const pane = getPane('test-chat');
+    // The tail page holds no tool round — the orphan filter would be
+    // trivially green before the click.
+    expect(pane.querySelector('[data-tool-call-id="call-early"]')).toBeNull();
+    const btn = pane.querySelector('.history-load-earlier') as HTMLButtonElement;
+    expect(btn.textContent).toBe('Load earlier messages (23)');
+
+    btn.click();
+
+    const card = pane.querySelector('[data-tool-call-id="call-early"]') as HTMLElement;
+    expect(card).toBeTruthy();
+    // ONE card — the result merged in, no anonymous orphan beside it.
+    const orphanResults = [...pane.querySelectorAll('.tool')].filter(
+      (el) => el.querySelector('.tool-status')?.textContent?.trim() === 'result',
+    );
+    expect(orphanResults).toHaveLength(0);
+    (card.querySelector('.tool-header') as HTMLElement).click();
+    expect(card.querySelector('.tool-result-container pre')?.textContent).toBe('early output');
+  });
+
   it('a short history renders whole with no affordance', async () => {
     const msgs: HistoryMessage[] = [
       { role: 'user', content: 'only', id: 1, tool_calls: [] },

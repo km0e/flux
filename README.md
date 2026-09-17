@@ -106,14 +106,14 @@ prebuild/pretest 钩子）。
 
 应用级失败走应答的内联 `error` 字段；传输/基础设施失败走 gRPC status。
 完整语义——身份生命周期、租约/观看者模型、流元素、快照对账——见
-`docs/architecture.md` §3.8。
+`docs/architecture.md` 的「Connect 协议与背压」一节。
 
 ## Web 前端
 
 React 19 + TypeScript on Vite；Radix UI 原语承载 dialog/menu/tooltip/tabs
 行为；zustand 管理应用状态；Tailwind CSS v4 驱动组件样式；marked +
 DOMPurify + highlight.js 驱动命令式 markdown/流式渲染管线（rAF 合帧、
-append-only 段落——见 `docs/architecture.md` §4）。
+append-only 段落——见 `docs/architecture.md` 的「前端：流式渲染」一节）。
 
 ```bash
 cd clients && pnpm install   # pnpm workspace 根

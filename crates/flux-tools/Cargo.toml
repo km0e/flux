@@ -12,8 +12,13 @@ flux-macros = { path = "../flux-macros" }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-regex = "1"
 glob = "0.3"
+# rg 本体的库化拆分：搜索引擎（二进制检测/编码/上下文行）+ 并行遍历与
+# .gitignore/.ignore 语义（E3）。
+grep-matcher = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
 # process-group kills go through the direct syscall — the shelled-out
 # `kill` binary is environment-dependent (see kill_group below)
 libc = "0.2"

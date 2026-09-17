@@ -13,8 +13,8 @@
 
 use flux_core::Tool;
 use flux_tools::{
-    BashTool, EditFileTool, EditFilesTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool,
-    ReadFilesTool, ReplaceLinesTool, SkillListTool, WriteFileTool,
+    BashTool, EditFileTool, GlobTool, GrepTool, ListDirectoryTool, ReadFileTool, ReplaceLinesTool,
+    SkillListTool, WriteFileTool,
 };
 
 fn expected_schema(name: &str) -> serde_json::Value {
@@ -23,64 +23,43 @@ fn expected_schema(name: &str) -> serde_json::Value {
             "type": "object",
             "properties": {
                 "file_path": { "type": "string", "description": "Path to the file to read." },
-                "offset": { "type": "integer", "description": "Line number to start reading from (1-based)." },
-                "limit": { "type": "integer", "description": "Maximum number of lines to read." },
-            },
-            "required": ["file_path"],
-            "additionalProperties": false,
-        }),
-        "read_files" => serde_json::json!({
-            "type": "object",
-            "properties": {
-                "files": {
+                "ranges": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file_path": { "type": "string", "description": "Path to the file to read." },
                             "offset": { "type": "integer", "description": "Line number to start reading from (1-based)." },
                             "limit": { "type": "integer", "description": "Maximum number of lines to read." },
                         },
-                        "required": ["file_path"],
+                        "required": [],
                         "additionalProperties": false,
                     },
-                    "description": "Files to read, one segment each (1..=16 items).",
+                    "description": "Optional windows to read instead of the whole file. Omitted or empty = whole file (at most 16 windows).",
                 },
             },
-            "required": ["files"],
+            "required": ["file_path"],
             "additionalProperties": false,
         }),
         "edit_file" => serde_json::json!({
             "type": "object",
             "properties": {
-                "file_path": { "type": "string", "description": "Path to the file to edit." },
-                "old_string": { "type": "string", "description": "Exact text to replace, copied verbatim from a recent read_file (no line-number prefixes). Must be unique in the file unless replace_all is true." },
-                "new_string": { "type": "string", "description": "Replacement text. An empty string deletes the matched text." },
-                "replace_all": { "type": "boolean", "description": "Replace every occurrence of old_string instead of requiring a unique match." },
-            },
-            "required": ["file_path", "old_string", "new_string"],
-            "additionalProperties": false,
-        }),
-        "edit_files" => serde_json::json!({
-            "type": "object",
-            "properties": {
+                "file_path": { "type": "string", "description": "Path to the file to edit (one file per call)." },
                 "edits": {
                     "type": "array",
                     "items": {
                         "type": "object",
                         "properties": {
-                            "file_path": { "type": "string", "description": "Path to the file to edit." },
-                            "old_string": { "type": "string", "description": "Exact text to replace, copied verbatim from a recent read_file (no line-number prefixes). Must be unique in the file unless replace_all is true." },
+                            "old_string": { "type": "string", "description": "Exact text to replace, copied verbatim from a recent read (no line-number prefixes). Must be unique in the file unless replace_all is true." },
                             "new_string": { "type": "string", "description": "Replacement text. An empty string deletes the matched text." },
                             "replace_all": { "type": "boolean", "description": "Replace every occurrence of old_string instead of requiring a unique match." },
                         },
-                        "required": ["file_path", "old_string", "new_string"],
+                        "required": ["old_string", "new_string"],
                         "additionalProperties": false,
                     },
-                    "description": "Edits to apply, grouped by file automatically (1..=16 items); same-file edits run in listed order and report per edit.",
+                    "description": "Edits to apply in listed order (1..=16).",
                 },
             },
-            "required": ["edits"],
+            "required": ["file_path", "edits"],
             "additionalProperties": false,
         }),
         "write_file" => serde_json::json!({
@@ -114,18 +93,28 @@ fn expected_schema(name: &str) -> serde_json::Value {
         "grep" => serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Regex pattern to search for." },
-                "path": { "type": "string", "description": "Directory or file to search in. Defaults to the chat workdir." },
+                "patterns": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Regex patterns to search for (1..=8; duplicates are deduplicated).",
+                },
+                "path": { "type": "string", "description": "Directory or file to search in. Defaults to the chat workdir. An explicit FILE is always searched; a directory respects .gitignore/.ignore." },
+                "include": { "type": "string", "description": "Optional gitignore-style glob filter on which files are searched (e.g. \"*.rs\", \"src/**\")." },
+                "context": { "type": "integer", "description": "Optional context lines (0-5) rendered before and after each match; counts toward the result caps. Defaults to 0." },
             },
-            "required": ["pattern"],
+            "required": ["patterns"],
             "additionalProperties": false,
         }),
         "glob" => serde_json::json!({
             "type": "object",
             "properties": {
-                "pattern": { "type": "string", "description": "Glob pattern to match files against (relative to the chat's current working directory)." },
+                "patterns": {
+                    "type": "array",
+                    "items": { "type": "string" },
+                    "description": "Glob patterns to match files against (relative to the chat's current working directory).",
+                },
             },
-            "required": ["pattern"],
+            "required": ["patterns"],
             "additionalProperties": false,
         }),
         "bash" => serde_json::json!({
@@ -151,9 +140,7 @@ fn expected_schema(name: &str) -> serde_json::Value {
 fn all_tool_schemas_match_the_pinned_contract() {
     let tools: Vec<(&str, Box<dyn Tool>)> = vec![
         ("read_file", Box::new(ReadFileTool::new())),
-        ("read_files", Box::new(ReadFilesTool::new())),
         ("edit_file", Box::new(EditFileTool::new())),
-        ("edit_files", Box::new(EditFilesTool::new())),
         ("write_file", Box::new(WriteFileTool::new())),
         ("replace_lines", Box::new(ReplaceLinesTool::new())),
         ("list_directory", Box::new(ListDirectoryTool::new())),

@@ -103,25 +103,25 @@
 //!
 //! ```ignore
 //! #[derive(ToolItem, ::serde::Deserialize)]
-//! struct EditItem {
-//!     /// Path to the file to edit.
-//!     file_path: String,
+//! struct EditOp {
+//!     /// Exact text to replace.
+//!     old_string: String,
 //!     /// Replacement text.
 //!     new_string: String,
 //! }
 //!
 //! #[derive(Tool, ::serde::Deserialize)]
-//! #[tool(name = "edit_files", description = "...")]
-//! struct EditFilesTool {
+//! #[tool(name = "edit_file", description = "...")]
+//! struct EditFileTool {
 //!     /// Edits to apply.
-//!     edits: Vec<EditItem>,
+//!     edits: Vec<EditOp>,
 //! }
 //! ```
 //!
-//! `ToolItem` generates `EditItem::item_schema()` — the object schema built
+//! `ToolItem` generates `EditOp::item_schema()` — the object schema built
 //! from the item's fields under the same rules as `Tool` (doc comments as
 //! descriptions, `Option<T>` optional, `#[tool(skip)]`/`#[tool(required)]`).
-//! The `Tool` derive references it for `Vec<EditItem>` fields; item structs
+//! The `Tool` derive references it for `Vec<EditOp>` fields; item structs
 //! must also derive `Deserialize`, and `#[serde(default)]` is unsupported on
 //! item fields (optionality is `Option<T>` only — see the derive's docs).
 

@@ -98,14 +98,16 @@ export function toolIconSvg(name: string): string {
 
 const SUMMARY_FIELD_BY_TOOL: Record<string, string> = {
   bash: 'command',
-  read_file: 'path',
-  edit_file: 'path',
+  read_file: 'file_path',
+  edit_file: 'file_path',
+  list_directory: 'path',
+  grep: 'patterns',
+  glob: 'patterns',
+  buf_read: 'ref',
+  // Legacy names (the tools were removed in E5) — kept so historical
+  // transcripts still summarize their tool cards.
   read_files: 'files',
   edit_files: 'edits',
-  list_directory: 'path',
-  grep: 'pattern',
-  glob: 'pattern',
-  buf_read: 'ref',
 };
 
 /** Extract the collapsed one-line summary from a tool name + JSON args
@@ -123,10 +125,16 @@ export function toolSummary(name: string, args?: string): string {
     if (typeof mapped === 'string') {
       picked = mapped;
     } else if (Array.isArray(mapped)) {
-      // Multi-item tools (read_files/edit_files): "N items: <first path>".
+      // Legacy multi-item args + object arrays with a file_path field:
+      // "N items: <first path>".
       const firstPath = (mapped[0] as Record<string, unknown> | undefined)?.file_path;
       if (typeof firstPath === 'string') {
         picked = mapped.length > 1 ? `${mapped.length} items: ${firstPath}` : firstPath;
+      } else if (typeof mapped[0] === 'string' && key === 'patterns') {
+        // Batched search tools (grep/glob): "N patterns: <first>". Scoped to
+        // the patterns field — other tools' string arrays keep the raw
+        // fallback (pinned behavior for malformed multi-item args).
+        picked = mapped.length > 1 ? `${mapped.length} patterns: ${mapped[0]}` : mapped[0];
       }
     }
     value =

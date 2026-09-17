@@ -338,14 +338,19 @@ describe('toolSummary', () => {
   });
 
   it('extracts the file path for file tools and the pattern for search tools', () => {
-    expect(toolSummary('read_file', JSON.stringify({ path: '/a/b.rs' }))).toBe('/a/b.rs');
-    expect(toolSummary('grep', JSON.stringify({ pattern: 'TODO', path: '/x' }))).toBe('TODO');
+    expect(toolSummary('read_file', JSON.stringify({ file_path: '/a/b.rs' }))).toBe('/a/b.rs');
+    expect(toolSummary('edit_file', JSON.stringify({ file_path: '/a.rs', edits: [] }))).toBe('/a.rs');
+    expect(toolSummary('grep', JSON.stringify({ patterns: ['TODO'], path: '/x' }))).toBe('TODO');
+    expect(toolSummary('glob', JSON.stringify({ patterns: ['*.rs'] }))).toBe('*.rs');
+    expect(
+      toolSummary('grep', JSON.stringify({ patterns: ['TODO', 'FIXME'] })),
+    ).toBe('2 patterns: TODO');
   });
 
-  it('summarizes multi-item tools as "N items: <first path>"', () => {
+  it('summarizes multi-item args as "N items: <first path>" (incl. legacy names)', () => {
     expect(
       toolSummary(
-        'read_files',
+        'read_files', // legacy name — tools removed, history must still render
         JSON.stringify({ files: [{ file_path: '/a.rs' }, { file_path: '/b.rs' }] }),
       ),
     ).toBe('2 items: /a.rs');

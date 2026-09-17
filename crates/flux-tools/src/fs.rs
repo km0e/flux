@@ -18,11 +18,17 @@ const MAX_ITEMS: usize = 16;
 #[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
 #[tool(
     name = "read_file",
-    description = "Read the contents of a file at the given path. Supports optional offset and limit for partial reads. Defaults to 2000 lines, max 5000."
+    description = "Read the contents of a file. Omit ranges to read the whole file (2000 lines default, 5000 max, 10MB truncation notice). Pass ranges to read several windows of this file in ONE call, e.g. ranges: [{\"offset\": 1, \"limit\": 100}, {\"offset\": 500, \"limit\": 100}] — each window keeps the offset/limit semantics (1-based offset, line-count limit) and its continuation footer; with 2+ windows each segment is headed by `=== path ===`."
 )]
 pub struct ReadFileTool {
     /// Path to the file to read.
     file_path: String,
+    /// Optional windows to read instead of the whole file. Omitted or empty = whole file (at most 16 windows).
+    ranges: Option<Vec<ReadRange>>,
+}
+
+#[derive(flux_macros::ToolItem, ::serde::Deserialize)]
+pub struct ReadRange {
     /// Line number to start reading from (1-based).
     offset: Option<usize>,
     /// Maximum number of lines to read.
@@ -38,18 +44,47 @@ impl ReadFileTool {
         // Resolve against the chat boundary — escapes are tool errors the
         // model sees and self-corrects.
         let file_path = ctx.resolve(&self.file_path)?;
-        read_file_segment(
-            file_path.as_path(),
-            self.offset.unwrap_or(1).max(1),
-            self.limit,
-        )
-        .await
+        let path = file_path.as_path();
+
+        // No ranges (or an empty list) = the whole file — the bare output
+        // read_file has always returned.
+        let Some(ranges) = self.ranges.as_ref().filter(|r| !r.is_empty()) else {
+            return read_file_segment(path, 1, None).await;
+        };
+        if ranges.len() > MAX_ITEMS {
+            return Err(CoreError::Tool(format!(
+                "too many windows ({}) — read at most {MAX_ITEMS} per call and split the rest across further calls",
+                ranges.len()
+            )));
+        }
+        // A single window keeps the bare output (no header) — the old
+        // offset/limit shape verbatim.
+        if ranges.len() == 1 {
+            let r = &ranges[0];
+            return read_file_segment(path, r.offset.unwrap_or(1).max(1), r.limit).await;
+        }
+        // 2+ windows: one `=== path ===` section per window, each keeping
+        // read_file's footer semantics. A failure fails the call — same
+        // path, so a stat/open error affects every window identically
+        // (offsets past EOF are not errors: read_file_segment reports them
+        // inline). Cancellation lands between windows; the partial result
+        // stays useful, the kernel marks the round interrupted.
+        let mut sections: Vec<String> = Vec::with_capacity(ranges.len());
+        for r in ranges {
+            if ctx.cancel.is_cancelled() {
+                break;
+            }
+            let content = read_file_segment(path, r.offset.unwrap_or(1).max(1), r.limit).await?;
+            sections.push(format!("=== {} ===\n{}", path.display(), content));
+        }
+        Ok(sections.join("\n\n"))
     }
 }
 
-/// Read one file segment — the single-file core shared by `read_file` and
-/// `read_files`: 10MB guard, streamed line window, continuation/truncation
-/// footers. `path` must already be resolved against the chat boundary.
+/// Read one file segment — the single-file core of `read_file` (whole-file
+/// reads and every `ranges` window go through it): 10MB guard, streamed line
+/// window, continuation/truncation footers. `path` must already be resolved
+/// against the chat boundary.
 async fn read_file_segment(
     path: &std::path::Path,
     offset: usize,
@@ -171,94 +206,6 @@ async fn read_file_segment(
 }
 
 // ---------------------------------------------------------------------------
-// ReadFilesTool — several files (or ranges) in one call
-// ---------------------------------------------------------------------------
-
-/// One read request inside a `read_files` call — the same fields and
-/// semantics as a single `read_file` invocation.
-#[derive(flux_macros::ToolItem, ::serde::Deserialize)]
-pub struct ReadItem {
-    /// Path to the file to read.
-    file_path: String,
-    /// Line number to start reading from (1-based).
-    offset: Option<usize>,
-    /// Maximum number of lines to read.
-    limit: Option<usize>,
-}
-
-#[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
-#[tool(
-    name = "read_files",
-    description = "Read multiple files (or several ranges of one file) in ONE call — one segment per item, each keeping read_file's offset/limit semantics and footers behind a `=== path ===` header. A failed item reports its error and the remaining items still read. For a single file prefer read_file."
-)]
-pub struct ReadFilesTool {
-    /// Files to read, one segment each (1..=16 items).
-    files: Vec<ReadItem>,
-}
-
-impl ReadFilesTool {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    async fn execute(&self, ctx: ToolCtx) -> Result<String, CoreError> {
-        if self.files.is_empty() {
-            return Err(CoreError::Tool(
-                "files must not be empty — for a single file use read_file".into(),
-            ));
-        }
-        if self.files.len() > MAX_ITEMS {
-            return Err(CoreError::Tool(format!(
-                "too many files ({}) — read at most {MAX_ITEMS} per call and split the rest across further calls",
-                self.files.len()
-            )));
-        }
-
-        let mut sections: Vec<String> = Vec::with_capacity(self.files.len());
-        let mut errors: Vec<String> = Vec::new();
-        for item in &self.files {
-            // Cancellation lands between items: the partial read result is
-            // still useful, the kernel marks the round interrupted.
-            if ctx.cancel.is_cancelled() {
-                break;
-            }
-            let section = match ctx.resolve(&item.file_path) {
-                Ok(path) => match read_file_segment(
-                    path.as_path(),
-                    item.offset.unwrap_or(1).max(1),
-                    item.limit,
-                )
-                .await
-                {
-                    Ok(content) => format!("=== {} ===\n{}", path.display(), content),
-                    Err(e) => {
-                        errors.push(format!("{}: {e}", path.display()));
-                        format!("=== {} — read failed: {e} ===", path.display())
-                    }
-                },
-                Err(e) => {
-                    errors.push(format!("{}: {e}", item.file_path));
-                    format!("=== {} — read failed: {e} ===", item.file_path)
-                }
-            };
-            sections.push(section);
-        }
-
-        // Every item failed — one consolidated error reads better than N
-        // error sections (per-item sections only pay off when some reads
-        // succeeded).
-        if sections.len() == errors.len() && !errors.is_empty() {
-            return Err(CoreError::Tool(format!(
-                "all {} read(s) failed — {}",
-                errors.len(),
-                errors.join("; ")
-            )));
-        }
-        Ok(sections.join("\n\n"))
-    }
-}
-
-// ---------------------------------------------------------------------------
 // EditFileTool — exact text replacement (str_replace)
 // ---------------------------------------------------------------------------
 
@@ -343,12 +290,16 @@ fn nearest_line_hint(content: &str, old_string: &str) -> String {
     format!("closest line {}: {shown}", best.1)
 }
 
-/// One exact-text replacement to apply to a file's content — the unit both
-/// `edit_file` (a one-item list) and `edit_files` are built from.
+/// One exact-text replacement to apply to the file — the item of
+/// `edit_file`'s `edits` list.
+#[derive(flux_macros::ToolItem, ::serde::Deserialize)]
 struct EditOp {
+    /// Exact text to replace, copied verbatim from a recent read (no line-number prefixes). Must be unique in the file unless replace_all is true.
     old_string: String,
+    /// Replacement text. An empty string deletes the matched text.
     new_string: String,
-    replace_all: bool,
+    /// Replace every occurrence of old_string instead of requiring a unique match.
+    replace_all: Option<bool>,
 }
 
 /// Outcome of one applied [`EditOp`], for the result text.
@@ -393,7 +344,7 @@ fn apply_edit_ops(
                 )),
             ));
         }
-        if matches.len() > 1 && !op.replace_all {
+        if matches.len() > 1 && !op.replace_all.unwrap_or(false) {
             return Err((
                 pos,
                 CoreError::Tool(format!(
@@ -418,17 +369,13 @@ fn apply_edit_ops(
 #[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
 #[tool(
     name = "edit_file",
-    description = "Edit a file by replacing an exact text snippet. Read the file first (read_file), then copy old_string VERBATIM from its output — including indentation and whitespace; it must match the file content exactly and appear exactly once, or pass replace_all=true to replace every occurrence. To create a file or rewrite one entirely use write_file; to edit by line numbers use replace_lines."
+    description = "Edit a file by replacing exact text snippets — one file per call, 1..=16 edits applied in listed order, each matching the content the previous edit left (a later edit may target text an earlier one introduced). Copy old_string VERBATIM from a recent read (no line-number prefixes); it must match the file content exactly and appear exactly once, or pass replace_all=true. The file is written once, atomically: one failed edit leaves the file untouched (with the nearest-line hint). To create a file or rewrite one entirely use write_file; to edit by line numbers use replace_lines."
 )]
 pub struct EditFileTool {
-    /// Path to the file to edit.
+    /// Path to the file to edit (one file per call).
     file_path: String,
-    /// Exact text to replace, copied verbatim from a recent read_file (no line-number prefixes). Must be unique in the file unless replace_all is true.
-    old_string: String,
-    /// Replacement text. An empty string deletes the matched text.
-    new_string: String,
-    /// Replace every occurrence of old_string instead of requiring a unique match.
-    replace_all: Option<bool>,
+    /// Edits to apply in listed order (1..=16).
+    edits: Vec<EditOp>,
 }
 
 impl EditFileTool {
@@ -437,105 +384,9 @@ impl EditFileTool {
     }
 
     async fn execute(&self, ctx: ToolCtx) -> Result<String, CoreError> {
-        // Resolve against the chat boundary — escapes are tool errors the
-        // model sees and self-corrects.
-        let file_path = ctx.resolve(&self.file_path)?;
-        let path = file_path.as_path();
-
-        if self.old_string.is_empty() {
-            return Err(CoreError::Tool(
-                "old_string must not be empty — use write_file to create a file or replace_lines to insert at a line".into(),
-            ));
-        }
-        if self.old_string == self.new_string {
-            return Err(CoreError::Tool(
-                "old_string and new_string are identical — nothing to replace".into(),
-            ));
-        }
-
-        let content = read_for_edit(path).await?;
-
-        // Working space: raw bytes for LF files; LF-normalized when a
-        // multi-line LF-only old_string meets a CRLF file (the model's
-        // verbatim copy never carries \r — read_file strips it). Line
-        // structure is identical in both spaces, so match counts, hint
-        // lines, and reported line numbers are all taken from here; the
-        // spliced result is re-emitted as CRLF so untouched lines keep
-        // their exact endings.
-        let crlf = content.contains("\r\n")
-            && self.old_string.contains('\n')
-            && !self.old_string.contains('\r');
-        let work = if crlf {
-            normalize_crlf(&content)
-        } else {
-            content
-        };
-
-        let op = EditOp {
-            old_string: self.old_string.clone(),
-            new_string: self.new_string.clone(),
-            replace_all: self.replace_all.unwrap_or(false),
-        };
-        let (out, outcomes) = apply_edit_ops(work, &[&op]).map_err(|(_, e)| e)?;
-        let outcome = &outcomes[0];
-        let out = if crlf { to_crlf(&out) } else { out };
-        tokio::fs::write(path, &out).await.map_err(|e| {
-            CoreError::Tool(format!("failed to write {}: {e}", file_path.display()))
-        })?;
-
-        let n = outcome.count;
-        if n == 1 {
-            Ok(format!(
-                "Replaced 1 occurrence at line {}. File now {} lines.",
-                outcome.first_line,
-                out.lines().count()
-            ))
-        } else {
-            Ok(format!(
-                "Replaced {n} occurrences. File now {} lines.",
-                out.lines().count()
-            ))
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// EditFilesTool — several exact-text edits across one or more files
-// ---------------------------------------------------------------------------
-
-/// One edit request inside an `edit_files` call — the same match semantics
-/// as a single `edit_file` invocation.
-#[derive(flux_macros::ToolItem, ::serde::Deserialize)]
-pub struct EditItem {
-    /// Path to the file to edit.
-    file_path: String,
-    /// Exact text to replace, copied verbatim from a recent read_file (no line-number prefixes). Must be unique in the file unless replace_all is true.
-    old_string: String,
-    /// Replacement text. An empty string deletes the matched text.
-    new_string: String,
-    /// Replace every occurrence of old_string instead of requiring a unique match.
-    replace_all: Option<bool>,
-}
-
-#[derive(Default, flux_macros::Tool, ::serde::Deserialize)]
-#[tool(
-    name = "edit_files",
-    description = "Apply multiple exact-text replacements (edit_file's match semantics) across one or more files in ONE call. Same-file edits apply in listed order, each matching the content the previous edit left; each FILE is atomic — one failed edit leaves that file untouched while other files still apply. For a single edit prefer edit_file."
-)]
-pub struct EditFilesTool {
-    /// Edits to apply, grouped by file automatically (1..=16 items); same-file edits run in listed order and report per edit.
-    edits: Vec<EditItem>,
-}
-
-impl EditFilesTool {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    async fn execute(&self, ctx: ToolCtx) -> Result<String, CoreError> {
         if self.edits.is_empty() {
             return Err(CoreError::Tool(
-                "edits must not be empty — for a single edit use edit_file".into(),
+                "edits must not be empty — pass at least one edit".into(),
             ));
         }
         if self.edits.len() > MAX_ITEMS {
@@ -546,7 +397,8 @@ impl EditFilesTool {
         }
 
         // Upfront per-item validation — nothing is read or written until
-        // every item is individually well-formed.
+        // every edit is individually well-formed.
+        let mut seen: HashMap<(&str, &str, Option<bool>), usize> = HashMap::new();
         for (i, edit) in self.edits.iter().enumerate() {
             if edit.old_string.is_empty() {
                 return Err(CoreError::Tool(format!(
@@ -560,136 +412,87 @@ impl EditFilesTool {
                     i + 1
                 )));
             }
-        }
-
-        // Group by resolved path, preserving first-appearance order; each
-        // op keeps its 1-based index in the model's own edit list so per-
-        // edit reports stay correlatable when files interleave. An exactly
-        // duplicated item (same file/text/replacement/mode) would silently
-        // double-apply, so it is rejected up front.
-        let mut groups: Vec<(std::path::PathBuf, Vec<(usize, EditOp)>)> = Vec::new();
-        let mut group_of_file: HashMap<std::path::PathBuf, usize> = HashMap::new();
-        let mut seen: HashMap<(&str, &str, &str, bool), usize> = HashMap::new();
-        for (i, edit) in self.edits.iter().enumerate() {
-            let replace_all = edit.replace_all.unwrap_or(false);
             if let Some(&first) = seen.get(&(
-                edit.file_path.as_str(),
                 edit.old_string.as_str(),
                 edit.new_string.as_str(),
-                replace_all,
+                edit.replace_all,
             )) {
                 return Err(CoreError::Tool(format!(
-                    "edit {} is an exact duplicate of edit {} (same file_path/old_string/new_string/replace_all) — remove the repeat",
+                    "edit {}: exact duplicate of edit {} (same old_string/new_string/replace_all) — remove the duplicate",
                     i + 1,
                     first + 1
                 )));
             }
             seen.insert(
                 (
-                    edit.file_path.as_str(),
                     edit.old_string.as_str(),
                     edit.new_string.as_str(),
-                    replace_all,
+                    edit.replace_all,
                 ),
                 i,
             );
-            let path = ctx
-                .resolve(&edit.file_path)
-                .map_err(|e| CoreError::Tool(format!("edit {}: {e}", i + 1)))?;
-            let op = EditOp {
-                old_string: edit.old_string.clone(),
-                new_string: edit.new_string.clone(),
-                replace_all,
-            };
-            match group_of_file.get(&path) {
-                Some(&gi) => groups[gi].1.push((i, op)),
-                None => {
-                    group_of_file.insert(path.clone(), groups.len());
-                    groups.push((path, vec![(i, op)]));
-                }
-            }
         }
 
-        // Per-file apply: read once, apply the group sequentially, write
-        // once. Any failing op aborts THAT file before the write (per-file
-        // all-or-nothing); other files proceed independently.
-        let mut report: Vec<String> = Vec::new();
-        let mut applied = 0usize;
-        for (path, ops) in &groups {
-            if ctx.cancel.is_cancelled() {
-                report.push(format!("{}: skipped (cancelled)", path.display()));
-                continue;
-            }
-            let content = match read_for_edit(path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    report.push(format!("{}: FAILED — {e}. File untouched.", path.display()));
-                    continue;
-                }
-            };
-            // CRLF gate, generalized from edit_file: normalize when the file
-            // is CRLF and the ops are pure LF-space text (the model's
-            // verbatim copies never carry \r). Any op carrying \r keeps the
-            // whole file in raw space — a deliberate raw-space op wins over
-            // normalization, and a mixed group then fails its LF-space ops
-            // with the standard no-match hint.
-            let crlf = content.contains("\r\n")
-                && ops.iter().any(|(_, op)| op.old_string.contains('\n'))
-                && ops.iter().all(|(_, op)| !op.old_string.contains('\r'));
-            let work = if crlf {
-                normalize_crlf(&content)
-            } else {
-                content
-            };
-            let op_refs: Vec<&EditOp> = ops.iter().map(|(_, op)| op).collect();
-            let (out, outcomes) = match apply_edit_ops(work, &op_refs) {
-                Ok(r) => r,
-                Err((pos, e)) => {
-                    // The group was never written — report which of the
-                    // model's edits failed (1-based, its own list).
-                    let failed = ops[pos].0 + 1;
-                    report.push(format!(
-                        "{}: FAILED — edit {failed}: {e}. File untouched.",
-                        path.display()
-                    ));
-                    continue;
-                }
-            };
-            let out = if crlf { to_crlf(&out) } else { out };
-            if let Err(e) = tokio::fs::write(path, &out).await {
-                report.push(format!(
-                    "{}: FAILED — failed to write: {e}.",
-                    path.display()
+        // Resolve against the chat boundary — escapes are tool errors the
+        // model sees and self-corrects.
+        let file_path = ctx.resolve(&self.file_path)?;
+        let path = file_path.as_path();
+
+        let content = read_for_edit(path).await?;
+
+        // Working space: raw bytes for LF files; LF-normalized when a
+        // multi-line LF-only old_string meets a CRLF file (the model's
+        // verbatim copy never carries \r — read_file strips it). Any edit
+        // carrying \r keeps the whole file in raw space — a deliberate
+        // raw-space edit wins over normalization. Line structure is
+        // identical in both spaces, so match counts, hint lines, and
+        // reported line numbers are all taken from here; the spliced
+        // result is re-emitted as CRLF so untouched lines keep their
+        // exact endings.
+        let crlf = content.contains("\r\n")
+            && self.edits.iter().any(|op| op.old_string.contains('\n'))
+            && self.edits.iter().all(|op| !op.old_string.contains('\r'));
+        let work = if crlf {
+            normalize_crlf(&content)
+        } else {
+            content
+        };
+
+        let op_refs: Vec<&EditOp> = self.edits.iter().collect();
+        // Whole-call atomicity: the ops apply to an in-memory string and
+        // the file is written once at the end — one failed edit leaves
+        // the file untouched, reported with the edit's 1-based index in
+        // the call's own edits list.
+        let (out, outcomes) = apply_edit_ops(work, &op_refs).map_err(|(pos, e)| {
+            CoreError::Tool(format!("edit {}: {e}. File untouched.", pos + 1))
+        })?;
+        let out = if crlf { to_crlf(&out) } else { out };
+        tokio::fs::write(path, &out).await.map_err(|e| {
+            CoreError::Tool(format!("failed to write {}: {e}", file_path.display()))
+        })?;
+
+        // Report: one line per edit, 1-based in the call's edits list.
+        let mut report = format!(
+            "Applied {} edit(s). File now {} lines.",
+            self.edits.len(),
+            out.lines().count()
+        );
+        for (k, outcome) in outcomes.iter().enumerate() {
+            if outcome.count == 1 {
+                report.push_str(&format!(
+                    "\n  edit {}: replaced 1 occurrence at line {}",
+                    k + 1,
+                    outcome.first_line
                 ));
-                continue;
-            }
-            applied += 1;
-            report.push(format!(
-                "{}: {} edit(s) applied, file now {} lines.",
-                path.display(),
-                ops.len(),
-                out.lines().count()
-            ));
-            for (k, outcome) in outcomes.iter().enumerate() {
-                let edit_no = ops[k].0 + 1;
-                if outcome.count == 1 {
-                    report.push(format!(
-                        "  edit {edit_no}: replaced 1 occurrence at line {}",
-                        outcome.first_line
-                    ));
-                } else {
-                    report.push(format!(
-                        "  edit {edit_no}: replaced {} occurrences (replace_all)",
-                        outcome.count
-                    ));
-                }
+            } else {
+                report.push_str(&format!(
+                    "\n  edit {}: replaced {} occurrences (replace_all)",
+                    k + 1,
+                    outcome.count
+                ));
             }
         }
-
-        if applied == 0 {
-            return Err(CoreError::Tool(report.join("\n")));
-        }
-        Ok(report.join("\n"))
+        Ok(report)
     }
 }
 
@@ -988,7 +791,7 @@ mod tests {
             .call(
                 processed(vec![
                     ("file_path", json!(path.to_string_lossy())),
-                    ("offset", json!(2)),
+                    ("ranges", json!([{ "offset": 2 }])),
                 ]),
                 boundary_ctx(dir.path()),
             )
@@ -1017,7 +820,7 @@ mod tests {
         let tool = ReadFileTool::new();
         let args = processed(vec![
             ("file_path", json!(path.to_string_lossy())),
-            ("limit", json!(100)),
+            ("ranges", json!([{ "limit": 100 }])),
         ]);
         let result = tool.call(args, boundary_ctx(dir.path())).await.unwrap();
         let lines: Vec<&str> = result.lines().collect();
@@ -1067,7 +870,7 @@ mod tests {
         let tool = ReadFileTool::new();
         let args = processed(vec![
             ("file_path", json!(path.to_string_lossy())),
-            ("limit", json!(5)),
+            ("ranges", json!([{ "limit": 5 }])),
         ]);
         let result = tool.call(args, boundary_ctx(dir.path())).await.unwrap();
         assert!(
@@ -1092,8 +895,7 @@ mod tests {
         let tool = ReadFileTool::new();
         let args = processed(vec![
             ("file_path", json!(path.to_string_lossy())),
-            ("offset", json!(10)),
-            ("limit", json!(5)),
+            ("ranges", json!([{ "offset": 10, "limit": 5 }])),
         ]);
         let result = tool.call(args, boundary_ctx(dir.path())).await.unwrap();
         assert!(
@@ -1121,8 +923,7 @@ mod tests {
 
         let raw = json!({
             "file_path": path.to_string_lossy(),
-            "offset": 8,
-            "limit": 3,
+            "ranges": [{ "offset": 8, "limit": 3 }],
         })
         .to_string();
         let args: HashMap<String, Value> = serde_json::from_str(&raw).unwrap();
@@ -1142,7 +943,7 @@ mod tests {
         let tool = ReadFileTool::new();
         let args = processed(vec![
             ("file_path", json!(path.to_string_lossy())),
-            ("limit", json!(0)),
+            ("ranges", json!([{ "limit": 0 }])),
         ]);
         let result = tool.call(args, boundary_ctx(dir.path())).await.unwrap();
         assert_eq!(result, "", "limit 0 must yield no lines, got: {result}");
@@ -1271,17 +1072,20 @@ mod tests {
         replace_all: bool,
     ) -> Result<String, CoreError> {
         let tool = EditFileTool::new();
-        let mut pairs = vec![
-            ("file_path", json!(path.to_string_lossy())),
-            ("old_string", json!(old)),
-            ("new_string", json!(new)),
-        ];
+        let mut op = json!({ "old_string": old, "new_string": new });
         if replace_all {
-            pairs.push(("replace_all", json!(true)));
+            op["replace_all"] = json!(true);
         }
         // The boundary is the file's own directory for these tests.
         let dir = path.parent().unwrap();
-        tool.call(processed(pairs), boundary_ctx(dir)).await
+        tool.call(
+            processed(vec![
+                ("file_path", json!(path.to_string_lossy())),
+                ("edits", json!([op])),
+            ]),
+            boundary_ctx(dir),
+        )
+        .await
     }
 
     #[tokio::test]
@@ -1331,7 +1135,10 @@ mod tests {
             "got: {err}"
         );
         let result = edit(&path, "foo();", "baz();", true).await.unwrap();
-        assert!(result.contains("Replaced 2 occurrences"), "got: {result}");
+        assert!(
+            result.contains("replaced 2 occurrences (replace_all)"),
+            "got: {result}"
+        );
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "baz();\nbar();\nbaz();\n"
@@ -1487,55 +1294,59 @@ mod tests {
         assert!(result.is_err());
     }
 
-    // ── read_files ──
-
-    fn files_args(items: Value) -> HashMap<String, Value> {
-        processed(vec![("files", items)])
-    }
+    // ── read_file: multi-window reads ──
 
     #[tokio::test]
-    async fn read_files_reads_multiple_files_with_headers() {
+    async fn read_file_multiple_windows_are_headed_and_footed() {
         let dir = setup();
-        // a.txt has more lines than the limit → its section keeps
-        // read_file's continuation footer.
         fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
-        fs::write(dir.path().join("b.txt"), "delta\n").unwrap();
-        let tool = ReadFilesTool::new();
+        let tool = ReadFileTool::new();
         let result = tool
             .call(
-                files_args(json!([
-                    { "file_path": dir.path().join("a.txt").to_string_lossy(), "limit": 2 },
-                    { "file_path": dir.path().join("b.txt").to_string_lossy() },
-                ])),
+                processed(vec![
+                    (
+                        "file_path",
+                        json!(dir.path().join("a.txt").to_string_lossy()),
+                    ),
+                    (
+                        "ranges",
+                        json!([{ "offset": 1, "limit": 2 }, { "offset": 3 }]),
+                    ),
+                ]),
                 boundary_ctx(dir.path()),
             )
             .await
             .unwrap();
+        // 2+ windows: one `=== path ===` section per window, each keeping
+        // read_file's footer semantics.
         assert!(result.contains("=== "), "got: {result}");
-        assert!(result.contains("alpha"));
-        assert!(result.contains("delta"));
-        // Per-file footers keep read_file's semantics inside each section.
         assert!(result.contains("--- (lines 1-2 of 3) ---"), "got: {result}");
-        // Sections are separated (b's content comes after a's).
-        let a_pos = result.find("alpha").unwrap();
-        let b_pos = result.find("delta").unwrap();
-        assert!(a_pos < b_pos);
+        assert!(result.contains("alpha"), "got: {result}");
+        assert!(result.contains("gamma"), "got: {result}");
+        // Window 2's content comes after window 1's.
+        let w1 = result.find("alpha").unwrap();
+        let w2 = result.find("gamma").unwrap();
+        assert!(w1 < w2);
     }
 
     #[tokio::test]
-    async fn read_files_per_item_offset_and_limit() {
+    async fn read_file_single_window_keeps_the_bare_output() {
         let dir = setup();
         let content = (1..=10)
             .map(|i| format!("line {i}"))
             .collect::<Vec<_>>()
             .join("\n");
         fs::write(dir.path().join("n.txt"), content).unwrap();
-        let tool = ReadFilesTool::new();
+        let tool = ReadFileTool::new();
         let result = tool
             .call(
-                files_args(json!([
-                    { "file_path": dir.path().join("n.txt").to_string_lossy(), "offset": 3, "limit": 2 },
-                ])),
+                processed(vec![
+                    (
+                        "file_path",
+                        json!(dir.path().join("n.txt").to_string_lossy()),
+                    ),
+                    ("ranges", json!([{ "offset": 3, "limit": 2 }])),
+                ]),
                 boundary_ctx(dir.path()),
             )
             .await
@@ -1543,115 +1354,100 @@ mod tests {
         assert!(result.contains("line 3"), "got: {result}");
         assert!(result.contains("line 4"), "got: {result}");
         assert!(!result.contains("line 5"), "got: {result}");
+        // One window = the old offset/limit shape: no section header.
+        assert!(!result.contains("=== "), "got: {result}");
     }
 
     #[tokio::test]
-    async fn read_files_failed_item_does_not_block_the_rest() {
+    async fn read_file_empty_ranges_mean_whole_file() {
         let dir = setup();
-        fs::write(dir.path().join("ok.txt"), "good\n").unwrap();
-        let tool = ReadFilesTool::new();
+        fs::write(dir.path().join("a.txt"), "alpha\nbeta\ngamma\n").unwrap();
+        let tool = ReadFileTool::new();
         let result = tool
             .call(
-                files_args(json!([
-                    { "file_path": dir.path().join("missing.txt").to_string_lossy() },
-                    { "file_path": dir.path().join("ok.txt").to_string_lossy() },
-                ])),
+                processed(vec![
+                    (
+                        "file_path",
+                        json!(dir.path().join("a.txt").to_string_lossy()),
+                    ),
+                    ("ranges", json!([])),
+                ]),
                 boundary_ctx(dir.path()),
             )
             .await
             .unwrap();
-        assert!(result.contains("read failed"), "got: {result}");
-        assert!(
-            result.contains("good"),
-            "failed item must not block others, got: {result}"
-        );
+        assert_eq!(result, "alpha\nbeta\ngamma");
     }
 
     #[tokio::test]
-    async fn read_files_all_items_failed_is_one_error() {
+    async fn read_file_window_failure_fails_the_call() {
+        // One file per call: a stat/open error is path-level — every window
+        // would fail identically, so the call fails instead of rendering
+        // per-window error sections.
         let dir = setup();
-        let tool = ReadFilesTool::new();
+        let tool = ReadFileTool::new();
         let result = tool
             .call(
-                files_args(json!([
-                    { "file_path": dir.path().join("nope1.txt").to_string_lossy() },
-                    { "file_path": dir.path().join("nope2.txt").to_string_lossy() },
-                ])),
+                processed(vec![
+                    (
+                        "file_path",
+                        json!(dir.path().join("missing.txt").to_string_lossy()),
+                    ),
+                    ("ranges", json!([{ "offset": 1 }, { "offset": 2 }])),
+                ]),
                 boundary_ctx(dir.path()),
             )
             .await;
         let err = result.unwrap_err();
-        assert!(
-            err.to_string().contains("all 2 read(s) failed"),
-            "got: {err}"
-        );
-        assert!(err.to_string().contains("failed to stat"));
+        assert!(err.to_string().contains("failed to stat"), "got: {err}");
     }
 
     #[tokio::test]
-    async fn read_files_rejects_empty_and_over_cap() {
+    async fn read_file_over_window_cap_rejected() {
         let dir = setup();
-        let tool = ReadFilesTool::new();
-
-        let err = tool
-            .call(files_args(json!([])), boundary_ctx(dir.path()))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("must not be empty"), "got: {err}");
-
-        let over: Vec<Value> = (0..MAX_ITEMS + 1)
-            .map(|i| json!({ "file_path": dir.path().join(format!("f{i}.txt")).to_string_lossy() }))
-            .collect();
-        let err = tool
-            .call(files_args(json!(over)), boundary_ctx(dir.path()))
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("too many files"), "got: {err}");
-    }
-
-    #[tokio::test]
-    async fn read_files_escape_is_denied() {
-        let dir = setup();
-        let tool = ReadFilesTool::new();
+        fs::write(dir.path().join("a.txt"), "alpha\n").unwrap();
+        let tool = ReadFileTool::new();
+        let over: Vec<Value> = (0..MAX_ITEMS + 1).map(|_| json!({ "offset": 1 })).collect();
         let err = tool
             .call(
-                files_args(json!([{ "file_path": "/etc/passwd" }])),
+                processed(vec![
+                    (
+                        "file_path",
+                        json!(dir.path().join("a.txt").to_string_lossy()),
+                    ),
+                    ("ranges", json!(over)),
+                ]),
                 boundary_ctx(dir.path()),
             )
-            .await;
-        let err = err.unwrap_err();
-        assert!(
-            err.to_string().contains("path escape"),
-            "boundary still applies per item, got: {err}"
-        );
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too many windows"), "got: {err}");
     }
 
-    // ── edit_files ──
+    // ── edit_file: multi-edit calls ──
 
-    fn edits_args(items: Value) -> HashMap<String, Value> {
-        processed(vec![("edits", items)])
+    fn edits_args(path: &Path, ops: Value) -> HashMap<String, Value> {
+        processed(vec![
+            ("file_path", json!(path.to_string_lossy())),
+            ("edits", ops),
+        ])
     }
 
     #[tokio::test]
-    async fn edit_files_applies_multiple_edits_to_one_file_in_order() {
+    async fn edit_file_applies_edits_in_order() {
         let dir = setup();
         let path = dir.path().join("code.txt");
         fs::write(&path, "fn a() {}\nfn b() {}\n").unwrap();
-        let tool = EditFilesTool::new();
+        let tool = EditFileTool::new();
         let result = tool
             .call(
-                edits_args(json!([
-                    {
-                        "file_path": path.to_string_lossy(),
-                        "old_string": "fn a() {}",
-                        "new_string": "fn a() -> u32 { 1 }",
-                    },
-                    {
-                        "file_path": path.to_string_lossy(),
-                        "old_string": "fn a() -> u32 { 1 }",
-                        "new_string": "fn a() -> u32 { 2 }",
-                    },
-                ])),
+                edits_args(
+                    &path,
+                    json!([
+                        { "old_string": "fn a() {}", "new_string": "fn a() -> u32 { 1 }" },
+                        { "old_string": "fn a() -> u32 { 1 }", "new_string": "fn a() -> u32 { 2 }" },
+                    ]),
+                ),
                 boundary_ctx(dir.path()),
             )
             .await
@@ -1659,7 +1455,7 @@ mod tests {
         let written = fs::read_to_string(&path).unwrap();
         // Edit 2 matched the text edit 1 introduced — sequential semantics.
         assert!(written.contains("fn a() -> u32 { 2 }"), "got: {written}");
-        assert!(result.contains("2 edit(s) applied"), "got: {result}");
+        assert!(result.contains("Applied 2 edit(s)"), "got: {result}");
         assert!(
             result.contains("edit 2: replaced 1 occurrence"),
             "got: {result}"
@@ -1667,133 +1463,73 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_files_failed_edit_leaves_file_untouched_but_others_apply() {
-        let dir = setup();
-        let good = dir.path().join("good.txt");
-        let bad = dir.path().join("bad.txt");
-        fs::write(&good, "keep me\n").unwrap();
-        fs::write(&bad, "stale content\n").unwrap();
-        let tool = EditFilesTool::new();
-        let result = tool
-            .call(
-                edits_args(json!([
-                    {
-                        "file_path": good.to_string_lossy(),
-                        "old_string": "keep me",
-                        "new_string": "changed",
-                    },
-                    {
-                        "file_path": bad.to_string_lossy(),
-                        "old_string": "content that is not there",
-                        "new_string": "x",
-                    },
-                ])),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap();
-        // Per-file atomicity: bad.txt untouched, good.txt written.
-        assert_eq!(fs::read_to_string(&bad).unwrap(), "stale content\n");
-        assert_eq!(fs::read_to_string(&good).unwrap(), "changed\n");
-        assert!(result.contains("FAILED"), "got: {result}");
-        assert!(result.contains("File untouched"), "got: {result}");
-        assert!(result.contains("1 edit(s) applied"), "got: {result}");
-    }
-
-    #[tokio::test]
-    async fn edit_files_all_files_failed_is_one_error() {
-        let dir = setup();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        fs::write(&a, "one\n").unwrap();
-        fs::write(&b, "two\n").unwrap();
-        let tool = EditFilesTool::new();
-        let err = tool
-            .call(
-                edits_args(json!([
-                    { "file_path": a.to_string_lossy(), "old_string": "nope", "new_string": "x" },
-                    { "file_path": b.to_string_lossy(), "old_string": "nada", "new_string": "y" },
-                ])),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap_err();
-        assert!(err.to_string().contains("FAILED"), "got: {err}");
-        // Nothing was written anywhere.
-        assert_eq!(fs::read_to_string(&a).unwrap(), "one\n");
-        assert_eq!(fs::read_to_string(&b).unwrap(), "two\n");
-    }
-
-    #[tokio::test]
-    async fn edit_files_reports_the_models_edit_index_on_failure() {
+    async fn edit_file_failed_edit_leaves_the_file_untouched_and_reports_the_index() {
         let dir = setup();
         let path = dir.path().join("f.txt");
         fs::write(&path, "a\nb\nc\n").unwrap();
-        let tool = EditFilesTool::new();
-        // Both edits target the same file: edit 2 fails → the whole file
-        // (including edit 1) rolled back, and with no file applied the call
-        // surfaces one error instead of an all-FAILED report.
+        let tool = EditFileTool::new();
+        // Edit 2 fails → the whole call rolls back (the file is written
+        // once, at the end), and the error carries the edit's 1-based index
+        // in the call's own edits list.
         let err = tool
             .call(
-                edits_args(json!([
-                    { "file_path": path.to_string_lossy(), "old_string": "a", "new_string": "A" },
-                    { "file_path": path.to_string_lossy(), "old_string": "zzz", "new_string": "Z" },
-                ])),
+                edits_args(
+                    &path,
+                    json!([
+                        { "old_string": "a", "new_string": "A" },
+                        { "old_string": "zzz", "new_string": "Z" },
+                    ]),
+                ),
                 boundary_ctx(dir.path()),
             )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("edit 2:"), "got: {err}");
         assert!(err.to_string().contains("no exact match"), "got: {err}");
+        assert!(err.to_string().contains("File untouched"), "got: {err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), "a\nb\nc\n");
     }
 
     #[tokio::test]
-    async fn edit_files_crlf_file_with_multiline_lf_edits() {
+    async fn edit_file_crlf_edit_keeps_the_file_in_raw_space() {
+        // A \r-carrying old_string opts the whole file out of LF
+        // normalization — a deliberate raw-space edit wins over the CRLF
+        // gate, and untouched lines keep their exact endings.
         let dir = setup();
         let path = dir.path().join("win.txt");
         fs::write(&path, "one\r\ntwo\r\nthree\r\n").unwrap();
-        let tool = EditFilesTool::new();
+        let tool = EditFileTool::new();
         let result = tool
             .call(
-                edits_args(json!([
-                    {
-                        "file_path": path.to_string_lossy(),
-                        "old_string": "one\r\ntwo",
-                        "new_string": "ONE\r\nTWO",
-                    },
-                ])),
+                edits_args(
+                    &path,
+                    json!([{ "old_string": "one\r\ntwo", "new_string": "ONE\r\nTWO" }]),
+                ),
                 boundary_ctx(dir.path()),
             )
             .await
             .unwrap();
-        // The \r-carrying op keeps the file in raw space; untouched lines
-        // keep CRLF.
         let written = fs::read_to_string(&path).unwrap();
         assert_eq!(written, "ONE\r\nTWO\r\nthree\r\n", "got: {written:?}");
-        assert!(result.contains("1 edit(s) applied"), "got: {result}");
+        assert!(result.contains("Applied 1 edit(s)"), "got: {result}");
     }
 
     #[tokio::test]
-    async fn edit_files_rejects_empty_identical_and_duplicate_items() {
+    async fn edit_file_rejects_empty_identical_and_duplicate_edits() {
         let dir = setup();
         let path = dir.path().join("f.txt");
         fs::write(&path, "x\n").unwrap();
-        let tool = EditFilesTool::new();
+        let tool = EditFileTool::new();
 
         let err = tool
-            .call(edits_args(json!([])), boundary_ctx(dir.path()))
+            .call(edits_args(&path, json!([])), boundary_ctx(dir.path()))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("must not be empty"), "got: {err}");
 
         let err = tool
             .call(
-                edits_args(json!([{
-                    "file_path": path.to_string_lossy(),
-                    "old_string": "",
-                    "new_string": "y",
-                }])),
+                edits_args(&path, json!([{ "old_string": "", "new_string": "y" }])),
                 boundary_ctx(dir.path()),
             )
             .await
@@ -1806,11 +1542,7 @@ mod tests {
 
         let err = tool
             .call(
-                edits_args(json!([{
-                    "file_path": path.to_string_lossy(),
-                    "old_string": "x",
-                    "new_string": "x",
-                }])),
+                edits_args(&path, json!([{ "old_string": "x", "new_string": "x" }])),
                 boundary_ctx(dir.path()),
             )
             .await
@@ -1818,11 +1550,11 @@ mod tests {
         assert!(err.to_string().contains("identical"), "got: {err}");
 
         let dup = json!([
-            { "file_path": path.to_string_lossy(), "old_string": "x", "new_string": "y" },
-            { "file_path": path.to_string_lossy(), "old_string": "x", "new_string": "y" },
+            { "old_string": "x", "new_string": "y" },
+            { "old_string": "x", "new_string": "y" },
         ]);
         let err = tool
-            .call(edits_args(dup), boundary_ctx(dir.path()))
+            .call(edits_args(&path, dup), boundary_ctx(dir.path()))
             .await
             .unwrap_err();
         assert!(
@@ -1832,65 +1564,27 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn edit_files_over_cap_rejected() {
+    async fn edit_file_over_cap_rejected() {
         let dir = setup();
         let path = dir.path().join("f.txt");
         fs::write(&path, "x\n").unwrap();
-        let tool = EditFilesTool::new();
+        let tool = EditFileTool::new();
+        // Cap precedes per-item validation: 17 identical edits report the
+        // cap, not the duplicate.
         let over: Vec<Value> = (0..MAX_ITEMS + 1)
-            .map(|_| {
-                json!({
-                    "file_path": path.to_string_lossy(),
-                    "old_string": "x",
-                    "new_string": "y",
-                })
-            })
+            .map(|_| json!({ "old_string": "x", "new_string": "y" }))
             .collect();
-        // Note: duplicates would also be rejected — cap check must fire
-        // first, which it does (cap precedes grouping).
         let err = tool
-            .call(edits_args(json!(over)), boundary_ctx(dir.path()))
+            .call(edits_args(&path, json!(over)), boundary_ctx(dir.path()))
             .await
             .unwrap_err();
         assert!(err.to_string().contains("too many edits"), "got: {err}");
     }
 
     #[tokio::test]
-    async fn edit_files_interleaved_files_group_correctly() {
+    async fn edit_file_missing_required_fields_is_invalid_arguments() {
         let dir = setup();
-        let a = dir.path().join("a.txt");
-        let b = dir.path().join("b.txt");
-        fs::write(&a, "a1\na2\n").unwrap();
-        fs::write(&b, "b1\nb2\n").unwrap();
-        let tool = EditFilesTool::new();
-        let result = tool
-            .call(
-                edits_args(json!([
-                    { "file_path": a.to_string_lossy(), "old_string": "a1", "new_string": "A1" },
-                    { "file_path": b.to_string_lossy(), "old_string": "b1", "new_string": "B1" },
-                    { "file_path": a.to_string_lossy(), "old_string": "a2", "new_string": "A2" },
-                ])),
-                boundary_ctx(dir.path()),
-            )
-            .await
-            .unwrap();
-        assert_eq!(fs::read_to_string(&a).unwrap(), "A1\nA2\n");
-        assert_eq!(fs::read_to_string(&b).unwrap(), "B1\nb2\n");
-        // Report order follows first appearance (a.txt before b.txt), and
-        // the interleaved edit keeps its model-list index (3).
-        let a_pos = result.find("a.txt").unwrap();
-        let b_pos = result.find("b.txt").unwrap();
-        assert!(a_pos < b_pos, "got: {result}");
-        assert!(
-            result.contains("edit 3: replaced 1 occurrence"),
-            "got: {result}"
-        );
-    }
-
-    #[tokio::test]
-    async fn edit_files_missing_required_fields_is_invalid_arguments() {
-        let dir = setup();
-        let tool = EditFilesTool::new();
+        let tool = EditFileTool::new();
         // `edits` is required by the schema — serde must reject its absence.
         let err = tool
             .call(processed(vec![]), boundary_ctx(dir.path()))

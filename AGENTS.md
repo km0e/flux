@@ -64,7 +64,7 @@ flux/
 │ ├── flux-tools/ # Built-in tool implementations
 │ │ └── src/
 │ │ ├── lib.rs # Tool registration
-│ │ ├── fs.rs # read_file, read_files, edit_file (str_replace), edit_files (per-file atomic), write_file, replace_lines, list_directory
+│ │ ├── fs.rs # read_file (multi-window ranges), edit_file (multi-edit str_replace, atomic per call), write_file, replace_lines, list_directory
 │ │ ├── shell.rs # bash
 │ │ ├── search.rs # glob, grep
 │ │ ├── subprocess.rs # Shared command runner (kill-hygiene: process-group timeout + kernel parent-death signal)

@@ -3,9 +3,10 @@
  *
  * Scroll-following for streamed content is NOT "force-scroll on every
  * delta" but a stick state machine:
- *   - attached: leaving the bottom by 8px detaches, and detaching cancels
- *     the pending follow frame (a user scrolling up to read is never yanked
- *     back)
+ *   - attached: scrolling up AND off the bottom (a 2px clamp tolerance)
+ *     detaches, and detaching cancels the pending follow frame (a user
+ *     scrolling up to read is never yanked back; a bottom clamp — content
+ *     shrinking while pinned — reads as up-scroll but is NOT a detach)
  *   - detached: scrolling up stays detached; scrolling down into the bottom
  *     96px re-attaches automatically
  * Follow scrolls merge through requestAnimationFrame — N deltas in one frame
@@ -53,6 +54,11 @@ export function scrollPaneToBottom(pane: HTMLElement, threshold: number): void {
 
 const SCROLL_ENTER = 96;
 
+/** Tolerance for the bottom-clamp test below (px): the clamp lands at
+ * scrollTop + clientHeight == scrollHeight exactly, ±1 from integer
+ * rounding on fractional-zoom devices. */
+const CLAMP_TOLERANCE_PX = 2;
+
 interface ScrollFollowState {
   stick: boolean;
   raf: number | null;
@@ -75,13 +81,22 @@ function followState(pane: HTMLElement): ScrollFollowState {
       () => {
         const goingUp = pane.scrollTop < st!.lastTop - 1;
         if (st!.stick) {
-          // While attached, a scroll event has only two sources: the follow
+          // While attached, a scroll event has only THREE sources: the follow
           // scroll itself (programmatic, including the reposition after a burst
-          // of content growth) or the user scrolling DOWN — neither is a detach
-          // intent. The only detach signal is the user scrolling UP. Position-
-          // based checks misjudge after a burst (stale scrollTop vs the grown
-          // scrollHeight) and lose the follow.
-          if (goingUp) {
+          // of content growth), the user scrolling DOWN, or a CLAMP — content
+          // SHRINKING while pinned at the bottom (an incremental streaming
+          // render whose boundary frame nets negative: paragraph commit
+          // reflow, code-fence fold-back removing committed nodes) pulls
+          // scrollTop down to the new scrollHeight - clientHeight and
+          // dispatches a scroll event. A clamp lands EXACTLY on the bottom,
+          // so an event that is both goingUp AND still pinned to the bottom
+          // is the renderer shrinking, not the reader leaving — detaching
+          // here kills the follow mid-stream (the expanded-reasoning bug:
+          // every later delta's scheduleFollow no-ops behind the stick gate
+          // until the user manually scrolls back). A real user scroll-up
+          // leaves the bottom by more than the tolerance at once, or on the
+          // very next wheel tick — the worst case is a one-event detach lag.
+          if (goingUp && !nearBottomPx(pane, CLAMP_TOLERANCE_PX)) {
             st!.stick = false;
             if (st!.raf !== null) {
               cancelAnimationFrame(st!.raf);

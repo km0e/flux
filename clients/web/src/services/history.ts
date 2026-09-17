@@ -100,12 +100,19 @@ function buildLoadEarlierButton(remaining: number): HTMLButtonElement {
  * may sit anywhere in the pane) while `mount` receives the nodes — the
  * earlier-page path builds into a fragment so one insert lands above the
  * current page.
+ *
+ * `callCards` is the earlier-page path's per-page `tool_call_id → card`
+ * registry: the page builds OFF-PANE (into an unmounted fragment), so a
+ * `pane.querySelector` for a card created moments earlier IN THE SAME
+ * page misses — the merge must consult the registry first (the pane
+ * query stays as the fallback for anything the alignment missed).
  */
 function appendHistoryMessage(
   pane: HTMLDivElement,
   mount: ParentNode,
   chatId: string,
   msg: HistoryMessage,
+  callCards?: Map<string, HTMLElement>,
 ): void {
   switch (msg.role) {
     case 'user': {
@@ -155,6 +162,9 @@ function appendHistoryMessage(
           status: 'done',
         });
         mount.appendChild(toolEl);
+        // Register for the same-page result merge (fragment path cannot
+        // find this card through a pane query yet).
+        callCards?.set(tc.id, toolEl);
       }
       break;
     }
@@ -164,10 +174,13 @@ function appendHistoryMessage(
       // tool_calls built cards by id) — consistent with the live path
       // (tool_start builds the card, tool_result fills it): call + result in
       // ONE card instead of an extra anonymous orphan "result" card.
+      // The page registry answers first: on the fragment path the call card
+      // is still unmounted, where the pane query below can never reach it.
       const callCard = msg.tool_call_id
-        ? pane.querySelector<HTMLElement>(
+        ? (callCards?.get(msg.tool_call_id) ??
+          pane.querySelector<HTMLElement>(
             `[data-tool-call-id="${escapeCssSelector(msg.tool_call_id)}"]`,
-          )
+          ))
         : null;
       if (callCard) {
         setToolCardResult(callCard, result);
@@ -221,7 +234,13 @@ function renderEarlierPage(pane: HTMLDivElement, chatId: string): void {
   const button = pane.querySelector('.history-load-earlier');
   const prevHeight = pane.scrollHeight;
   const frag = document.createDocumentFragment();
-  for (const msg of page) appendHistoryMessage(pane, frag, chatId, msg);
+  // Per-page call-card registry: the page builds OFF-PANE (one insert at
+  // the end), so while the loop runs, the tool branch's pane query cannot
+  // see any call card built earlier in this same page — without the
+  // registry every same-page pair degrades into call card + orphan result
+  // card (page-boundary alignment only protects ACROSS pages).
+  const pageCallCards = new Map<string, HTMLElement>();
+  for (const msg of page) appendHistoryMessage(pane, frag, chatId, msg, pageCallCards);
   pane.insertBefore(frag, button ?? pane.firstChild);
   cursor.from = from;
   // Re-anchor: add the grown height so the previously-top message stays

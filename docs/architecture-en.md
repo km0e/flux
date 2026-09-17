@@ -2,37 +2,24 @@
 
 > 中文版: [architecture.md](architecture.md) · Accepted tradeoffs: [decisions-en.md](decisions-en.md)
 >
-> This document describes the actual architecture of Flux. All diagrams use Mermaid (rendered natively by GitHub and the VSCode Markdown preview).
+> This document describes the actual architecture of Flux — present tense only; design rationale lives nearby in implementation and code comments, accepted tradeoffs (T-xx) in [decisions-en.md](decisions-en.md). All diagrams use Mermaid (rendered natively by GitHub and the VSCode Markdown preview).
 
 ## Table of Contents
 
-1. [System Overview](#1-system-overview)
-2. [Repository Layout](#2-repository-layout)
-3. [Backend](#3-backend)
- - 3.1 [Core Concepts: ServerState / Chat / Session](#31-core-concepts-serverstate--chat--session)
- - 3.2 [Lifecycle](#32-lifecycle)
- - 3.3 [Conversation Loop](#33-conversation-loop)
- - 3.4 [Tool System](#34-tool-system)
- - 3.5 [Tool Context & Boundary (no approvals)](#35-tool-context--boundary-no-approvals)
- - 3.6 [Sandbox Semantics: workdir / current_dir](#36-sandbox-semantics-workdir--current_dir)
- - 3.7 [Persistence](#37-persistence)
- - 3.8 [Connect Protocol & Backpressure](#38-connect-protocol--backpressure)
- - 3.9 [Configuration](#39-configuration)
- - 3.11 [Web UI static serving](#311-web-ui-static-serving-webrs)
- - 3.12 [Terminal side channel](#312-terminal-side-channel-wsterm)
-4. [Frontend](#4-frontend)
- - 4.1 [Layered Structure](#41-layered-structure)
- - 4.2 [State Management](#42-state-management)
- - 4.3 [Streaming Render Engine](#43-streaming-render-engine)
- - 4.4 [Build & Test](#44-build--test)
-5. [Key Design Decisions](#5-key-design-decisions)
-6. [Development & Verification](#6-development--verification)
+- [System Overview](#system-overview) — one-line positioning · overall design · the system diagram
+- [Modules](#modules) — the workspace dependency graph + one subsection per crate / the frontend (responsibility · collaboration)
+- [Cross-Cutting Mechanisms](#cross-cutting-mechanisms)
+  - Backend: core concepts / lifecycle / conversation loop / tool system / tool context & boundary / sandbox semantics / persistence / Connect protocol & backpressure / configuration / web UI static serving / terminal side channel
+  - Frontend: layered structure / state management / streaming render / build & test
+- [Key Design Decisions](#key-design-decisions) — the architecture-stance index; accepted tradeoffs (T-xx) live in [decisions-en.md](decisions-en.md)
+- [Development & Verification](#development--verification)
 
 ---
 
-## 1. System Overview
+## System Overview
 
-Flux is a general-purpose coding-agent framework: a local Rust server runs the LLM conversation loop, tool execution, and persistence; a browser Web UI (React + Tailwind, served statically by the server) provides the chat UI and streaming rendering. The two communicate over the Connect protocol (gRPC-Web; `proto/flux/v1` is the single contract source).
+- **One-line positioning**: Flux is a general-purpose coding-agent framework — a local Rust server runs the LLM conversation loop, tool execution, and persistence; a browser Web UI (React + Tailwind, served statically by the server) provides the chat UI and streaming rendering.
+- **Overall design**: client-server, the two communicating over the Connect protocol (gRPC-Web; `proto/flux/v1` is the single contract source); each conversation runs a "pure state machine + two-channel pump" loop — client-server keeps tool execution and persistence in the local process with the UI only rendering, and the pure kernel pushes all I/O to the adapter peers across the channels, buying deterministic conversation semantics, explicit backpressure, and testability (see "Key Design Decisions").
 
 ```mermaid
 flowchart LR
@@ -58,9 +45,9 @@ Key points:
 - **One Subscribe stream multiplexes many chats**: several chats can be active on a single stream; unary RPCs pair natively over HTTP.
 - **Binds `127.0.0.1` by default**; no application-level authentication — remote exposure goes through a reverse proxy (TLS + its own auth).
 
-## 2. Repository Layout
+## Modules
 
-The Cargo workspace contains 11 crates with strictly bottom-up dependencies; the frontend is independent of the workspace.
+The Cargo workspace contains 12 crates (including the dev-only `flux-test-support`, not in the diagram below) with strictly bottom-up dependencies; the frontend is independent of the workspace. One subsection per module: Responsibility = what it owns, Collaboration = what it exchanges with whom (dependency directions in the diagram below).
 
 ```mermaid
 graph LR
@@ -106,23 +93,74 @@ graph LR
  SERVER --> LOOP
 ```
 
-| Crate | Responsibility |
-|---|---|
-| `flux-core` | Kernel contract layer: pure types (`Message` / `Role` / `ToolCall` / `CoreError` / `ErrorCode` / `ChatStateKind`), `WireEvent` (kernel output vocabulary), the kernel I/O vocabulary (`loop_io.rs`: `LoopInput` / `LoopFact` + `RoundOutcome` / `StreamEvent` / `StreamHandle` / `Connection`), the `Tool` trait + `ToolRegistry`, boundary resolution (`boundary::resolve_path`, the implementation behind `ToolCtx::resolve`), the kernel ports (`ToolPort` tool execution + `OutputPort` adapter-side event sink), and the `Provider` session factory (zero I/O; deps: serde, serde_json, strum, thiserror, async-trait, tracing, futures, tokio-util). The proto contract (`flux.v1`) lives in `flux-proto` (build-time generated); flux-session's router is the ONE mapping point from WireEvents to stream elements  |
-| `flux-macros` | `#[derive(Tool)]` proc macro: field-inferred JSON Schema + `call` deserialization; `#[derive(ToolItem)]` generates `item_schema()` for nested array-of-object parameters |
-| `flux-provider` | OpenAI-compatible implementation + SSE parsing, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`) |
-| `flux-tools` | Built-in tools: file / shell / search / Agent Skills (`skill_list` + the skill-format authority: discovery / reads / the catalog section / activation formatting) + the shared subprocess runner |
-| `flux-mcp` | MCP client bridge: spawns external MCP servers (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools; receives server notifications — `tools/list_changed` over BOTH paths (the notification hook + a subscriptions/listen stream, covering spec ≤ 2025-06-18 and 2026-07-28), `notifications/message` logs forwarded to the UI |
-| `flux-store` | SQLite persistence (sqlx, WAL: chats / messages / state / providers / mcp_servers) |
-| `flux-loop` | Conversation kernel: pure state machine (`machine.rs`) + a pure pump driver (`runtime.rs`: consume input, step, forward facts in order) — zero I/O, zero trait objects |
-| `flux-chat` | Session layer · DATA plane: one chat's task machinery (`chat` entity / `domain` state + state tools / `handle` control handle / `spawn` assembly / `round` round consumer — fact fold + flight supervision; `Rebuild` → in-place rebuild at the machine gate, the task never exits) / `tool_exec` flight-supervision library (no task of its own) / `buf` overflow buffer (store-backed) / `skills` chat-owned `skill_read` (activation dedup) + catalog composition / `question` ask-the-user tool / `reserved` reserved-tool-name check). Depends on flux-core ports (`OutputPort`) and flux-tools' skill-format authority — no reverse dependency on the control plane |
-| `flux-session` | Session layer · CONTROL plane: bookkeeping that spans chats and sessions — `manager` (`ServerState`: global config + chat cache + identity registry) / `ops` (lease · subscribe · broadcast) / `router` (WireEvent → proto stream elements) / `lifecycle` (lazy spawn & task replacement) / `identity` (session id & typed sink) |
-| `flux-server` | TCP transport (the Connect surface `/flux.v1.*` + the terminal side channel `/ws/term`), `grpc/*` (the serialization-thin chat/event/management/fs services), wiring, CLI (no config file: flags + `FLUX_*` env fallbacks + `--generate-completions` shell completions), `ProviderRegistry` (provider management: selection / instance building / model probes / endpoint edits (UpdateProvider — persist-first slot swap, then re-resolving the pinned chats' instances; live engines hot-apply at the gate), instances handed to the chat layer), `McpManager` (MCP launch-list management: persist-first + live apply) |
-| `clients/web` | Web UI (the single frontend,): React 19 + Radix UI + Tailwind v4 + zustand, built with Vite |
+### flux-core
 
-## 3. Backend
+- Responsibility: the kernel contract layer — pure types (`Message` / `Role` / `ToolCall` / `CoreError` / `ErrorCode` / `ChatStateKind`), `WireEvent` (kernel output vocabulary), the kernel I/O vocabulary (`loop_io.rs`: `LoopInput` / `LoopFact` + `RoundOutcome` / `StreamEvent` / `StreamHandle` / `Connection`), the `Tool` trait + `ToolRegistry`, boundary resolution (`boundary::resolve_path`, the implementation behind `ToolCtx::resolve`), the kernel ports (`ToolPort` tool execution + `OutputPort` adapter-side event sink), and the `Provider` session factory (zero I/O; deps: serde, serde_json, strum, thiserror, async-trait, tracing, futures, tokio-util). The proto contract (`flux.v1`) lives in `flux-proto` (build-time generated); flux-session's router is the ONE mapping point from WireEvents to stream elements
+- Collaboration: depended on by every other crate, no internal dependencies — the single contract-layer point
 
-### 3.1 Core Concepts: ServerState / Chat / Session
+### flux-macros
+
+- Responsibility: the `#[derive(Tool)]` proc macro: field-inferred JSON Schema + `call` deserialization; `#[derive(ToolItem)]` generates `item_schema()` for nested array-of-object parameters
+- Collaboration: used as a dependency by crates that derive tool schemas (flux-tools and friends)
+
+### flux-proto
+
+- Responsibility: the `flux.v1` contract (`proto/flux/v1`, buf-managed; the STANDARD lint is the naming authority) — the Rust binding generates at cargo build (`flux-proto`, tonic/prost, OUT_DIR), the TS binding derives via the web package's prebuild/pretest hooks (`buf generate`, never committed); CI re-derives + `buf breaking` + freshness checks
+- Collaboration: depended on by flux-session / flux-server (the proto stream-element vocabulary); the TS contract feeds clients/web
+
+### flux-provider
+
+- Responsibility: OpenAI-compatible implementation + SSE parsing, implementing flux-core's `Provider` session factory (each instance is model-pinned; `begin` opens a `Connection`)
+- Collaboration: implements flux-core's `Provider` port; wired up by flux-server
+
+### flux-store
+
+- Responsibility: SQLite persistence (sqlx, WAL: chats / messages / state / providers / mcp_servers)
+- Collaboration: consumed by flux-chat (transcript / buf / state persistence) and flux-server (chats / providers / the MCP launch list)
+
+### flux-tools
+
+- Responsibility: built-in tools: file / shell / search / Agent Skills (`skill_list` + the skill-format authority: discovery / reads / the catalog section / activation formatting) + the shared subprocess runner
+- Collaboration: tools register via `#[derive(Tool)]` into the per-chat `ToolRegistry` that flux-chat assembles; the skill-format authority feeds flux-chat's `skill_read`
+
+### flux-mcp
+
+- Responsibility: MCP client bridge: spawns external MCP servers (the launch list lives in the DB, UI-managed, persist-first + live-apply) and exposes their tools; receives server notifications — `tools/list_changed` over BOTH paths (the notification hook + a subscriptions/listen stream, covering spec ≤ 2025-06-18 and 2026-07-28), `notifications/message` logs forwarded to the UI
+- Collaboration: managed by flux-server's `McpManager`; its tools register as `McpToolWrapper` into the chat registry; MCP changes fan out engine rebuilds
+
+### flux-loop
+
+- Responsibility: conversation kernel: pure state machine (`machine.rs`) + a pure pump driver (`runtime.rs`: consume input, step, forward facts in order) — zero I/O, zero trait objects
+- Collaboration: the pure kernel — consumed by flux-chat's spawn / round (assembly + fact folding)
+
+### flux-chat
+
+- Responsibility: session layer · DATA plane: one chat's task machinery (`chat` entity / `domain` state + state tools / `handle` control handle / `spawn` assembly / `round` round consumer — fact fold + flight supervision; `Rebuild` → in-place rebuild at the machine gate, the task never exits) / `tool_exec` flight-supervision library (no task of its own) / `buf` overflow buffer (store-backed) / `skills` chat-owned `skill_read` (activation dedup) + catalog composition / `question` ask-the-user tool / `reserved` reserved-tool-name check). Depends on flux-core ports (`OutputPort`) and flux-tools' skill-format authority — no reverse dependency on the control plane
+- Collaboration: the data plane — cached and scheduled by flux-session (`CachedChat.task`); no reverse dependency on the control plane
+
+### flux-session
+
+- Responsibility: session layer · CONTROL plane: bookkeeping that spans chats and sessions — `manager` (`ServerState`: global config + chat cache + identity registry) / `ops` (lease · subscribe · broadcast) / `router` (WireEvent → proto stream elements) / `lifecycle` (lazy spawn & task replacement) / `identity` (session id & typed sink)
+- Collaboration: the control plane — wired by flux-server; owns the chat cache, the identity registry, and the router
+
+### flux-server
+
+- Responsibility: TCP transport (the Connect surface `/flux.v1.*` + the terminal side channel `/ws/term`), `grpc/*` (the serialization-thin chat/event/management/fs services), wiring, CLI (no config file: flags + `FLUX_*` env fallbacks + `--generate-completions` shell completions), `ProviderRegistry` (provider management: selection / instance building / model probes / endpoint edits (UpdateProvider — persist-first slot swap, then re-resolving the pinned chats' instances; live engines hot-apply at the gate), instances handed to the chat layer), `McpManager` (MCP launch-list management: persist-first + live apply)
+- Collaboration: the assembly root — composes every crate above; exposes the Connect surface `/flux.v1.*`, the terminal side channel `/ws/term`, and the static site
+
+### flux-test-support
+
+- Responsibility: dev-dependency-only test support — the `test_env_guard!` macro (a pre-main ctor stripping proxy (`http_proxy`…) and `FLUX_*` host variables so proxies cannot hijack loopback requests and env vars cannot poison assertions) + `loopback_client` (a proxy-proof loopback client)
+- Collaboration: may only appear under `[dev-dependencies]` — the guard mutates process-global state and must never reach a production build
+
+### clients/web
+
+- Responsibility: the Web UI (the single frontend): React 19 + Radix UI + Tailwind v4 + zustand, built with Vite
+- Collaboration: its TS contract derives from the proto via `buf generate`; it talks back to the server same-origin over Connect (gRPC-Web) — internals: see Cross-Cutting Mechanisms → Frontend
+
+## Cross-Cutting Mechanisms
+
+### Core Concepts: ServerState / Chat / Session
 
 Three core concepts, three files:
 
@@ -141,7 +179,7 @@ Dependency injection and test seams (trait layers designed for testability):
 - `Provider` factory (flux-core) / `Connection`: `Provider::begin` creates a stateful session; `Connection::open(pending, sink)` pushes parsed stream events into the loop's input channel and returns the `StreamHandle` cancellation capability;
 - `ChatInfoOwned` / `ChatInfoGuard`: zero-copy cache snapshots — take the snapshot, drop the read guard, then serialize and send; **the read lock is never held across I/O or network sends**.
 
-### 3.2 Lifecycle
+### Lifecycle
 
 ```mermaid
 sequenceDiagram
@@ -186,7 +224,7 @@ sequenceDiagram
 
 Both exits set the done flag via a drop guard; a stale handle is replaced lazily by the next `ensure_task` (the rebirth loads the full persisted history). An **engine rebuild is NOT an exit**: the consumer rebuilds in place at the machine gate (see below) — the task ends only when the loop dies or the control channel closes; every other exit keeps the no-crash-supervision philosophy (lazy replacement). Error paths all go through Result: provider/tool errors emit `error{...}` frames, unrelated to the termination machinery; `stream_crashed` remains the default wire code for a StreamError without a specific mapping.
 
-### 3.3 Conversation Loop
+### Conversation Loop
 
 Each chat runs **one pure two-channel loop**: the kernel (`flux_loop::Loop`) consumes `LoopInput` from an input channel, steps the pure state machine, and pushes `LoopFact` (the semantic fact trace) onto a bounded output channel — **zero I/O, zero trait objects**; every collaborator is a channel peer wired by the adapter:
 
@@ -228,16 +266,16 @@ sequenceDiagram
 - **Sequential single-flight tools**: multiple tool calls within one round dispatch strictly one at a time (observable deterministic semantics);
 - **Cancel = a plain queue event**: `Input::Cancel` shares one FIFO channel with messages. While streaming → `Cancelled` wire event wrap-up; while a tool flight runs → interrupt it + the `cancelled` absorption flag (remaining batch voided), wrap up once the interrupted result dual-writes; in Idle a silent no-op; the queue dies with the cancel (stop means stop — the R1 interrupt-send guarantees the cancel-first order: the server writes both inputs back-to-back onto one FIFO, so a turn sent after the cancel still runs);
 - **The machine turn queue (mid-round user turns)**: a `UserMessage` arriving mid-round (streaming / tool flight) is QUEUED, not dropped (FIFO) — it starts in the SAME step that wraps the current round, with the boundary reported step-locally (`RoundState(Idle)` — the loop's transition check cannot emit it because the step re-enters Streaming; a following `RoundState(Streaming)` restores the snapshot truth). The kernel serializes user turns itself: the R1 interrupt-send fuses cancel+message into a single RPC, so the ordering dependency is architecturally gone. Invariant: the machine never rests Idle with a non-empty queue — an armed gate defers to queued rounds (they run pre-gate, inside the pre-rebuild context);
-- **Engine rebuild (the generic restart primitive — the machine gate)**: everything the kernel knows collapses into ONE gate primitive — `Hold` (at Idle the gate fires AND drains in the same step, emitting `GateReleased` directly: nothing is running and everything sent before the decision precedes the Hold in the FIFO; mid-round it arms to engage at wrap-up) and `GateReleased` (the gate fired — queued turns ran pre-gate, inside the pre-rebuild context). Selection and semantics live entirely in the round consumer (see the consumer bullet in 3.3): the mutators (the session layer's SwitchProvider / MCP management / the provider endpoint edit — UpdateProvider swaps the url / api key behind the id and re-resolves the pinned chats' instances) **write the truth sources first** (the pin persists at request time, the global registry mutates) and announce the wire notice, then send `Rebuild` (a provider swap and an endpoint edit carry the fresh instance); the consumer rebuilds IN PLACE at the fired gate — re-assembling the registry and connection over the full persisted history via the SAME assembly path spawn/hydration use, then injecting a pending follow-up. A live round is never interrupted; the change and its effect decouple; the engine never dies for a rebuild, and sends arriving during the rebuild ride the kernel queue (they run pre-gate on the old connection — FIFO-self-consistent). **The gate fire DISCARDS pending** (both fire points: a Hold arriving at Idle, and the armed gate at wrap-up) — the interrupt residue (the voided queued tools' results + the in-flight tool's partial output) is carried by the REBUILT prefix: the gate only fires at Idle/wrap-up where the transcript was just committed, so the full persisted history already contains every pending message; re-sending it would duplicate tool messages (wasted tokens, broken prompt-prefix caching, strict endpoints 400). Queued turns that started BEFORE the gate still deliver the residue — they run on the pre-rebuild connection, whose prefix genuinely lacks it;
+- **Engine rebuild (the generic restart primitive — the machine gate)**: everything the kernel knows collapses into ONE gate primitive — `Hold` (at Idle the gate fires AND drains in the same step, emitting `GateReleased` directly: nothing is running and everything sent before the decision precedes the Hold in the FIFO; mid-round it arms to engage at wrap-up) and `GateReleased` (the gate fired — queued turns ran pre-gate, inside the pre-rebuild context). Selection and semantics live entirely in the round consumer (see the round-consumer bullet in this section): the mutators (the session layer's SwitchProvider / MCP management / the provider endpoint edit — UpdateProvider swaps the url / api key behind the id and re-resolves the pinned chats' instances) **write the truth sources first** (the pin persists at request time, the global registry mutates) and announce the wire notice, then send `Rebuild` (a provider swap and an endpoint edit carry the fresh instance); the consumer rebuilds IN PLACE at the fired gate — re-assembling the registry and connection over the full persisted history via the SAME assembly path spawn/hydration use, then injecting a pending follow-up. A live round is never interrupted; the change and its effect decouple; the engine never dies for a rebuild, and sends arriving during the rebuild ride the kernel queue (they run pre-gate on the old connection — FIFO-self-consistent). **The gate fire DISCARDS pending** (both fire points: a Hold arriving at Idle, and the armed gate at wrap-up) — the interrupt residue (the voided queued tools' results + the in-flight tool's partial output) is carried by the REBUILT prefix: the gate only fires at Idle/wrap-up where the transcript was just committed, so the full persisted history already contains every pending message; re-sending it would duplicate tool messages (wasted tokens, broken prompt-prefix caching, strict endpoints 400). Queued turns that started BEFORE the gate still deliver the residue — they run on the pre-rebuild connection, whose prefix genuinely lacks it;
 - **`stream_end` means**: the assistant message for this round is fully streamed and persisted; the frontend finalizes rendering on receipt; an optional `finish_reason` carries the provider's end reason (`length`/`content_filter` = truncated, shown as a neutral notice). The reason is announced only at round end: a tool round's first `End` reason is dropped by design, and the final `StreamEnd` carries the follow-up stream's own reason (`"stop"` after a normal wrap-up).
 
-### 3.4 Tool System
+### Tool System
 
 ```mermaid
 graph TB
  MACRO["#[derive(Tool, Deserialize)]<br/>field-inferred JSON Schema<br/>call deserializes via the Value pipeline"]
  subgraph IMPL["Implementations"]
- BUILTIN["Built-in tools (flux-tools)<br/>read_file · read_files · edit_file · edit_files · write_file · replace_lines · list_directory<br/>grep · glob · bash<br/>skill_list"]
+ BUILTIN["Built-in tools (flux-tools)<br/>read_file · edit_file · write_file · replace_lines · list_directory<br/>grep · glob · bash<br/>skill_list"]
  STATE["state_get / state_set<br/>(per-chat registry tools,<br/>bound to the StateManager)"]
  SKILL["skill_read<br/>(per-chat registry tool,<br/>bound to the SkillActivationIndex)"]
  MCPT["MCP tools (flux-mcp)<br/>McpToolWrapper — rmcp child-process bridge"]
@@ -255,13 +293,14 @@ graph TB
 - **Tool context + pure execution (no approvals)**: the sandbox boundary (`workdir` / `current_dir`) reaches tools as **invocation context** via `ToolCtx` — the kernel builds the ctx with the cancel token and call id only (it is boundary-agnostic); `Chat` (the ToolPort adapter) fills the boundary fields from authoritative state at dispatch, then calls `tool.call`. Inside the tool, path arguments resolve via `ctx.resolve(path)` (absolute inputs must land inside the boundary; relative inputs join it; nonexistent paths walk to the deepest existing ancestor + tail). Resolve/execution failures are the tool's result string (`Error: {reason}`) — visible to the model, never a round-level block. Tools are pure executors: they never touch the state store; no tool schema carries a boundary parameter — extra LLM keys take no part in parsing, so forged path arguments are structurally inert.
 - **Cooperative cancellation contract**: `Tool::call(arguments, ctx: ToolCtx)` carries the kernel-owned `CancellationToken` — on user interrupt the tool should stop promptly and return its partial output (bash passes it to the shared subprocess runner: kill the process group + drain to preserve partial output; MCP stops waiting on the request). A tool that ignores the token is force-terminated by the kernel after a grace period. Tool results never self-report cancellation — the kernel marks interrupts uniformly. The derive macro threads the ctx into `execute(ctx)`.
 - **Value argument pipeline**: args are `HashMap<String, Value>` end to end — one-step JSON parse; numbers and nested objects pass through untouched (MCP nested parameters arrive intact); tool structs keep strongly typed fields (`read_file`'s `offset`/`limit` remain `usize`, schema stays `integer`) — zero change to the LLM contract. The macro body deserializes via `Value::Object(args)`.
-- **Single source for schema/parsing**: built-in tools are field structs; the macro infers JSON Schema from the fields (including doc comments) and `call` auto-deserializes arguments (failure → `CoreError::InvalidArguments`); `#[tool(skip)]` / `#[tool(required)]` / `Vec<T>` inference kept; `#[serde(default)]` fields stay out of `required`. When a `Vec<Item>` element type is non-primitive, `items` delegates to `<Item>::item_schema()` (generated by `#[derive(ToolItem)]`; a missing derive fails compilation) — the object-array parameters of `read_files`/`edit_files` ride this; item optionality is expressed with `Option<T>` only (`#[serde(default)]` unsupported on item fields). Multi-item fs tool semantics: several operations per call (cap 16 items); `read_files` continues past a failed item; `edit_files` applies same-file edits in listed order (later edits may match text earlier edits introduced) and is **atomic per file** — one failed edit leaves that file unwritten while other files still apply; an all-files-failed call surfaces one error.
+- **Single source for schema/parsing**: built-in tools are field structs; the macro infers JSON Schema from the fields (including doc comments) and `call` auto-deserializes arguments (failure → `CoreError::InvalidArguments`); `#[tool(skip)]` / `#[tool(required)]` / `Vec<T>` inference kept; `#[serde(default)]` fields stay out of `required`. When a `Vec<Item>` element type is non-primitive, `items` delegates to `<Item>::item_schema()` (generated by `#[derive(ToolItem)]`; a missing derive fails compilation) — the object-array parameters of `read_file`'s `ranges` and `edit_file`'s `edits` ride this; item optionality is expressed with `Option<T>` only (`#[serde(default)]` unsupported on item fields). **One-file-many-ops** fs tool semantics: one file per call, the path named once — `read_file` reads the whole file when `ranges` is omitted/empty, multiple windows (≤ 16) each keep their footer, and `=== path ===` headers appear only with 2+ windows; `edit_file` applies 1..=16 edits in listed order (later edits may match text earlier edits introduced) and is **atomic per call** — the edits all apply to an in-memory string and the file is written once at the end, so one failed edit leaves the file untouched and the error names the failing edit's index.
 - **glob bases on `current_dir`**: glob's search root = the ctx's `current_dir` (matching bash's shell-cwd semantics — after the model moves it with `state_set current_dir`, glob follows); bash runs at `ctx.current_dir` (empty → `InvalidArguments`, fail-closed).
+- **Search = ripgrep's library split (grep-* + ignore) + batch calls**: grep uses `grep-regex` (matching) + `grep-searcher` (line-wise, line numbers, binary NUL-quit, context lines) + the `ignore` parallel walker (.gitignore/.ignore/.git/info/exclude semantics, default `require_git`, `hidden(false)` keeps dotfiles searchable, `follow_links(false)` — narrower than the old hand walk: symlinked dirs are not entered); the boundary is still resolved once at entry via `ctx.resolve`. One call takes 1..=8 patterns: single-pattern output stays flat `path:line: text` (legacy format); multi-pattern output groups per pattern with a 200-row soft cap per pattern (a hot pattern cannot starve its siblings) under a 500-row global cap, context lines (`context` 0-5, rendered `path-line- text`) count toward the caps; a single invalid pattern renders as that group's error section (the rest still search), all-invalid fails the call; rows sort by (path, line, document order) — the parallel walk delivers files in no fixed order, sorting keeps output deterministic. The `include` argument goes through OverrideBuilder (gitignore-style glob filtering). Behavior spec: an explicitly given FILE bypasses ignore rules, a DIRECTORY arg respects them (rg semantics; searching ignored dirs goes through bash). glob gains batched `patterns: 1..=8` but keeps its walker (`walk_dir` stays): all patterns compile up front, any invalid one fails the call (a flat list has no per-pattern error slot — a deliberate asymmetry vs grep's isolation), first matching pattern claims the file (dedup). Existing guards kept: 16MB file skip, the 500-char match-centered line window (`truncate_around_match`, called inside the Sink).
 - **Agent Skills (a catalog snapshot in the prompt + progressive disclosure BY TOOLS)**: a skill = a self-contained capability package (a directory with a `SKILL.md`: frontmatter `name`/`description`, body = instructions). Three consumption surfaces share one discovery/format authority (`flux_tools::skills`): (1) the **Tier-1 catalog** — the two begin points (`spawn` / `apply_rebuild`) append a catalog section (name + source + description; per-entry truncation at 1024 chars, total budget 8000 chars, an explicit "…N more" tail note; with no skills the section never appears) AFTER the preamble (prefix caches keep the preamble byte-stable); the catalog is a **snapshot** of the begin point, and the section text says so and points at `skill_list`; (2) `skill_list` scans fresh on every call (no restart semantics) — the live rescan complement to the snapshot and the self-correction path for mid-session installs, budget truncation, and hallucinated names (global skills live OUTSIDE the boundary; this is the model's only way to enumerate them); (3) `skill_read` is **chat-owned** (`flux_chat::skills`, registered like `buf_read`, in the reserved set) — **activation dedup derives from the transcript**: both assembly points derive an activation index from the history (key = name + lexically normalized rel; overflow discriminator = result char count > INLINE_BUDGET, overflowed content read back through buf_entries); a hit (identical normalized-content hash) returns a short note instead of re-injecting (with the buf_read ref when it overflowed), a miss returns the full content and records itself — **no new storage**: fork / rebuild / restart are correct by re-derivation (the store is the only truth, read-side derivation, same as validate_history). Content identity has ONE source = `skill_content`: the manifest counts as its frontmatter-stripped body (metadata was consumed at discovery — editing frontmatter alone still hits), every other file as raw; an activation returns `<skill_content name>` wrapping the body plus a bundled-file listing (shallow symlink-safe walk, capped at 20, paths only — never eagerly loaded; no absolute skill root is surfaced — the name-keyed contract doesn't need it). Locations: project `<workdir>/.flux/skills/` (inside the boundary) + global `~/.flux/skills/` (user-installed trusted content, the same trust tier as MCP servers launched from the DB); on a name collision the project entry wins. `skill_read` is **name-keyed** — the model never passes a path; the requested file resolves relative to the skill root under a strict containment check (canonicalize + prefix, symlink-safe), so a read structurally cannot leave the skill directory;
-- **Output overflow buffer (centralized, anchored, persisted)**: every tool result passes `Chat::bounded_output` — outputs over 8000 chars are written through to the per-chat `buf_entries` table (anchored to the producing tool call's id, `ToolCtx::call_id`) and the tool returns a head + a reference that IS the call id; the model reads the rest with `buf_read {ref, offset, limit}` (char-based paging, pages ≤ 6000 chars, no recursion; read-through to the store). **Never overwritten, no generation wipe**: the reference is self-describing and stable (the transcript carries the same id), so entries survive engine rebuilds AND process restarts with no shell handoff (the in-memory buffer is gone; the store is the only truth); the lifetime equals the chat's lifetime (a transcript only grows — there is no archive boundary, no GC); a FORK copies the entries of the calls its copied transcript carries, keeping `buf_read` references resolvable in the fork; chat deletion cascades. Entries capped at 1M chars. Per-tool caps merged into the central layer: bash 8KB / read_file line-length and total truncation removed; grep keeps its match-window shaping + 500 matches; glob 500. grep paths relative to the search root; read_file footer `end` = last shown line (inclusive), fires at exactly `limit+1` lines remaining;
+- **Output overflow buffer (centralized, anchored, persisted)**: every tool result passes `Chat::bounded_output` — outputs over 8000 chars are written through to the per-chat `buf_entries` table (anchored to the producing tool call's id, `ToolCtx::call_id`) and the tool returns a head + a reference that IS the call id; the model reads the rest with `buf_read {ref, offset, limit}` (char-based paging, pages ≤ 6000 chars, no recursion; read-through to the store). **Never overwritten, no generation wipe**: the reference is self-describing and stable (the transcript carries the same id), so entries survive engine rebuilds AND process restarts with no shell handoff (the in-memory buffer is gone; the store is the only truth); the lifetime equals the chat's lifetime (a transcript only grows — there is no archive boundary, no GC); a FORK copies the entries of the calls its copied transcript carries, keeping `buf_read` references resolvable in the fork; chat deletion cascades. Entries capped at 1M chars. Per-tool caps merged into the central layer: bash 8KB / read_file line-length and total truncation removed; grep keeps its match-window shaping + row caps (single pattern 500 rows; multi-pattern 200 rows per pattern under a 500-row global cap, context lines counted); glob 500. grep paths relative to the search root; read_file footer `end` = last shown line (inclusive), fires at exactly `limit+1` lines remaining;
 - **MCP**: the free function `connect_with_peer` connects external MCP servers (`McpServerConfig` enum: `Stdio` child processes / `Http` Streamable HTTP endpoints — rmcp's `StreamableHttpClientTransport`, custom headers carry auth, `allow_stateless` accepts session-less servers, `reinit_on_expired_session` re-handshakes in-transport on a 404 session expiry; proxies come from the process environment `http_proxy`/`https_proxy`/`all_proxy` — loopback targets are EXEMPT, a `127.0.0.1`/`localhost` endpoint is a local server, the stdio tier's sibling, and must never ride a proxy; 30s init timeout), wraps their tool lists as `McpToolWrapper` (60s per-call timeout); `McpSession` is an RAII keep-alive guard shared by both transports (`QuitReason::Closed` under HTTP is a dropped connection, reconnected by the same supervisor's capped backoff — the transport's in-transport SSE retry / session recovery is the INNER self-healing ring, the supervisor the outer one). The supervisor guards itself with an **entry generation** — every connect (restore / add / respawn) mints a monotonic generation paired with BOTH the entry and its supervisor task, and every entry-mutating step re-checks the pair under the lock: a backoff wake finding the entry removed OR replaced → the old supervisor exits; a respawn adoption DROPS the superseded connect's session (killing the duplicate child) instead of clobbering it; the `tools/list_changed` notice carries the generation, so a stale signal cannot re-register over the current set (adoption also checks the entry BEFORE registering, so a vanished entry can no longer leak its registrations). The remove→re-add race (an id deleted and re-added inside the backoff sleep) therefore structurally cannot produce duplicate sessions, a clobbered empty tool set, or a cancel pointed at the wrong session. The launch list lives in the server database (UI-managed, persist-first + live apply: the `McpManager` holds the global registry reference — a successful connect registers, a removal unregisters exactly the owner's names, then engine rebuilds fan out; a connect failure rides the ack inline and the row stays, a startup failure is skipped with a warning — the UI stays reachable to fix it).
 
-### 3.5 Tool Context & Boundary (no approvals)
+### Tool Context & Boundary (no approvals)
 
 Flux's design stance: **tools execute without user confirmation** — no prompts, no
 remembered allow-lists, no fail-closed default. The old approval layer's duties are
@@ -289,14 +328,14 @@ kernel-marked, and the tool deregisters its own board entry — the map does not
 and a stale answer is dropped as unknown). Esc/close = a neutral `DISMISSED` answer text; the round continues. The
 `id` pairs with the tool call via `ToolCtx.call_id` (filled by the kernel at dispatch).
 
-### 3.6 Sandbox Semantics: workdir / current_dir
+### Sandbox Semantics: workdir / current_dir
 
 - **`workdir` = the sandbox boundary (read-only state)**: carried at chat creation, canonicalized, and persisted into the state table (`list_chats` joins it to deliver `ChatInfo.workdir`); at load the `StateManager` extracts `workdir` into a **fixed field** — it never re-enters the mutable map, and `set("workdir", …)` is refused at the single write point. `state_get` surfaces it read-only through the fixed field (model introspection); cross-project work = a new chat.
 - **`current_dir` = transient shell cwd (writable state)**: seeded with workdir; the model moves it via `state_set`, and it steers bash (spawn cwd) and glob (search root). **Canonicalization at the write point**: the `state_set` tool resolves via `ctx.resolve` (boundary containment) then canonicalizes (must exist — it becomes a spawn cwd), so the stored value and every later use agree on the resolved path (a raw symlinked path on macOS /Users would make file tools' lexical comparisons hard-deny every read — canonical-at-write removes the discrepancy).
 - **Path-resolution security semantics** (`boundary::resolve_path`, single flux-core implementation shared by flux-tools and flux-chat): existing paths canonicalize directly; nonexistent paths walk to the deepest existing ancestor + tail append — the walk explicitly rejects `..`/`.` tail components (`starts_with` does not normalize `..`; never rely on the incidental `None` that `file_name` returns for a `..`-terminated path) and rejects dangling symlinks (`symlink_metadata` distinguishes "exists" from "missing component" — otherwise a later write would follow the link and create the file outside the boundary), covering `..` escapes on **nonexistent paths** (e.g. `a/../../../../etc/new`) and **symlink-ancestor escapes** (e.g. `escape_link/newfile.txt`).
 - **The `state_set` key space is open (by design, do not "fix")**: the schema `enum` lists only the known keys as LLM guidance; the write path does not reject unknown keys — `state_set` doubles as the AI's generic cross-round KV persistence channel (any key readable/writable; `state_get` on an unknown key returns the empty string, symmetric with the open write side). Boundary semantics live solely in the two authoritative keys: `workdir` (read-only) and `current_dir` (canonicalized at write).
 - **Fail-closed default**: with an empty ctx boundary (test scenarios only in practice — production `create_chat` aborts when the workdir cannot be persisted), `resolve` and the empty-boundary checks in bash/glob error out immediately — never a silent fallback to the server process's cwd.
-### 3.7 Persistence
+### Persistence
 
 `flux-store`: sqlx `SqlitePool` (WAL, 4 connections). Per-connection PRAGMAs: `journal_mode=WAL`, `synchronous=NORMAL`, `foreign_keys=ON`, `busy_timeout=5000`, `cache_size=-65536`, `mmap_size=268435456`, `temp_store=MEMORY`, `wal_autocheckpoint=2000`. Opening ensures `auto_vacuum=INCREMENTAL` once (a legacy NONE-mode database's rebuild VACUUM runs at open, before the listener binds); `PRAGMA optimize` at startup; conditional `incremental_vacuum` hourly (freelist ≥ 1000 pages, a short normal write transaction — no whole-db VACUUM lock window while serving).
 
@@ -370,7 +409,7 @@ Key points:
 - State is stored as pre-serialized JSON strings, loaded via tolerant deserialization;
 - Usage is not persisted: a `usage` event rides every round and the frontend accumulates compact ↑/↓/R/W totals.
 
-### 3.8 Connect Protocol & Backpressure
+### Connect Protocol & Backpressure
 
 **Protocol surface**: `proto/flux/v1` (buf-managed; the STANDARD lint is the naming authority) is the ONE contract source — the Rust binding generates at cargo build (`flux-proto`, tonic/prost, OUT_DIR), the TS binding derives via the web package's prebuild/pretest hooks (`buf generate`, never committed); CI re-derives + `buf breaking` + freshness checks. Transport = **gRPC-Web over HTTP/1.1** (tonic-web mounted on the same axum router; the browser talks `@connectrpc/connect-web`), single-port coexistence with the static site.
 
@@ -407,7 +446,7 @@ Key points:
 
 **File explorer**: the sidebar Files tab shows the active chat's workdir tree — react-arborist (Radix has no tree; a mature React tree ships keyboard navigation/virtualization/a11y), directories lazy-load on first expand (`onToggle` → `FsList`, children=null as the unloaded marker) + a toolbar (the tree root's name — the full workdir rides the chat header — manual refresh button + fixed 15s auto-refresh — loaded dirs re-list in place, expansion preserved) + the right-dock `FsRead` read-only preview (`.md` files render through the shared markdown pipeline with a Raw toggle; the truncated badge carries a size hint — the server reports the full `size`, 256KB budget, line-aligned UTF-8-safe cut); browse/read failures surface on the unified toast stack (`Toasts.tsx`) — rows and panes keep neutral placeholders; drag-and-drop disabled (this is a browser, not a file manager). Entries carry git working-tree status (`fsbrowse` runs `git status --porcelain -z` per listing on the blocking pool — pathspec-limited to the listed subtree, collapsed untracked dirs via `-unormal` so node_modules-scale trees never explode the output, and a listed dir that is itself untracked marks every entry: files take their own state, directories aggregate their subtree's strongest signal; name coloring + M/A/U/C letter badges, refreshed with the tree).
 
-### 3.9 Configuration
+### Configuration
 
 **The server has NO config file** — everything is a CLI flag (process level) or the server database (entity level, UI-managed):
 
@@ -424,7 +463,7 @@ Database-resident entities are managed from the UI (Connect RPCs; failures ride 
 
 Workdir note: chat creation accepts ANY directory readable by the server process (the server runs with the starting user's permissions; the UI's directory picker browses accordingly; real isolation is the OS/container's job, rationale lives next to the code).
 
-### 3.10 Web UI static serving (`web.rs`)
+### Web UI static serving (`web.rs`)
 
 The browser host is another viewer/lease holder: the page connects back over the Connect surface (same
 protocol, same lease model) and tools always execute inside the server process. The static
@@ -452,7 +491,7 @@ carries everything**: the Connect services (`/flux.v1.*`), the terminal side cha
  runs on plain http, without it the same-origin favicon is CSP-blocked). No startup
  validation of the build/override layout (T-14): an incomplete build surfaces at request time —
  index 500/404 + a warn log, missing assets 404. The build emits code-split multi-chunk
- output (entry + hljs prefetch + Files tree on demand, see §4.4); dist/index.html's asset
+ output (entry + hljs prefetch + Files tree on demand, see "Frontend: Build & Test"); dist/index.html's asset
  references are injected by vite;
 - **build.rs driving** (Meilisearch-style): rust-embed's macro expansion REQUIRES the
  folder to exist in ALL modes; embedded mode expands to per-file `include_bytes!` (cargo
@@ -481,7 +520,7 @@ The workdir picker: chat creation accepts any resolvable directory (the
 server runs with the starting user's permissions; real isolation is the OS/container's
 job). The UI browses/previews the filesystem over `fs_list` / `fs_read`.
 
-### 3.11 Terminal side channel (`/ws/term`)
+### Terminal side channel (`/ws/term`)
 
 MULTIPLE interactive terminals per chat (added on demand via the dock — its tab strip's "+" or the empty state's New-terminal action;
 the sidebar button — never auto-spawned): e4pty allocates the PTY server-side
@@ -511,9 +550,7 @@ upgrade route `/ws/term`.
  down survivors (master close → SIGHUP). Not persisted, out of the kernel, no lease
  gate (same-origin trust — a UI affordance for the human, not a model tool).
 
-## 4. Frontend
-
-### 4.1 Layered Structure
+### Frontend: Layered Structure
 
 The single frontend lives in `clients/web/` — dependencies point **inward** (upper → lower;
 lower layers have zero UI dependency):
@@ -670,14 +707,14 @@ exit-code status line for diagnosis; the theme re-reads the `--fx-*` tokens on `
  tap targets hold a 36px floor (40px primary; e2e pins the geometry at 390×844); PWA manifest +
  theme-color, deliberately NO service worker (the app is server-bound; caching only risks
  stale assets).
-- During streaming the code **bypasses React and mutates the DOM imperatively** (a performance boundary — see section 4.3).
+- During streaming the code **bypasses React and mutates the DOM imperatively** (a performance boundary — see "Frontend: Streaming render").
 
-### 4.2 State Management
+### Frontend: State Management
 
 A zustand store `useFlux` (`core/state.ts`,): `chats`, `activeChatId`, `connectionStatus`, `usage`, `streaming`, `scrollBtnVisible`, `loadedChatId`, `readonlyChats` (read-only mark from busy degradation — drives the viewer bar), `leaseSwitch` (a lease handover in flight — suppresses the In-use badge flicker on the departed row), `toasts` (unified error stack, `pushToast`/`dismissToast` — kind+text dedupe + cap 4), `sidebarOpen`/`sidebarWidth` (collapsible sidebar, persisted in localStorage via `core/prefs.ts`), `dockOpen`/`openFiles`/`activeDockTab` (the right dock: visibility, multi-file tabs, active tab), `previewWidth` (dock width, persisted in prefs), `providers`/`providerModels`/
 `providerProbeErrors`/`savedModels` (the registry + its probed model catalogs and failure marks + the LOCAL saved models — preloaded at session attach (`handlers.session_resumed`, re-pulled on reconnect); pickers read saved first, then the catalog), `mcpServers`/`mcpNotices`/`mcpNoticesUnread` (the MCP launch list + the notice bell's ring), `skills`, `backgroundEvents` (background attention for the document title — the "(n)" prefix; only hidden-tab events count), the search projection (`searchOpen`/`searchMatches`/`searchCurrent` — the service owns the ranges and the observer, the store carries only the count projection), `paletteOpen`/`shortcutsOpen` (the command palette's and the shortcuts sheet's visibility), `theme` (the theme CHOICE — promoted out of useTheme's local useState: the palette's cycle action and the TopBar button are two triggers of ONE choice; the choice persists here, what the choice DOES — the data-theme flip + the terminal palette re-read — lives in `services/theme.ts`, so a store action never touches the DOM), and `settingsOpen`/`settingsTab` (the settings dialog's open flag + the "open AT section" one-shot intent, null = the last-visited memory — lifted from TopBar local state so the command palette can drive it; consumed once). **`document.title` is a state surface** (`services/title.ts`): `(n) {chat name|Flux} — working… — Flux`, written on state transitions only (one transition-gated subscription in mount); the counter clears when the page becomes visible again. **Composer drafts** (`services/drafts.ts`): switching conversations no longer loses the half-typed message — pending text is saved when the composer unmounts (a switch away) and restored on return (a fork's redo-turn prefill wins), keyed by chat id, LRU-capped at 64, write-through to sessionStorage (a page reload restores too); writes only on save/clear, deletion paths prune by id. Terminal sessions do NOT go through the store (high-frequency I/O) — they live in a per-chat Map in `services/terminal.ts`. Components subscribe via selectors (`useFlux((s) => s.chats)`); the imperative services read/write through `useFlux.getState` and store actions — store actions own the derived logic (`setStreaming` converges the scroll button, `deleteChat` prunes every per-chat record). **`DispatchContext.state` must be wired as a getter** — zustand `setState` replaces the state object, so a snapshot taken at mount would read stale fields forever. High-frequency streaming data (deltas, DOM) does **not** go through the store — it flows through the imperative channel.
 
-### 4.3 Streaming render (rAF-coalesced + structural anti-jump)
+### Frontend: Streaming render (rAF-coalesced + structural anti-jump)
 
 Reception and rendering are **decoupled by exactly one animation frame** (P0-1): stream deltas
 only append to the raw buffer (`body.dataset.raw` / thinking content) and schedule a
@@ -724,10 +761,12 @@ Core invariants (`services/stream-controller.ts` StreamController + `lib/render.
  `<pre><code>` blocks + copy button + language badge (`pre.has-code-lang` reserves top
  padding so the badge never covers the first line) + `.table-wrap`;
 - **Scroll follow (stick state machine + rAF merge)**: the render frame calls
- `scheduleFollow` — at most one scroll per paint (behavior auto); attached: leaving
- bottom-8px or scrolling up detaches AND cancels the pending frame; scrolling down into
- bottom-96px re-attaches; content growth while detached is never a detach signal (bursts
- do not drop the follow);
+ `scheduleFollow` — at most one scroll per paint (behavior auto); attached: scrolling up
+ AND off the bottom (2px tolerance) detaches AND cancels the pending frame — a bottom
+ clamp (content shrinking while pinned pulls scrollTop down and fires a scroll event
+ that reads as up-scroll) is NOT a detach, so a negative-net streaming render never
+ drops the follow; scrolling down into bottom-96px re-attaches; content growth while
+ detached is never a detach signal (bursts do not drop the follow);
 - **140ms paragraph float-in**: only `:last-child` plays `paraIn` (with append-only parts,
  only the newly appended wrapper is new — older paragraphs never re-animate); thinking
  blocks and tool cards carry the same entry animation;
@@ -741,8 +780,24 @@ dimension, so a single stream element never swells into a multi-KB render spike.
 Reasoning (thinking) runs through the same pipeline as an independent segment; text after
 thinking creates a new block, and text resuming after thinking starts a fresh bubble.
 
-**Switch-back fast path** (`services/history.ts` + `services/panes.ts`): `chat_close` =
-unsubscribe + release, so switching BACK to an open chat re-claims and the server
+Two scaling guardrails for history and tool results (`services/history.ts` +
+`lib/dom.ts`):
+
+- **Tail-first history pagination**: the first render lays down only the LAST page (60
+  messages; the page start aligns to a user message — an assistant→tool pair never
+  straddles a page), older pages prepend on demand via "Load earlier messages" (one
+  fragment insert + scrollHeight-delta scroll-anchor compensation, the reading position
+  never moves; the call-card→result merge resolves through a PER-PAGE REGISTRY — a pane
+  query cannot reach a card still inside the unmounted fragment, so per-page registry +
+  cross-page alignment together keep call and result in one card); round artifacts
+  rebuilding still consumes the full snapshot, unaffected by DOM pagination;
+- **Lazy tool-result materialization**: result strings live in a WeakMap registry, the
+  collapsed card carries zero result DOM (the copy button still works — it reads the
+  registry, not a `<pre>`); the `<pre>` builds on the card's FIRST expansion, results
+  arriving while expanded materialize immediately. The per-card cap is guaranteed by the
+  server's inline budget (~8000 chars); the client does not truncate again.
+
+**Switch-back fast path** (`services/history.ts` + `services/panes.ts`): `chat_close` =unsubscribe + release, so switching BACK to an open chat re-claims and the server
 re-delivers the FULL snapshot; `renderHistoryMessages` fingerprints the rendered snapshot
 per pane (message count + last row id/content-length — the transcript is append-only) and
 skips the whole teardown+rebuild when the incoming snapshot is identical — DOM, scroll
@@ -754,7 +809,7 @@ transition midpoint, and the background bleeding through read as a flash; a popu
 pane reveals instantly (the old pane dissolves on top of it — a true crossfade), only a
 blank pane (first open, awaiting its snapshot) keeps the fade-in.
 
-### 4.4 Build & Test
+### Frontend: Build & Test
 
 | Tool | Purpose |
 |---|---|
@@ -766,9 +821,9 @@ blank pane (first open, awaiting its snapshot) keeps the fade-in.
 
 Connection management (`ConnectConnection`): the session-scoped Subscribe stream anchors the identity (the stored token rides the open — adoption in the handshake; ready = authoritative identity + leases); stream elements translate onto the existing handler vocabulary (R2 snapshot reconciliation: gated content strictly below the snapshot's seq is dropped, type-scoped); ClientMessages translate onto the ChatService RPCs (lease-gate statuses synthesize the error frames — the handlers stay transport-blind). Reconnection: exponential backoff 2s→30s (5 retries), a `connecting` guard prevents concurrent connects. The send gate rides a STREAM-ATTACHED flag (set by `ready`; cleared by connect/disconnect/dispose) — sends during the disconnect window and the connect window queue and flush in order after ready (the banner's "queued messages will be sent on reconnect" is delivered by the implementation); an in-flight send that loses the stream re-queues on a bare transport failure (definitive statuses still map to their error frames), and the flush loop carries an attachment guard (failed sends re-queue themselves, so the loop cannot spin). Half-open detection = the frame deadline (90s vs the server's 30s keepalives).
 
-## 5. Design-Decision Index
+## Key Design Decisions
 
-These mechanisms are deliberate design choices. This section is an index plus present-tense supplements only — design rationale lives next to the implementation and in code comments:
+These mechanisms are deliberate architecture-level design choices. This section is an index plus present-tense supplements only — design rationale lives next to the implementation and in code comments; accepted tradeoffs (`T-xx`, referenced across the repo) live in [decisions-en.md](decisions-en.md):
 
 | Decision | One line |
 |----------|----------|
@@ -800,11 +855,11 @@ These mechanisms are deliberate design choices. This section is an index plus pr
 | Web single package | `clients/web` is the single frontend; dialogs as first-class components |
 | Streaming render pipeline | rAF coalescing + append-only paragraphs + incremental splitting + sticky scroll machine |
 
-**Performance boundaries**: the imperative DOM layer's per-frame cost constraints are in §4.3; backend hot paths — the provider's prefix/suffix history serialization cache, the `SseParser` chunk state machine, transactional batch `append_messages`, sequential single-flight tool semantics.
+**Performance boundaries**: the imperative DOM layer's per-frame cost constraints are in "Frontend: Streaming render"; backend hot paths — the provider's prefix/suffix history serialization cache, the `SseParser` chunk state machine, transactional batch `append_messages`, sequential single-flight tool semantics.
 
 **Test seams**: `OutputPort`/`SessionSink` (the typed-element sink), the `Provider` factory/`Connection`, zero-copy snapshots — these trait layers serve testability.
 
-## 6. Development & Verification
+## Development & Verification
 
 ```bash
 # Full validation (fmt → clippy -D warnings → cargo test → tsc → vitest → vite build)
